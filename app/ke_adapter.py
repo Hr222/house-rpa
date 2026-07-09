@@ -11,6 +11,7 @@
 """
 import asyncio
 import logging
+import random
 import time
 import urllib.parse
 from pathlib import Path
@@ -24,8 +25,63 @@ from app.models import PlatformResult, Listing, DealRecord
 
 log = logging.getLogger(__name__)
 
+
+async def _human_delay(min_s=2.0, max_s=5.0):
+    """模拟真人操作间隔（随机延时）。"""
+    await asyncio.sleep(random.uniform(min_s, max_s))
+
+
+async def _get_element_center(page, selector: str):
+    """用 JS 读取元素的屏幕坐标（只读坐标，不触发操作）。返回 (x, y) 或 None。"""
+    result = await page.evaluate(f"""
+        (() => {{
+            const el = document.querySelector('{selector}');
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) return null;
+            // 加随机偏移（真人不会每次点正中心）
+            const x = r.left + r.width * (0.3 + Math.random() * 0.4);
+            const y = r.top + r.height * (0.3 + Math.random() * 0.4);
+            return {{x: x, y: y, visible: r.bottom > 0 && r.right > 0}};
+        }})()
+    """, return_by_value=True)
+    if not result:
+        return None
+    dsv = result.deep_serialized_value.value if hasattr(result, 'deep_serialized_value') and result.deep_serialized_value else result
+    if isinstance(dsv, dict) and dsv.get('visible'):
+        return dsv['x'], dsv['y']
+    return None
+
+
+async def _human_click(page, selector: str):
+    """严格模拟真人鼠标点击：JS读坐标 → CDP mouseMoved → mousePressed → mouseReleased。
+    禁止 JS .click()，只用 CDP Input 事件。"""
+    center = await _get_element_center(page, selector)
+    if not center:
+        log.warning("  [点击] 找不到/不可见: %s", selector)
+        return False
+    x, y = center
+    # 先移动鼠标到目标（真人移动）
+    await page.send(cdp.input_.dispatch_mouse_event(
+        type_="mouseMoved", x=x, y=y))
+    await asyncio.sleep(random.uniform(0.05, 0.15))
+    # 按下
+    await page.send(cdp.input_.dispatch_mouse_event(
+        type_="mousePressed", x=x, y=y,
+        button=cdp.input_.MouseButton.LEFT, click_count=1))
+    await asyncio.sleep(random.uniform(0.04, 0.12))  # 真人按下到松开的间隔
+    # 释放
+    await page.send(cdp.input_.dispatch_mouse_event(
+        type_="mouseReleased", x=x, y=y,
+        button=cdp.input_.MouseButton.LEFT, click_count=1))
+    log.info("  [点击] %s @ (%.0f, %.0f)", selector, x, y)
+    return True
+
 # debug 落盘目录
 DEBUG_DIR = Path(__file__).parent.parent / "debug"
+
+# 浏览器路径（从 config 取，adapter 对外暴露方便测试脚本用）
+BROWSER_PATH = config.BROWSER_PATH
 
 
 async def _dump_html(page, name: str):
@@ -64,6 +120,30 @@ def _pick_segments(area_min: float, area_max: float) -> List[str]:
     return segs
 
 
+async def _type_text_human(page, text: str):
+    """模拟真人逐字符输入（每个字 keyDown+char+keyUp，带随机间隔）。"""
+    for ch in text:
+        await page.send(cdp.input_.dispatch_key_event(
+            type_="keyDown", text=ch, key=ch))
+        await page.send(cdp.input_.dispatch_key_event(
+            type_="char", text=ch, key=ch))
+        await page.send(cdp.input_.dispatch_key_event(
+            type_="keyUp", key=ch))
+        await asyncio.sleep(random.uniform(0.08, 0.2))  # 真人打字间隔
+
+
+async def _press_enter(page):
+    """模拟真人回车。"""
+    await page.send(cdp.input_.dispatch_key_event(
+        type_="rawKeyDown", key="Enter", code="Enter",
+        windows_virtual_key_code=13, native_virtual_key_code=13))
+    await page.send(cdp.input_.dispatch_key_event(
+        type_="char", key="Enter", code="Enter"))
+    await page.send(cdp.input_.dispatch_key_event(
+        type_="keyUp", key="Enter", code="Enter",
+        windows_virtual_key_code=13, native_virtual_key_code=13))
+
+
 async def _evaluate(page, js: str):
     """执行 JS 并取真实值（处理 nodriver 的 RemoteObject 包装）。"""
     result = await page.evaluate(js, return_by_value=True)
@@ -78,28 +158,16 @@ async def _refresh(page):
     """第5步：刷新界面（保活插口，后面接定时保活逻辑）。"""
     log.info("[5] 刷新界面（保活）")
     await page.evaluate("location.reload()", return_by_value=True)
-    await asyncio.sleep(3)
+    await _human_delay(2, 4)
 
 
 async def _click_more_options(page):
-    """第6步：点击"更多选项"展开。"""
+    """第6步：真人点击"展开全部"。"""
     log.info("[6] 点击更多选项展开")
-    await page.evaluate("""
-        (() => {
-            const btn = document.querySelector('.btn-showmore')
-                    || document.querySelector('[class*="showmore"]');
-            if (btn) { btn.click(); return 'ok'; }
-            // 兜底：找文字
-            const all = document.querySelectorAll('span, div, a');
-            for (const el of all) {
-                if ((el.innerText||'').trim() === '更多' && el.className.includes('showmore')) {
-                    el.click(); return 'ok-text';
-                }
-            }
-            return 'not found';
-        })()
-    """, return_by_value=True)
-    await asyncio.sleep(1.5)
+    ok = await _human_click(page, '.btn-showmore')
+    if not ok:
+        log.info("  更多选项可能已展开或不可见，跳过")
+    await _human_delay(1.5, 3)
 
 
 async def _get_html(page) -> str:
@@ -149,7 +217,7 @@ async def _do_collect(browser, main_page, community_name: str,
         if durl:
             detail_url = durl
         if len(segs) > 1:
-            await asyncio.sleep(3)  # 多档位之间间隔，降风控
+            await _human_delay(3, 5)  # 多档位之间间隔，模拟真人
 
     # 第9步结果：在售房源单价列表
     log.info("[9] 在售单价共 %d 条", len(all_unit_prices))
@@ -158,8 +226,9 @@ async def _do_collect(browser, main_page, community_name: str,
     community_avg = None
     deal_prices = []
     if detail_url:
-        community_avg, deal_prices = await _fetch_detail(
-            browser, detail_url, area_min, area_max)
+        # 第10步：真人点击"查看小区详情"（target=_blank 会新开tab）
+        community_avg, deal_prices = await _fetch_detail_by_click(
+            browser, main_page)
 
     listings = [Listing(unit_price=p) for p in all_unit_prices if p]
     deals = [DealRecord(unit_price=p) for p in deal_prices if p]
@@ -176,36 +245,47 @@ async def _search_one_segment(page, community_name: str, seg: str):
     """第8步：在一个档位上搜索小区，返回 (单价列表, 详情链接)。"""
     log.info("[8] 搜索: 小区=%s 档位=%s", community_name, seg)
 
-    # 清空 + 输入小区名（CDP 真实输入）
+    # 清空搜索框（JS 只清值）+ 真人点击搜索框聚焦
     await page.evaluate("""
         (() => {
             const inp = document.querySelector('#searchInput');
-            if (inp) { inp.value = ''; inp.focus(); }
+            if (inp) inp.value = '';
         })()
     """, return_by_value=True)
-    await asyncio.sleep(0.3)
-    await page.send(cdp.input_.insert_text(text=community_name))
-    await asyncio.sleep(1.5)
+    await _human_click(page, '#searchInput')  # 真人点击搜索框聚焦
+    await _human_delay(0.5, 1.5)
 
-    # 回车搜索（CDP 真实按键）
-    await page.send(cdp.input_.dispatch_key_event(
-        type_="rawKeyDown", key="Enter", code="Enter",
-        windows_virtual_key_code=13, native_virtual_key_code=13))
-    await page.send(cdp.input_.dispatch_key_event(
-        type_="keyUp", key="Enter", code="Enter",
-        windows_virtual_key_code=13, native_virtual_key_code=13))
-    await asyncio.sleep(4)
+    # 逐字符输入小区名（真人打字）
+    await _type_text_human(page, community_name)
+    await _human_delay(1, 2)
 
-    # 搜索结果URL里加档位（点档位筛选）
+    # 验证输入进去了
+    val = await _evaluate(page, "document.querySelector('#searchInput').value")
+    log.info("  搜索框值: %s", val)
+    if not val or val == "":
+        log.warning("  ⚠️ 搜索框为空，输入可能失败")
+        # 兜底：JS 设值
+        await page.evaluate(f"""
+            const inp = document.querySelector('#searchInput');
+            const setter = Object.getOwnPropertyDescriptor(
+                HTMLInputElement.prototype, 'value').set;
+            setter.call(inp, '{community_name}');
+            inp.dispatchEvent(new Event('input', {{bubbles: true}}));
+        """, return_by_value=True)
+        await _human_delay(1, 2)
+
+    # 回车搜索
+    await _press_enter(page)
+    await _human_delay(3, 5)
+
     cur_url = page.target.url
     log.info("  搜索后URL: %s", cur_url)
     await _dump_html(page, f"08_search_{seg}")
 
-    # 从搜索结果提取小区ID，拼档位URL重新访问
+    # 从搜索结果提取小区ID
     html = await _get_html(page)
     detail_url = parsers.find_detail_link(html)
 
-    # 提取小区ID
     xiaoqu_id = None
     if detail_url:
         import re
@@ -214,14 +294,15 @@ async def _search_one_segment(page, community_name: str, seg: str):
             xiaoqu_id = m.group(1)
 
     if xiaoqu_id:
-        # 按档位 + 小区ID 访问
+        # 按档位 + 小区ID 访问（在当前tab）
         seg_url = f"https://sz.ke.com/ershoufang/{seg}c{xiaoqu_id}/"
         log.info("  档位筛选: %s", seg_url)
         await page.goto(seg_url, wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(3)
+        await _human_delay(2, 4)
         html = await _get_html(page)
         if not detail_url:
             detail_url = parsers.find_detail_link(html)
+        await _dump_html(page, f"08b_segment_{seg}")
 
     # 第9步：抓单价
     raw = parsers.parse_listings(html)
@@ -230,26 +311,49 @@ async def _search_one_segment(page, community_name: str, seg: str):
     return prices, detail_url
 
 
-async def _fetch_detail(browser, detail_url: str,
-                        area_min: float, area_max: float):
-    """第10~12步：新tab抓详情页。返回 (小区均价, 成交单价列表)。"""
-    log.info("[10] 打开详情页: %s", detail_url)
-    detail_tab = await browser.get(detail_url, new_tab=True)
-    try:
-        await asyncio.sleep(3)
-        html = await _get_html(detail_tab)
+async def _fetch_detail_by_click(browser, main_page):
+    """第10~12步：真人点击'查看小区详情'打开新tab，抓均价+成交单价。"""
+    log.info("[10] 真人点击'查看小区详情'")
 
-        # 第11步：小区均价 + 成交记录单价
-        community_avg = parsers.parse_community_avg_price(html)
-        raw_deals = parsers.parse_deals(html)
-        deal_prices = [d["unit_price"] for d in raw_deals if d.get("unit_price")]
-        log.info("[11] 小区均价=%s, 成交单价=%d条", community_avg, len(deal_prices))
-        await _dump_html(detail_tab, "11_detail")
+    # 记录当前 tab 数量（点击后新 tab 会增加）
+    old_tabs = len(browser.tabs)
+    # 真人点击 agentCardResblockLink（target=_blank 新开tab）
+    clicked = await _human_click(main_page, 'a.agentCardResblockLink')
+    if not clicked:
+        log.warning("  [10] 未找到'查看小区详情'链接")
+        return None, []
+    await _human_delay(3, 5)
 
-        return community_avg, deal_prices
-    finally:
-        # 第15步：详情tab定时停留后关闭（后台，不阻塞）
-        asyncio.create_task(_close_tab_after_linger(detail_tab))
+    # 找新开的 tab
+    detail_tab = None
+    if len(browser.tabs) > old_tabs:
+        detail_tab = browser.tabs[-1]  # 新 tab 是最后一个
+    else:
+        # 兜底：按 URL 找 xiaoqu 的 tab
+        for t in browser.tabs:
+            if '/xiaoqu/' in (t.target.url or ''):
+                detail_tab = t
+                break
+
+    if not detail_tab:
+        log.warning("  [10] 未找到新开的详情页tab")
+        return None, []
+
+    # 等详情页加载
+    await _human_delay(2, 4)
+    html = await _get_html(detail_tab)
+
+    # 第11步：小区均价 + 成交记录单价
+    community_avg = parsers.parse_community_avg_price(html)
+    raw_deals = parsers.parse_deals(html)
+    deal_prices = [d["unit_price"] for d in raw_deals if d.get("unit_price")]
+    log.info("[11] 小区均价=%s, 成交单价=%d条", community_avg, len(deal_prices))
+    await _dump_html(detail_tab, "11_detail")
+
+    # 第15步：详情tab定时停留后关闭（后台，不阻塞返回）
+    asyncio.create_task(_close_tab_after_linger(detail_tab))
+
+    return community_avg, deal_prices
 
 
 async def _close_tab_after_linger(tab):

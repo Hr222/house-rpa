@@ -3,7 +3,11 @@
 
 # 贝壳深圳站
 KE_HOME = "https://sz.ke.com/"
+KE_ERSHOUFANG = "https://sz.ke.com/ershoufang/"  # 二手房页面（常驻目标页）
 KE_CITY = "sz"
+
+# 浏览器路径（nodriver 驱动系统 Edge）
+BROWSER_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 
 # 风控规避参数
 DETAIL_TAB_LINGER_SECONDS = 60     # 详情页标签停留时长（模拟真人浏览）
