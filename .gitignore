@@ -13,6 +13,13 @@ __pycache__/
 .venv/
 venv/
 env/
+.pytest_cache/
+
+# 调试产物
+debug/
+*.html
+*.png
+resp_header.txt
 
 # 日志与临时
 logs/
