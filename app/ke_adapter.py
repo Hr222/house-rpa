@@ -54,15 +54,16 @@ async def _get_html(tab) -> str:
         "document.documentElement.outerHTML", return_by_value=True)
 
 
-async def collect(browser, community_name: str, area: float,
+async def collect(browser, community_name: str, area_min: float, area_max: float,
                   xiaoqu_id: Optional[str] = None) -> PlatformResult:
     """在已登录的浏览器上执行贝壳采集。返回单平台结果。
 
     browser: nodriver.Browser（已登录的常驻浏览器）
+    area_min/area_max: 后端给定的面积区间，用于成交记录筛选
     """
     start = time.time()
     try:
-        return await _do_collect(browser, community_name, area, xiaoqu_id)
+        return await _do_collect(browser, community_name, area_min, area_max, xiaoqu_id)
     except asyncio.TimeoutError:
         return PlatformResult(name="贝壳", status="TIMEOUT", reason="采集超时")
     except Exception as e:
@@ -72,10 +73,12 @@ async def collect(browser, community_name: str, area: float,
         log.info("贝壳采集耗时 %.1fs", time.time() - start)
 
 
-async def _do_collect(browser, community_name: str, area: float,
+async def _do_collect(browser, community_name: str, area_min: float, area_max: float,
                       xiaoqu_id: Optional[str]) -> PlatformResult:
     # --- Step 1: 搜索页（新 tab）---
-    seg = _pick_area_segment(area)
+    # 搜索 URL 用区间中点对应的贝壳面积档位（页面只支持档位）
+    mid_area = (area_min + area_max) / 2
+    seg = _pick_area_segment(mid_area)
     if xiaoqu_id:
         search_url = f"https://sz.ke.com/ershoufang/{seg}c{xiaoqu_id}/"
     else:

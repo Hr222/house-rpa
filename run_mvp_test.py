@@ -1,11 +1,7 @@
 # -*- coding: utf-8 -*-
-"""RPA 侧模拟测试脚本（nodriver 版，不走后端接口）。
+"""RPA 侧模拟测试脚本（nodriver 版）。
 
-流程：
-  1. 启动 Edge（nodriver，反检测）→ 打开贝壳 → 人工登录
-  2. 登录确认后，输入 {小区名, 面积}
-  3. 自动执行：搜小区 → 筛面积 → 抓报价 → 进详情页抓均价+成交 → 算最终单价
-  4. 打印完整结果
+固定测试数据，零交互：启动 → 人工登录 → 回车 → 自动跑完 → 打印结果。
 
 用法：
   python run_mvp_test.py
@@ -24,16 +20,22 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("mvp_test")
 
+# ===== 固定测试数据（改这里就能换小区测）=====
+TEST_COMMUNITY = "绿景虹湾"
+TEST_AREA_MIN = 70.0
+TEST_AREA_MAX = 90.0
 
-async def run_inquiry(browser, community_name: str, area: float) -> dict:
+
+async def run_inquiry(browser, community_name: str,
+                      area_min: float, area_max: float) -> dict:
     """执行一次完整询价，返回结果 dict。"""
     start = time.time()
     log.info("="*60)
-    log.info("询价: 小区=%s, 基准面积=%.1f㎡", community_name, area)
+    log.info("询价: 小区=%s, 面积区间=%.1f~%.1f㎡", community_name, area_min, area_max)
     log.info("="*60)
 
     # Step 1: 贝壳采集
-    pr = await collect(browser, community_name, area)
+    pr = await collect(browser, community_name, area_min, area_max)
 
     log.info("--- 采集结果 ---")
     log.info("平台状态: %s", pr.status)
@@ -50,12 +52,11 @@ async def run_inquiry(browser, community_name: str, area: float) -> dict:
     log.info("小区均价(报价P_quote): %s 元/㎡", quote_avg)
     log.info("在售房源条数: %d", len(pr.listings))
 
-    # 成交均值：成交记录按面积±20%筛选后求均值
+    # 成交均值：成交记录按面积区间筛选后求均值
     deal_items = [{"unit_price": d.unit_price, "area": d.area} for d in pr.deals]
     log.info("成交记录总条数(筛选前): %d", len(deal_items))
-    filtered_deals = filter_by_area(deal_items, area, config.AREA_TOLERANCE)
-    log.info("成交记录筛选后(±%d%%): %d 条", int(config.AREA_TOLERANCE * 100),
-             len(filtered_deals))
+    filtered_deals = filter_by_area(deal_items, area_min, area_max)
+    log.info("成交记录筛选后(%.0f~%.0f㎡): %d 条", area_min, area_max, len(filtered_deals))
     for i, d in enumerate(filtered_deals, 1):
         log.info("  成交%d: 单价=%s元/㎡ 面积=%s㎡", i, d["unit_price"], d["area"])
     deal_avg = mean_price(filtered_deals)
@@ -67,7 +68,6 @@ async def run_inquiry(browser, community_name: str, area: float) -> dict:
                                   config.DISCOUNT_WHEN_NO_DEAL)
     elapsed = time.time() - start
 
-    # 算法分支中文说明
     branch_desc = {
         "TAKE_LOWER": "报价与成交差≤10%，取低",
         "DEAL_ONLY": "报价与成交差>10%，只取成交价" if quote_avg else "无报价，取成交价",
@@ -112,37 +112,23 @@ async def main():
     await asyncio.sleep(2)
 
     print("\n" + "="*50)
-    print("浏览器已打开贝壳。请在浏览器中完成登录（手机验证码）。")
-    print("登录完成后，回到这里输入 yes 继续。")
+    print(f"浏览器已打开贝壳。请在浏览器中完成登录。")
+    print(f"登录完成后，回到这里【按回车】开始测试。")
+    print(f"测试小区: {TEST_COMMUNITY} | 面积: {TEST_AREA_MIN}~{TEST_AREA_MAX}㎡")
     print("="*50)
 
-    # 2. 等待人工登录确认（同步 input 在异步里要用 run_in_executor）
+    # 2. 等待人工登录——回车即继续
     loop = asyncio.get_event_loop()
-    while True:
-        ans = await loop.run_in_executor(None, input, "已登录？(yes): ")
-        if ans.strip().lower() == "yes":
-            break
+    await loop.run_in_executor(None, input, "登录完成后按回车开始...")
 
-    log.info("登录确认，进入询价循环")
+    log.info("登录确认，开始测试")
 
-    # 3. 循环询价（可多次测试）
-    while True:
-        print("\n" + "-"*50)
-        name = await loop.run_in_executor(None, input, "小区名（输入 quit 退出）: ")
-        name = name.strip()
-        if name.lower() == "quit":
-            break
-        area_input = await loop.run_in_executor(None, input, "基准面积(㎡，如 85): ")
-        try:
-            area = float(area_input.strip())
-        except ValueError:
-            print("面积格式错误，跳过")
-            continue
+    # 3. 自动跑（固定数据，不交互）
+    result = await run_inquiry(browser, TEST_COMMUNITY, TEST_AREA_MIN, TEST_AREA_MAX)
+    print(f"\n→ 结果: {result}")
 
-        # 4. 执行询价
-        result = await run_inquiry(browser, name, area)
-        print(f"\n→ 结果: {result}")
-
+    print("\n测试完成，浏览器保持打开供观察。按回车退出。")
+    await loop.run_in_executor(None, input, "按回车退出...")
     browser.stop()
     log.info("测试结束")
 
