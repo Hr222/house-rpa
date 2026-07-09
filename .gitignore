@@ -32,6 +32,8 @@ ke_rendered.html
 ke_detail_rendered.html
 debug_*.png
 debug_*.html
+debug/
+ke_more_options.html
 
 # 探测阶段脚本（一次性验证产物，正式实现会重写）
 mvp_ke.py
