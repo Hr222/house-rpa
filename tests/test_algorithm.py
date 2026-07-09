@@ -4,26 +4,26 @@ from app.algorithm import filter_by_area, mean_price, decide_final_price
 
 
 class TestFilterByArea:
-    def test_keeps_within_tolerance(self):
+    def test_keeps_within_range(self):
         listings = [{"area": 100}, {"area": 110}, {"area": 90}]
-        result = filter_by_area(listings, base_area=100, tolerance=0.20)
+        result = filter_by_area(listings, area_min=80, area_max=120)
         assert len(result) == 3
 
-    def test_filters_outside_tolerance(self):
+    def test_filters_outside_range(self):
         listings = [{"area": 70}, {"area": 100}, {"area": 130}]
-        result = filter_by_area(listings, base_area=100, tolerance=0.20)
+        result = filter_by_area(listings, area_min=80, area_max=120)
         assert len(result) == 1
         assert result[0]["area"] == 100
 
     def test_boundary_inclusive(self):
-        # 80 和 120 是边界(100*0.8, 100*1.2)，应保留
+        # 80 和 120 是边界，应保留
         listings = [{"area": 80}, {"area": 120}]
-        result = filter_by_area(listings, base_area=100, tolerance=0.20)
+        result = filter_by_area(listings, area_min=80, area_max=120)
         assert len(result) == 2
 
     def test_none_area_excluded(self):
         listings = [{"area": None}, {"area": 100}]
-        result = filter_by_area(listings, base_area=100, tolerance=0.20)
+        result = filter_by_area(listings, area_min=80, area_max=120)
         assert len(result) == 1
 
 

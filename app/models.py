@@ -5,9 +5,10 @@ from pydantic import BaseModel, Field
 
 
 class InquiryRequest(BaseModel):
-    """后端 → RPA 的请求。"""
+    """后端 → RPA 的请求。面积由后端传区间，RPA 直接用，不算±20%。"""
     community_name: str = Field(..., description="小区名称")
-    area: float = Field(..., gt=0, description="基准面积(㎡)")
+    area_min: float = Field(..., gt=0, description="面积下限(㎡)")
+    area_max: float = Field(..., gt=0, description="面积上限(㎡)")
     city: str = Field("深圳", description="城市，MVP 固定深圳")
 
 

@@ -11,13 +11,13 @@ class Decision:
     branch: str  # TAKE_LOWER / DEAL_ONLY / QUOTE_DISCOUNT / FAILED
 
 
-def filter_by_area(items: List[Dict[str, Any]], base_area: float,
-                   tolerance: float = 0.20) -> List[Dict[str, Any]]:
-    """按基准面积 ±tolerance 过滤。面积缺失(None)的剔除。闭区间。"""
-    low = base_area * (1 - tolerance)
-    high = base_area * (1 + tolerance)
+def filter_by_area(items: List[Dict[str, Any]],
+                   area_min: float, area_max: float) -> List[Dict[str, Any]]:
+    """按面积区间过滤。面积缺失(None)的剔除。闭区间。
+    区间由后端给定，RPA 不算±20%。
+    """
     return [it for it in items
-            if it.get("area") is not None and low <= it["area"] <= high]
+            if it.get("area") is not None and area_min <= it["area"] <= area_max]
 
 
 def mean_price(items: List[Dict[str, Any]]) -> Optional[float]:
