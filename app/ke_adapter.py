@@ -31,51 +31,52 @@ async def _human_delay(min_s=2.0, max_s=5.0):
     await asyncio.sleep(random.uniform(min_s, max_s))
 
 
-async def _get_element_center(page, selector: str):
-    """用 JS 读取元素的屏幕坐标（只读坐标，不触发操作）。返回 (x, y) 或 None。"""
-    result = await page.evaluate(f"""
-        (() => {{
-            const el = document.querySelector('{selector}');
-            if (!el) return null;
-            const r = el.getBoundingClientRect();
-            if (r.width === 0 || r.height === 0) return null;
-            // 加随机偏移（真人不会每次点正中心）
-            const x = r.left + r.width * (0.3 + Math.random() * 0.4);
-            const y = r.top + r.height * (0.3 + Math.random() * 0.4);
-            return {{x: x, y: y, visible: r.bottom > 0 && r.right > 0}};
-        }})()
-    """, return_by_value=True)
-    if not result:
-        return None
-    dsv = result.deep_serialized_value.value if hasattr(result, 'deep_serialized_value') and result.deep_serialized_value else result
-    if isinstance(dsv, dict) and dsv.get('visible'):
-        return dsv['x'], dsv['y']
-    return None
+def _unwrap(dsv):
+    """把 nodriver deep_serialized_value 的嵌套格式递归解包成原生类型。
+
+    nodriver 对 object 返回 [[key, {type,value}], ...]，
+    对 array 返回 [{type,value}, ...]，需要递归还原。
+    """
+    if isinstance(dsv, list):
+        # object 格式 [[key, val], ...]
+        if dsv and isinstance(dsv[0], list) and len(dsv[0]) == 2:
+            result = {}
+            for item in dsv:
+                if isinstance(item, list) and len(item) == 2:
+                    key, val = item
+                    key_str = key.get('value') if isinstance(key, dict) else key
+                    result[key_str] = _unwrap(val.get('value') if isinstance(val, dict) else val)
+            return result
+        # array 格式 [{type,value}, ...]
+        return [_unwrap(x.get('value') if isinstance(x, dict) else x) for x in dsv]
+    if isinstance(dsv, dict):
+        return dsv.get('value')
+    return dsv
 
 
-async def _human_click(page, selector: str):
-    """严格模拟真人鼠标点击：JS读坐标 → CDP mouseMoved → mousePressed → mouseReleased。
-    禁止 JS .click()，只用 CDP Input 事件。"""
-    center = await _get_element_center(page, selector)
-    if not center:
-        log.warning("  [点击] 找不到/不可见: %s", selector)
+async def _human_click(page, selector: str, timeout: int = 5) -> bool:
+    """真人点击：用 nodriver 原生元素 API（select → scroll_into_view → click）。
+
+    参考 boss-agent 模式：nodriver 的 .click() 内部已处理坐标和真实点击，
+    不手搓 CDP 事件，不用 JS .click()。
+    """
+    try:
+        el = await page.select(selector, timeout=timeout)
+        if not el:
+            log.warning("  [点击] 未找到: %s", selector)
+            return False
+        # 滚动到可见再点
+        try:
+            await el.scroll_into_view_if_needed()
+        except Exception:
+            pass
+        await _human_delay(0.3, 0.8)
+        await el.click()
+        log.info("  [点击] %s ✓", selector)
+        return True
+    except Exception as e:
+        log.warning("  [点击] 失败 %s: %s", selector, e)
         return False
-    x, y = center
-    # 先移动鼠标到目标（真人移动）
-    await page.send(cdp.input_.dispatch_mouse_event(
-        type_="mouseMoved", x=x, y=y))
-    await asyncio.sleep(random.uniform(0.05, 0.15))
-    # 按下
-    await page.send(cdp.input_.dispatch_mouse_event(
-        type_="mousePressed", x=x, y=y,
-        button=cdp.input_.MouseButton.LEFT, click_count=1))
-    await asyncio.sleep(random.uniform(0.04, 0.12))  # 真人按下到松开的间隔
-    # 释放
-    await page.send(cdp.input_.dispatch_mouse_event(
-        type_="mouseReleased", x=x, y=y,
-        button=cdp.input_.MouseButton.LEFT, click_count=1))
-    log.info("  [点击] %s @ (%.0f, %.0f)", selector, x, y)
-    return True
 
 # debug 落盘目录
 DEBUG_DIR = Path(__file__).parent.parent / "debug"
@@ -95,6 +96,11 @@ async def _dump_html(page, name: str):
         log.info("  [debug] %s → %s (%d字符)", name, out.name, len(str(html)))
     except Exception as e:
         log.warning("  [debug] 落盘失败 %s: %s", name, e)
+
+
+async def _get_html(page) -> str:
+    html = await _evaluate(page, "document.documentElement.outerHTML")
+    return str(html)
 
 # 贝壳面积档位：(上限㎡, URL段)
 # a1=50以下 a2=50-70 a3=70-90 a4=90-110 a5=110-140 a6=140-170 a7=170以上
@@ -120,35 +126,30 @@ def _pick_segments(area_min: float, area_max: float) -> List[str]:
     return segs
 
 
-async def _type_text_human(page, text: str):
-    """模拟真人逐字符输入（每个字 keyDown+char+keyUp，带随机间隔）。"""
-    for ch in text:
-        await page.send(cdp.input_.dispatch_key_event(
-            type_="keyDown", text=ch, key=ch))
-        await page.send(cdp.input_.dispatch_key_event(
-            type_="char", text=ch, key=ch))
-        await page.send(cdp.input_.dispatch_key_event(
-            type_="keyUp", key=ch))
-        await asyncio.sleep(random.uniform(0.08, 0.2))  # 真人打字间隔
+async def _type_text(page, text: str):
+    """用 nodriver 元素 API 输入文字（真人输入，不用手搓 CDP）。"""
+    try:
+        el = await page.select('#searchInput', timeout=3)
+        await el.send_keys(text)
+        log.info("  [输入] %s ✓", text)
+    except Exception as e:
+        log.warning("  [输入] 失败: %s", e)
 
 
 async def _press_enter(page):
-    """模拟真人回车。"""
-    await page.send(cdp.input_.dispatch_key_event(
-        type_="rawKeyDown", key="Enter", code="Enter",
-        windows_virtual_key_code=13, native_virtual_key_code=13))
-    await page.send(cdp.input_.dispatch_key_event(
-        type_="char", key="Enter", code="Enter"))
-    await page.send(cdp.input_.dispatch_key_event(
-        type_="keyUp", key="Enter", code="Enter",
-        windows_virtual_key_code=13, native_virtual_key_code=13))
+    """回车提交。用 nodriver 的 keyboard.send。"""
+    try:
+        await page.keyboard.send("\r")
+        log.info("  [回车] ✓")
+    except Exception as e:
+        log.warning("  [回车] 失败: %s", e)
 
 
 async def _evaluate(page, js: str):
     """执行 JS 并取真实值（处理 nodriver 的 RemoteObject 包装）。"""
     result = await page.evaluate(js, return_by_value=True)
     if hasattr(result, 'deep_serialized_value') and result.deep_serialized_value:
-        return result.deep_serialized_value.value
+        return _unwrap(result.deep_serialized_value.value)
     if hasattr(result, 'value') and result.value is not None:
         return result.value
     return result
@@ -158,7 +159,14 @@ async def _refresh(page):
     """第5步：刷新界面（保活插口，后面接定时保活逻辑）。"""
     log.info("[5] 刷新界面（保活）")
     await page.evaluate("location.reload()", return_by_value=True)
-    await _human_delay(2, 4)
+    # 等页面真正加载完（等搜索框出现），最多等15秒
+    for i in range(30):
+        await asyncio.sleep(0.5)
+        has = await _evaluate(page, "!!document.querySelector('#searchInput')")
+        if has:
+            log.info("  页面已加载（#searchInput 出现）")
+            break
+    await _human_delay(1, 2)
 
 
 async def _click_more_options(page):
@@ -245,38 +253,29 @@ async def _search_one_segment(page, community_name: str, seg: str):
     """第8步：在一个档位上搜索小区，返回 (单价列表, 详情链接)。"""
     log.info("[8] 搜索: 小区=%s 档位=%s", community_name, seg)
 
-    # 清空搜索框（JS 只清值）+ 真人点击搜索框聚焦
-    await page.evaluate("""
-        (() => {
-            const inp = document.querySelector('#searchInput');
-            if (inp) inp.value = '';
-        })()
-    """, return_by_value=True)
-    await _human_click(page, '#searchInput')  # 真人点击搜索框聚焦
-    await _human_delay(0.5, 1.5)
+    # 真人点击搜索框聚焦（nodriver select → click）
+    inp = await page.select('#searchInput', timeout=5)
+    if inp:
+        try:
+            await inp.click()
+        except Exception:
+            pass
+        # 清空（全选删除）
+        try:
+            await inp.send_keys("\u0001")  # Ctrl+A
+            await page.keyboard.send("\u0008")  # Backspace
+        except Exception:
+            pass
+    await _human_delay(0.3, 0.8)
 
-    # 逐字符输入小区名（真人打字）
-    await _type_text_human(page, community_name)
+    # 输入小区名（nodriver send_keys）
+    await _type_text(page, community_name)
     await _human_delay(1, 2)
-
-    # 验证输入进去了
-    val = await _evaluate(page, "document.querySelector('#searchInput').value")
-    log.info("  搜索框值: %s", val)
-    if not val or val == "":
-        log.warning("  ⚠️ 搜索框为空，输入可能失败")
-        # 兜底：JS 设值
-        await page.evaluate(f"""
-            const inp = document.querySelector('#searchInput');
-            const setter = Object.getOwnPropertyDescriptor(
-                HTMLInputElement.prototype, 'value').set;
-            setter.call(inp, '{community_name}');
-            inp.dispatchEvent(new Event('input', {{bubbles: true}}));
-        """, return_by_value=True)
-        await _human_delay(1, 2)
 
     # 回车搜索
     await _press_enter(page)
-    await _human_delay(3, 5)
+    await page  # 等页面状态稳定（boss-agent 模式）
+    await _human_delay(2, 4)
 
     cur_url = page.target.url
     log.info("  搜索后URL: %s", cur_url)
