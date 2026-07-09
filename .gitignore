@@ -1,0 +1,39 @@
+# 敏感：cookie / 账号凭据，绝不提交
+.cookie_*.txt
+cookie*.txt
+*.cookie
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 日志与临时
+logs/
+*.log
+*.html
+!docs/**/*.html
+
+# IDE
+.idea/
+.vscode/
+
+# 调试产物：探测脚本 + 调试截图 + 临时HTML
+resp_header.txt
+test_*.html
+ke_home.html
+ke_rendered.html
+ke_detail_rendered.html
+debug_*.png
+debug_*.html
+
+# 探测阶段脚本（一次性验证产物，正式实现会重写）
+mvp_ke.py
+interactive.py
+probe_*.py
