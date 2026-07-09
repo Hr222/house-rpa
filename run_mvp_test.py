@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""RPA 侧模拟测试脚本（不走后端接口）。
+"""RPA 侧模拟测试脚本（nodriver 版，不走后端接口）。
 
 流程：
-  1. 打开浏览器 → 人工登录贝壳（手机验证码）
+  1. 启动 Edge（nodriver，反检测）→ 打开贝壳 → 人工登录
   2. 登录确认后，输入 {小区名, 面积}
   3. 自动执行：搜小区 → 筛面积 → 抓报价 → 进详情页抓均价+成交 → 算最终单价
   4. 打印完整结果
@@ -10,13 +10,14 @@
 用法：
   python run_mvp_test.py
 """
+import asyncio
 import logging
 import time
 
-from playwright.sync_api import sync_playwright
+import nodriver
 
 import config
-from app.ke_adapter import collect
+from app.ke_adapter import collect, BROWSER_PATH
 from app.algorithm import filter_by_area, mean_price, decide_final_price
 
 logging.basicConfig(level=logging.INFO,
@@ -24,7 +25,7 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("mvp_test")
 
 
-def run_inquiry(page, community_name: str, area: float) -> dict:
+async def run_inquiry(browser, community_name: str, area: float) -> dict:
     """执行一次完整询价，返回结果 dict。"""
     start = time.time()
     log.info("="*60)
@@ -32,7 +33,7 @@ def run_inquiry(page, community_name: str, area: float) -> dict:
     log.info("="*60)
 
     # Step 1: 贝壳采集
-    pr = collect(page, community_name, area)
+    pr = await collect(browser, community_name, area)
 
     log.info("--- 采集结果 ---")
     log.info("平台状态: %s", pr.status)
@@ -68,8 +69,8 @@ def run_inquiry(page, community_name: str, area: float) -> dict:
 
     # 算法分支中文说明
     branch_desc = {
-        "TAKE_LOWER": f"报价与成交差≤10%，取低",
-        "DEAL_ONLY": f"报价与成交差>10%，只取成交价" if quote_avg else "无报价，取成交价",
+        "TAKE_LOWER": "报价与成交差≤10%，取低",
+        "DEAL_ONLY": "报价与成交差>10%，只取成交价" if quote_avg else "无报价，取成交价",
         "QUOTE_DISCOUNT": "无成交记录，取报价×0.8",
         "FAILED": "无报价无成交，失败",
     }
@@ -97,51 +98,57 @@ def run_inquiry(page, community_name: str, area: float) -> dict:
     }
 
 
-def main():
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1440, "height": 900}, locale="zh-CN")
-        page = context.new_page()
+async def main():
+    # 1. 启动 Edge（nodriver，反检测）
+    log.info("启动 Edge（nodriver 反检测模式）...")
+    browser = await nodriver.start(
+        headless=False,
+        lang="zh-CN",
+        browser_executable_path=BROWSER_PATH,
+    )
 
-        # 1. 打开贝壳，人工登录
-        log.info("打开贝壳首页，等待人工登录...")
-        page.goto(config.KE_HOME, wait_until="domcontentloaded")
+    # 打开贝壳首页
+    tab = await browser.get(config.KE_HOME)
+    await asyncio.sleep(2)
 
-        print("\n" + "="*50)
-        print("请在浏览器中完成贝壳登录（手机验证码）")
-        print("登录完成后，回到这里输入 yes 继续")
-        print("="*50)
-        while True:
-            ans = input("已登录？(yes): ").strip().lower()
-            if ans == "yes":
-                break
+    print("\n" + "="*50)
+    print("浏览器已打开贝壳。请在浏览器中完成登录（手机验证码）。")
+    print("登录完成后，回到这里输入 yes 继续。")
+    print("="*50)
 
-        log.info("登录确认，进入询价循环")
+    # 2. 等待人工登录确认（同步 input 在异步里要用 run_in_executor）
+    loop = asyncio.get_event_loop()
+    while True:
+        ans = await loop.run_in_executor(None, input, "已登录？(yes): ")
+        if ans.strip().lower() == "yes":
+            break
 
-        # 2. 循环询价（可多次测试）
-        while True:
-            print("\n" + "-"*50)
-            name = input("小区名（输入 quit 退出）: ").strip()
-            if name.lower() == "quit":
-                break
-            area_input = input("基准面积(㎡，如 85): ").strip()
-            try:
-                area = float(area_input)
-            except ValueError:
-                print("面积格式错误，跳过")
-                continue
+    log.info("登录确认，进入询价循环")
 
-            # 3. 执行询价
-            result = run_inquiry(page, name, area)
-            print(f"\n→ 结果: {result}")
+    # 3. 循环询价（可多次测试）
+    while True:
+        print("\n" + "-"*50)
+        name = await loop.run_in_executor(None, input, "小区名（输入 quit 退出）: ")
+        name = name.strip()
+        if name.lower() == "quit":
+            break
+        area_input = await loop.run_in_executor(None, input, "基准面积(㎡，如 85): ")
+        try:
+            area = float(area_input.strip())
+        except ValueError:
+            print("面积格式错误，跳过")
+            continue
 
-        browser.close()
-        log.info("测试结束")
+        # 4. 执行询价
+        result = await run_inquiry(browser, name, area)
+        print(f"\n→ 结果: {result}")
+
+    browser.stop()
+    log.info("测试结束")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log.info("用户中断")
