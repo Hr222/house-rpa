@@ -1,108 +1,305 @@
 # -*- coding: utf-8 -*-
-"""贝壳 HTML 解析器（纯函数）。
+"""HTML 解析器。"""
 
-基于实测 DOM 结构：
-  真实房源: <li class="clear">
-  广告:     <li class="list_goodhouse_daoliu ...">  → 过滤
-  猜你喜欢: sellListContent 之外的区块 → 不解析
-  单价:     div.unitPrice span       → "84,547元/平"
-  详情链接: a.agentCardResblockLink  → href 指向 /xiaoqu/{id}/
-
-详情页：
-  小区均价: 含"参考均价""元/㎡"文本
-  成交记录: 含"元/平"的条目
-"""
+import json
 import re
-from typing import List, Optional
+from typing import Iterable, List, Optional
+
+from app.models import DealRecord, ListingSnapshot
 
 try:
     from bs4 import BeautifulSoup
+
     _HAS_BS4 = True
 except ImportError:
     _HAS_BS4 = False
 
 
+_UNIT_PRICE_RE = re.compile(r"[\d,]+(?:\.\d+)?\s*元\s*/?\s*(?:平米|平|㎡|m²)")
+_AREA_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:平米|㎡|m²)")
+_LAYOUT_RE = re.compile(r"(\d+室\d+厅)")
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
 def _to_float(text: str) -> Optional[float]:
-    """'84,547元/平' → 84547.0。"""
     if not text:
         return None
-    m = re.search(r"[\d,]+\.?\d*", text)
+    m = re.search(r"[\d,]+(?:\.\d+)?", text)
     return float(m.group(0).replace(",", "")) if m else None
 
 
-def _find_price_text(text: str) -> Optional[str]:
-    """找 'XX,XXX元/平' 或 '元/㎡' 格式的单价串。"""
-    m = re.search(r"[\d,]+\.?\d*\s*元/[平㎡]", text or "")
+def _find_unit_price_text(text: str) -> Optional[str]:
+    m = _UNIT_PRICE_RE.search(text or "")
     return m.group(0) if m else None
 
 
-def parse_listing_prices(html: str) -> List[float]:
-    """从搜索结果页解析在售房源单价列表。自动过滤广告。
-
-    只提取单价（XXX元/平），其他不要。
-    """
-    if not _HAS_BS4:
-        return _parse_listing_prices_regex(html)
-    soup = BeautifulSoup(html, "html.parser")
-    prices = []
-    for li in soup.select("ul.sellListContent > li"):
-        cls = " ".join(li.get("class", []))
-        if "goodhouse" in cls:  # 广告过滤
-            continue
-        unit_el = li.select_one("div.unitPrice span")
-        if unit_el:
-            p = _to_float(unit_el.get_text())
-            if p:
-                prices.append(p)
-    return prices
+def _extract_area(text: str) -> Optional[float]:
+    m = _AREA_RE.search(text or "")
+    return float(m.group(1)) if m else None
 
 
-def _parse_listing_prices_regex(html: str) -> List[float]:
-    """无 bs4 时的正则兜底。"""
-    prices = []
-    for m in re.finditer(r'<li[^>]*class="clear"[^>]*>(.*?)</li>', html, re.S):
-        block = m.group(0)
-        unit = re.search(r'<div class="unitPrice"[^>]*>\s*<span>([^<]*)</span>', block)
-        if unit:
-            p = _to_float(unit.group(1))
-            if p:
-                prices.append(p)
-    return prices
-
-
-def find_detail_link(html: str) -> Optional[str]:
-    """从搜索结果页提取'查看小区详情'链接。"""
-    m = re.search(r'<a[^>]*class="[^"]*agentCardResblockLink[^"]*"[^>]*href="([^"]+)"', html)
-    if m:
-        return m.group(1)
-    m = re.search(r'<a[^>]*href="(https?://sz\.ke\.com/xiaoqu/\d+/)"[^>]*>查看小区详情', html)
+def _extract_layout(text: str) -> Optional[str]:
+    m = _LAYOUT_RE.search(text or "")
     return m.group(1) if m else None
 
 
+def _append_record(
+    records: List[DealRecord],
+    seen: set,
+    area: Optional[float],
+    unit_price: Optional[float],
+):
+    if area is None or unit_price is None:
+        return
+
+    key = (round(area, 2), round(unit_price, 2))
+    if key in seen:
+        return
+
+    seen.add(key)
+    records.append(DealRecord(area=area, unit_price=unit_price))
+
+
+def _parse_embedded_sold_records(html: str) -> List[DealRecord]:
+    """从小区详情页脚本中的 sold 数组解析成交记录。"""
+    m = re.search(
+        r'"sold"\s*:\s*(\[[\s\S]*?\])\s*,\s*"soldUrl"\s*:\s*"[^"]*"',
+        html or "",
+    )
+    if not m:
+        return []
+
+    try:
+        items = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return []
+
+    records: List[DealRecord] = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        area = item.get("area") or item.get("buildSize")
+        unit_price = item.get("unitPrice")
+        try:
+            area_value = float(area) if area is not None else None
+            unit_price_value = (
+                float(str(unit_price).replace(",", ""))
+                if unit_price is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            continue
+
+        _append_record(records, seen, area_value, unit_price_value)
+
+    return records
+
+
+def _select_listing_items(soup: "BeautifulSoup"):
+    """只抓主结果列表，过滤猜你喜欢等推荐区块。"""
+    items = soup.select('ul.sellListContent[log-mod="list"] > li')
+    if items:
+        return items
+    return soup.select("ul.sellListContent > li")
+
+
+def parse_listing_records(html: str) -> List[tuple[str, float]]:
+    """解析搜索结果页主结果列表中的房源 ID 和单价。"""
+    if _HAS_BS4:
+        soup = BeautifulSoup(html, "html.parser")
+        records: List[tuple[str, float]] = []
+        for li in _select_listing_items(soup):
+            cls = " ".join(li.get("class", []))
+            if "goodhouse" in cls:
+                continue
+
+            unit_el = li.select_one("div.unitPrice")
+            if not unit_el:
+                continue
+
+            house_id = unit_el.get("data-hid")
+            price_text = unit_el.get_text(" ", strip=True)
+            price = _to_float(price_text)
+            if house_id and price:
+                records.append((house_id, price))
+        return records
+
+    return _parse_listing_records_regex(html)
+
+
+def parse_listing_snapshots(html: str) -> List[ListingSnapshot]:
+    """解析搜索结果页主结果列表中的房源摘要。"""
+    if _HAS_BS4:
+        soup = BeautifulSoup(html, "html.parser")
+        snapshots: list[ListingSnapshot] = []
+        for li in _select_listing_items(soup):
+            cls = " ".join(li.get("class", []))
+            if "goodhouse" in cls:
+                continue
+
+            unit_el = li.select_one("div.unitPrice")
+            if not unit_el:
+                continue
+
+            house_id = unit_el.get("data-hid")
+            if not house_id:
+                continue
+
+            community_name = None
+            community_el = li.select_one(".positionInfo a")
+            if community_el:
+                community_name = _normalize_text(community_el.get_text(" ", strip=True))
+
+            house_info_text = ""
+            house_info_el = li.select_one(".houseInfo")
+            if house_info_el:
+                house_info_text = _normalize_text(house_info_el.get_text(" ", strip=True))
+
+            total_price = None
+            total_price_el = li.select_one(".totalPrice span")
+            if total_price_el:
+                total_price = _to_float(total_price_el.get_text(" ", strip=True))
+
+            unit_price = _to_float(unit_el.get_text(" ", strip=True))
+            snapshots.append(
+                ListingSnapshot(
+                    house_id=house_id,
+                    community_name=community_name,
+                    area=_extract_area(house_info_text),
+                    layout=_extract_layout(house_info_text),
+                    unit_price=unit_price,
+                    total_price=total_price,
+                )
+            )
+        return snapshots
+
+    return []
+
+
+def _parse_listing_records_regex(html: str) -> List[tuple[str, float]]:
+    container_match = re.search(
+        r'<ul[^>]*class="[^"]*sellListContent[^"]*"[^>]*log-mod="list"[^>]*>([\s\S]*?)</ul>',
+        html,
+        re.S,
+    )
+    container = container_match.group(1) if container_match else html
+
+    records: List[tuple[str, float]] = []
+    for m in re.finditer(r'<li[^>]*class="[^"]*clear[^"]*"[^>]*>(.*?)</li>', container, re.S):
+        block = m.group(0)
+        if "goodhouse" in block:
+            continue
+
+        unit = re.search(
+            r'<div class="unitPrice"[^>]*data-hid="([^"]+)"[^>]*>\s*<span>([^<]*)</span>',
+            block,
+        )
+        if not unit:
+            continue
+
+        price = _to_float(unit.group(2))
+        if price:
+            records.append((unit.group(1), price))
+    return records
+
+
+def parse_listing_prices(html: str) -> List[float]:
+    """解析搜索结果页主结果列表中的在售单价。"""
+    return [price for _, price in parse_listing_records(html)]
+
+
+def find_detail_link(html: str) -> Optional[str]:
+    """提取搜索结果页里的小区详情链接。"""
+    m = re.search(
+        r'<a[^>]*class="[^"]*agentCardResblockLink[^"]*"[^>]*href="([^"]+)"',
+        html or "",
+    )
+    if m:
+        return m.group(1)
+
+    m = re.search(
+        r'<a[^>]*href="(https?://sz\.ke\.com/xiaoqu/\d+/)"[^>]*>查看小区详情',
+        html or "",
+    )
+    return m.group(1) if m else None
+
+
+def find_sold_list_url(html: str) -> Optional[str]:
+    """提取小区详情页里的成交列表链接。"""
+    m = re.search(r'"soldUrl"\s*:\s*"([^"]+)"', html or "")
+    if not m:
+        return None
+    return m.group(1).replace("\\/", "/")
+
+
 def parse_community_avg_price(html: str) -> Optional[float]:
-    """从详情页解析小区均价（参考均价 XX,XXX元/㎡）。"""
-    # 优先用 bs4 精确定位
+    """解析小区详情页中的参考均价。"""
     if _HAS_BS4:
         soup = BeautifulSoup(html, "html.parser")
         for el in soup.select(".xiaoquUnitPrice, .xiaoquPrice, .junjia"):
-            t = _find_price_text(el.get_text())
-            if t:
-                return _to_float(t)
-    # 正则兜底：找第一个"数字元/㎡"
-    m = re.search(r"([\d,]+\.?\d*)\s*元/[平㎡]", html)
-    return _to_float(m.group(0)) if m else None
+            text = _find_unit_price_text(el.get_text())
+            if text:
+                return _to_float(text)
+
+    text = _find_unit_price_text(html)
+    return _to_float(text) if text else None
+
+
+def _iter_deal_texts(html: str) -> Iterable[str]:
+    if _HAS_BS4:
+        soup = BeautifulSoup(html, "html.parser")
+        for el in soup.select("li, div"):
+            text = _normalize_text(el.get_text(separator=" ", strip=True))
+            if 8 <= len(text) <= 240:
+                yield text
+        return
+
+    for m in re.finditer(r"<(?:li|div)[^>]*>(.*?)</(?:li|div)>", html, re.S):
+        text = _normalize_text(re.sub(r"<[^>]+>", " ", m.group(1)))
+        if 8 <= len(text) <= 240:
+            yield text
+
+
+def parse_deal_records(html: str) -> List[DealRecord]:
+    """解析成交案例中的面积与单价。"""
+    records: List[DealRecord] = []
+    seen = set()
+
+    for text in _iter_deal_texts(html):
+        if "参考均价" in text:
+            continue
+
+        area = _extract_area(text)
+        price_text = _find_unit_price_text(text)
+        unit_price = _to_float(price_text) if price_text else None
+        _append_record(records, seen, area, unit_price)
+
+    for record in _parse_embedded_sold_records(html):
+        _append_record(records, seen, record.area, record.unit_price)
+
+    return records
 
 
 def parse_deal_prices(html: str) -> List[float]:
-    """从详情页解析成交记录单价列表。用稳健文本匹配。"""
-    prices = []
-    if _HAS_BS4:
-        soup = BeautifulSoup(html, "html.parser")
-        for li in soup.select("li"):
-            text = li.get_text(separator=" ", strip=True)
-            p_text = _find_price_text(text)
-            if p_text:
-                p = _to_float(p_text)
-                if p:
-                    prices.append(p)
-    return prices
+    return [record.unit_price for record in parse_deal_records(html)]
+
+
+def filter_deal_prices_by_area(
+    records: List[DealRecord],
+    area_min: float,
+    area_max: float,
+    tolerance: float = 0.20,
+) -> List[float]:
+    """按请求面积上下浮动 tolerance 过滤成交单价。"""
+    lower = area_min * (1 - tolerance)
+    upper = area_max * (1 + tolerance)
+    return [
+        record.unit_price
+        for record in records
+        if record.area is not None and lower <= record.area <= upper
+    ]

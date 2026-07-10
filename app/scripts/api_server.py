@@ -1,0 +1,45 @@
+# -*- coding: utf-8 -*-
+"""FastAPI 服务启动入口。"""
+
+from __future__ import annotations
+
+import argparse
+
+import uvicorn
+
+import config
+from app.api import create_app
+from app.debug_utils import set_debug_mode
+from app.logging_utils import setup_logging
+from app.runtime import RPARuntime
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="开启 RPA 调试模式，导出关键页面 HTML 到 debug 目录。",
+    )
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    if args.debug:
+        set_debug_mode(True)
+
+    setup_logging()
+    runtime = RPARuntime(enable_console_ready_confirmation=True)
+    app = create_app(runtime=runtime, manage_runtime=True)
+    uvicorn.run(
+        app,
+        host=config.API_HOST,
+        port=config.API_PORT,
+        reload=False,
+        log_config=None,
+    )
+
+
+if __name__ == "__main__":
+    main()

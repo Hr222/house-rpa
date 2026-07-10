@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+nodriver
+beautifulsoup4
+pytest
+httpx
