@@ -10,6 +10,7 @@ import config
 from app.algorithm import decide, mean
 from app.models import InquiryRequest, InquiryResult, PlatformResult, PlatformSession
 from app.platforms.base import PlatformAdapter
+from app.price_utils import format_price, round_price
 
 log = logging.getLogger(__name__)
 
@@ -36,10 +37,10 @@ def build_inquiry_result(platform_results: list[PlatformResult]) -> InquiryResul
     )
     return InquiryResult(
         success=decision.final_price is not None,
-        final_price=decision.final_price,
+        final_price=round_price(decision.final_price),
         branch=decision.branch,
-        quote_avg=quote_avg,
-        deal_avg=deal_avg,
+        quote_avg=round_price(quote_avg),
+        deal_avg=round_price(deal_avg),
         platform=selected,
         platform_results=platform_results,
     )
@@ -95,7 +96,7 @@ class RPAInquiryService:
             if platform_result.listing_snapshots:
                 for item in platform_result.listing_snapshots:
                     log.info(
-                        "%s: {小区名称: %s, 空间: %s平米, 几房几厅: %s, 售价: %s元/平, 总价: %s万}",
+                        "%s: {小区名称: %s, 面积: %s平米, 几房几厅: %s, 售价: %s元/平, 总价: %s万}",
                         platform_result.name,
                         item.community_name or "",
                         item.area if item.area is not None else "",
@@ -111,5 +112,6 @@ class RPAInquiryService:
                     platform_result.reason or "",
                 )
 
-        log.info("在售均价(单位:元/平): %s", inquiry_result.quote_avg)
-        log.info("成交均价(单位:元/平): %s", inquiry_result.deal_avg)
+        log.info("在售均价(单位:元/平): %s", format_price(inquiry_result.quote_avg))
+        log.info("成交均价(单位:元/平): %s", format_price(inquiry_result.deal_avg))
+        log.info("最终取值(单位:元/平): %s", format_price(inquiry_result.final_price))

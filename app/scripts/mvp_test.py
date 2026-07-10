@@ -13,6 +13,7 @@ import config
 from app.debug_utils import set_debug_mode
 from app.logging_utils import setup_logging
 from app.models import InquiryRequest
+from app.price_utils import format_price
 from app.registry import build_default_adapters
 from app.service import RPAInquiryService
 from app.window_control import ensure_browser_foreground
@@ -74,9 +75,9 @@ def print_return_body(result):
     print("\n模拟返回 body")
     print(
         "{"
-        f'"quoteAvg": {result.quote_avg}, '
-        f'"dealAvg": {result.deal_avg}, '
-        f'"finalPrice": {result.final_price}'
+        f'"quoteAvg": {format_price(result.quote_avg)}, '
+        f'"dealAvg": {format_price(result.deal_avg)}, '
+        f'"finalPrice": {format_price(result.final_price)}'
         "}"
     )
 
@@ -94,9 +95,9 @@ async def run_demo_inquiry(service: RPAInquiryService):
     result = await service.run_inquiry(request)
 
     print_platform_details(result)
-    print(f"\n在售均价(单位:元/平): {result.quote_avg}")
-    print(f"成交均价(单位:元/平): {result.deal_avg}")
-    print(f"最终取值(单位:元/平): {result.final_price}")
+    print(f"\n在售均价(单位:元/平): {format_price(result.quote_avg)}")
+    print(f"成交均价(单位:元/平): {format_price(result.deal_avg)}")
+    print(f"最终取值(单位:元/平): {format_price(result.final_price)}")
     print_return_body(result)
     print("=" * 60)
 

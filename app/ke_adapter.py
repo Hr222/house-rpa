@@ -14,7 +14,7 @@ import config
 from app import parsers
 from app.debug_utils import dump_html
 from app.models import ListingSnapshot, PlatformResult
-from app.platforms.ke_constants import AREA_SEGMENTS
+from app.platforms.ke_constants import AREA_SEGMENTS, START_URL
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +29,18 @@ async def _delay(min_s: float = 1.5, max_s: float = 3.5):
 async def _dump(page, name: str):
     """调试模式下导出页面 HTML。"""
     await dump_html(page, name, logger=log)
+
+
+async def _reset_to_start_page(page):
+    """回到贝壳二手房首页，并获取新的页面上下文。"""
+    refreshed_page = await page.get(START_URL)
+    await refreshed_page
+    await asyncio.sleep(2)
+    return refreshed_page
+
+
+async def reset_to_start_page(page):
+    return await _reset_to_start_page(page)
 
 
 def _pick_segments(area_min: float, area_max: float) -> list[str]:
@@ -271,10 +283,7 @@ async def keepalive(main_page) -> tuple[bool, str]:
         return True, "READY"
 
     try:
-        await main_page.reload()
-        await main_page.select("body", timeout=15)
-        await main_page
-        await asyncio.sleep(1.5)
+        main_page = await _reset_to_start_page(main_page)
     except Exception as exc:
         return False, f"刷新保活失败: {exc}"
 
@@ -468,10 +477,8 @@ async def _do_collect(
     started_at: float,
 ) -> PlatformResult:
     log.info("[5] 刷新页面（保活插口）")
-    await main_page.reload()
-    await main_page.select("#searchInput", timeout=15)
-    await main_page
-    await asyncio.sleep(2)
+    main_page = await _reset_to_start_page(main_page)
+    await _get_search_input(main_page)
     await _dump(main_page, "ke_refresh")
 
     keyword_html, keyword_url, detail_url = await _search_community(main_page, community_name)
@@ -573,6 +580,12 @@ async def _do_collect(
 
     if detail_tab is not main_page:
         asyncio.ensure_future(_close_tab_later(detail_tab))
+        try:
+            await main_page.activate()
+            await main_page
+            log.info("[14] switched back to main tab, detail tab will close later")
+        except Exception as exc:
+            log.warning("[14] failed to switch back to main tab: %s", exc)
 
     return PlatformResult(
         name="贝壳",
