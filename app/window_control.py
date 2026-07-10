@@ -12,6 +12,7 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 SW_RESTORE = 9
 
@@ -73,7 +74,7 @@ def focus_window(hwnd: int) -> bool:
             user32.ShowWindow(hwnd, SW_RESTORE)
 
         foreground_hwnd = user32.GetForegroundWindow()
-        current_thread_id = user32.GetCurrentThreadId()
+        current_thread_id = kernel32.GetCurrentThreadId()
         foreground_thread_id = user32.GetWindowThreadProcessId(foreground_hwnd, None)
         target_thread_id = user32.GetWindowThreadProcessId(hwnd, None)
 

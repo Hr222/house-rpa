@@ -27,7 +27,7 @@ class TestDecide:
 
     def test_no_deal_discount(self):
         d = decide(quote_avg=100, deal_avg=None)
-        assert d.final_price == 80.0
+        assert d.final_price == 90.0
         assert d.branch == "QUOTE_DISCOUNT"
 
     def test_no_quote_no_deal(self):

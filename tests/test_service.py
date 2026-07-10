@@ -32,3 +32,18 @@ def test_build_inquiry_result_returns_failed_when_all_error():
     assert result.success is False
     assert result.final_price is None
     assert result.branch == "FAILED"
+
+
+def test_build_inquiry_result_rounds_prices_to_2_decimals():
+    success = PlatformResult(
+        name="平台B",
+        status="SUCCESS",
+        community_avg_price=100.126,
+        deal_prices=[90.124, 90.126],
+    )
+
+    result = build_inquiry_result([success])
+
+    assert result.quote_avg == 100.13
+    assert result.deal_avg == 90.12
+    assert result.final_price == 90.12

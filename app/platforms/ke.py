@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
+import logging
+
 from app import ke_adapter
 from app.models import InquiryRequest, PlatformSession
 from app.platforms.base import PlatformAdapter
 from app.platforms.ke_constants import START_URL
+
+log = logging.getLogger(__name__)
 
 
 class KePlatformAdapter(PlatformAdapter):
@@ -26,7 +30,7 @@ class KePlatformAdapter(PlatformAdapter):
         )
 
     async def collect(self, browser, session: PlatformSession, request: InquiryRequest):
-        return await ke_adapter.collect(
+        result = await ke_adapter.collect(
             browser=browser,
             main_page=session.page,
             community_name=request.community_name,
@@ -34,6 +38,11 @@ class KePlatformAdapter(PlatformAdapter):
             area_max=request.area_max,
             request_id=request.request_id,
         )
+        try:
+            session.page = await ke_adapter.reset_to_start_page(session.page)
+        except Exception as exc:
+            log.warning("failed to reset ke main page to standby: %s", exc)
+        return result
 
     async def check_ready(self, session: PlatformSession) -> tuple[bool, str]:
         return await ke_adapter.probe_ready(session.page)
