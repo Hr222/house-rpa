@@ -1,0 +1,107 @@
+# AGENTS.md — jeethink-rpa 模块约束
+
+> 本文件供 AI 编码助手阅读,仅约束 **jeethink-rpa** 模块(Python RPA 工程)。
+> 与仓库根的 `AGENTS.md`(Java/Vue/uni-app 三端)完全独立,互不干涉。
+> 改动代码前先读完本文;与本文冲突的需求,以**用户当次指令**为准。
+
+## 1. 模块定位
+
+jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + nodriver),
+做房产询价的浏览器自动化采集。当前已接入贝壳(ke)、安居客(ajk),按多平台可扩展设计。
+
+- 入口服务:`app/scripts/api_server.py`
+- 平台扩展指南:`docs/平台扩展对接文档.md`
+- 业务说明:`README.md`
+
+## 2. 技术栈与 API 约定
+
+- Python 3.14,nodriver(反检测浏览器库,**非 selenium/playwright**)。
+- 分层:`api → runtime → service → platform adapter → parser/algorithm`。
+- 平台适配器统一继承 `app/platforms/base.py:PlatformAdapter`。
+- 最终取值走 `app/algorithm.py:decide()`,**纯函数,所有平台共用**。
+
+## 3. ★ 业务流程不可擅改(最高约束)
+
+> 这是本模块最重要的约束,优先级高于一切技术优化建议。
+
+**业务流程是定死的。没有用户的明确指令,AI 不得擅自:**
+- 增删采集步骤(如自作主张加循环检测、删掉某步)
+- 改变步骤顺序
+- 修改 `algorithm.py` / `service.py` / `models.py` / `runtime.py` / `api.py`
+- 改变 `decide()` 的决策规则或阈值
+
+**平台差异 ≠ 改流程。** 某平台因特性"略过"某步(如安居客无成交→不点详情),
+是平台适配,不是流程变更。代码注释里必须写清楚"为什么略过"。
+
+判定标准:
+- 看到"被风控/被拦"就想加重试循环 → ❌ 擅改流程
+- 某平台没有某数据源所以跳过该步采集 → ✅ 平台适配(需注释说明)
+
+## 4. 对接新平台的标准流程
+
+严格按 `docs/平台扩展对接文档.md` 执行,核心步骤:
+
+1. **MVP 先行**:在 `app/scripts/` 下用**单个测试脚本**(如 `ajk_mvp_test.py`)逐步验证,
+   不一次写完整采集。每步验证通过再往下。
+2. **不每步新建脚本**:整个 MVP 验证过程在**同一个脚本**里迭代,
+   不要每一步新建一个脚本文件(运维负担大)。
+3. **HTML 先核对再写解析**:解析 DOM 前必须核对真实 dump 出来的 HTML,
+   **不许盲写选择器/正则**。拿不到 HTML 就让人工 dump 或用 `--debug` 导出。
+4. **nodriver API 用法**:
+   - `Tab.evaluate(expression)` 执行的是 **JS 表达式**,箭头函数必须用 **IIFE** `(() => {...})()` 立即调用
+   - `Element` **没有** `select_all`(那是 `Tab` 的),Element 用 `query_selector_all`
+   - `Element.apply(js_function)` 会自动调用箭头函数并传入元素,**不需要** IIFE
+   - `evaluate` 要拿返回值传 `return_by_value=True`
+5. **正式落地三件套**(MVP 验证通过后):
+   - `app/platforms/<code>_constants.py` — 平台固有常量(首页 URL、档位等)
+   - `app/<code>_adapter.py` — 真实采集逻辑(MVP 验证过的函数移植过来)
+   - `app/platforms/<code>.py` — 薄壳适配器,委托给 adapter
+6. **注册两处**:`app/platforms/__init__.py` 导出 + `app/registry.py` 追加。
+7. **不改核心层**:`models/algorithm/service/runtime/api` 一行不改。
+
+## 5. 平台特性差异记录
+
+各平台已确认的差异,AI 对接时需知晓:
+
+| 平台 | code | 面积筛选 | 分页 | 成交记录 | 小区均价 | 详情页 |
+|---|---|---|---|---|---|---|
+| 贝壳 | ke | 预设档位 a1-a7 | 有,翻页 | 详情页有 | 详情页有,采 | 必须点 |
+| 安居客 | ajk | 自定义输入框填值 | 无,单页全展示 | **无** | 结果页社区卡片(从业者认为有水分) | 不用点 |
+
+### 安居客特殊处理(已落地,勿改)
+- **无成交记录**:业务上把**挂牌均价顶替 `deal_prices`**,让 `decide()` 正常走对比逻辑。
+  代码在 `ajk_adapter._do_collect`,注释已标明。
+- **无分页**:滚动到底即可(`_scroll_to_bottom`)。
+- **不点详情**:挂牌均价在结果页社区卡片就有(`parse_community_avg_price`)。
+
+## 6. 编码风格
+
+- 每个文件头部 `# -*- coding: utf-8 -*-` + 简短 docstring。
+- 日志用 `logging.getLogger(__name__)`,关键步骤打 info,异常打 warning/error 带上下文。
+- 函数前缀约定:模块内部用 `_` 前缀(如 `_human_click`),对外标准接口不加(如 `collect`/`probe_ready`)。
+- 真人节奏:nodriver 操作间用 `asyncio.sleep` 加随机间隔,模拟真人,降低风控触发。
+- 调试 HTML 导出走 `app/debug_utils.py:dump_html`,默认不导出,`--debug` 或 `RPA_DEBUG=1` 开启。
+
+## 7. 验证要求
+
+改动后必须:
+1. `python -m pytest tests/ -v` 全绿(算法/service/api/parsers 不回归)
+2. 新增平台后 `python -c "from app.registry import build_default_adapters; ..."` 验证注册正常
+3. MVP 脚本能跑通完整链路,人工核对采集数据合理
+
+## 8. 文件职责速查
+
+| 文件 | 职责 | 改动频率 |
+|---|---|---|
+| `app/algorithm.py` | 最终取值决策(纯函数) | 极低,业务规则锁定 |
+| `app/service.py` | 平台调度+汇总 | 低 |
+| `app/runtime.py` | 浏览器/队列/保活/状态机 | 低 |
+| `app/api.py` | FastAPI 接口 | 低 |
+| `app/models.py` | 数据模型(平台无关) | 低 |
+| `app/parsers.py` | 贝壳 HTML 解析 | 跟随贝壳页面变化 |
+| `app/ke_adapter.py` | 贝壳采集 | 跟随贝壳页面变化 |
+| `app/ajk_adapter.py` | 安居客采集 | 跟随安居客页面变化 |
+| `app/platforms/<code>.py` | 平台薄壳适配器 | 新平台接入时 |
+| `app/platforms/<code>_constants.py` | 平台固有常量 | 新平台接入时 |
+| `app/scripts/<code>_mvp_test.py` | MVP 验证脚本 | 对接期间,验证完保留 |
+| `docs/平台扩展对接文档.md` | 对接指南 | 新平台流程有变时 |
