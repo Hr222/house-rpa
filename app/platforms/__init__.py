@@ -5,5 +5,12 @@ from app.platforms.ajk import AjkPlatformAdapter
 from app.platforms.base import PlatformAdapter
 from app.platforms.fang import FangPlatformAdapter
 from app.platforms.ke import KePlatformAdapter
+from app.platforms.lyj import LyjPlatformAdapter
 
-__all__ = ["PlatformAdapter", "KePlatformAdapter", "AjkPlatformAdapter", "FangPlatformAdapter"]
+__all__ = [
+    "PlatformAdapter",
+    "KePlatformAdapter",
+    "AjkPlatformAdapter",
+    "FangPlatformAdapter",
+    "LyjPlatformAdapter",
+]

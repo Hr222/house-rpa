@@ -127,34 +127,116 @@ async def human_click(page, element, label: str) -> bool:
 
 
 # ============================================================
-# 第3步：面积筛选（链家需先点"更多及自定义"展开，再点面积档位）
+# 第2步：搜索小区
+#    链家搜索 URL 格式：/ershoufang/rs{小区名}/
+#    页面上的 search_input + 回车不可靠（AJAX 搜索 URL 不变），改用 URL 直接导航。
+# ============================================================
+
+async def _search_community(page, community_name: str) -> str:
+    """搜索小区：在已登录的首页填搜索框 + 点按钮提交。
+
+    URL 导航会跳转到登录页（登录态不跨路径），所以必须在登录后的首页操作。
+    用 evaluate 直接 JS 点击按钮，比 send_keys 回车更可靠。
+    """
+    # 确保在首页且已登录
+    try:
+        inp = await page.select("#searchInput", timeout=3)
+    except Exception:
+        inp = None
+    if inp is None:
+        raise RuntimeError("未找到搜索框 #searchInput")
+
+    if not await human_click(page, inp, "search input"):
+        raise RuntimeError("搜索框未能成功点击")
+
+    try:
+        await inp.clear_input()
+    except Exception:
+        pass
+    await asyncio.sleep(0.5)
+    await inp.send_keys(community_name)
+    await page
+    await asyncio.sleep(1.0)
+
+    # JS 点击搜索按钮（链家和贝壳同代码库）
+    result = await page.evaluate(
+        """
+        (() => {
+            const btn = document.querySelector('i.btn-search') || document.querySelector('.btn-search');
+            if (btn) { btn.click(); return 'clicked'; }
+            return 'no-btn';
+        })()
+        """,
+        return_by_value=True,
+    )
+    log.info("[2] JS 点击搜索按钮结果: %s", result)
+    await page
+    await asyncio.sleep(3)
+
+    return await page.get_content()
+
+
+# ============================================================
+# 第3步：面积筛选（链家需先"更多选项"→"更多及自定义"→点面积档位）
 # ============================================================
 
 async def apply_area_filter(page, area_min, area_max):
-    """链家面积筛选：先展开隐藏区，再点对应面积档位。
+    """链家面积筛选：智能展开 → 面积区"更多及自定义" → 点档位。
 
-    链家 DOM：
-      <span class="btn-showmore">+ 更多及自定义</span>  ← 展开按钮
-      <dl class="hide hasmore">                          ← 展开后显示
-        <dt title="...面积">面积</dt>
-        <dd><a href="/ershoufang/a3/"><span class="name">70-90㎡</span></a></dd>
-
-    面积档位和贝壳一致：a1=50以下 a2=50-70 a3=70-90 a4=90-110 a5=110-140 a6=140-170 a7=170以上
+    链家首页：div.more.btn-more = "更多选项"（需点击展开）
+    搜索结果页：div.more.btn-more = "收起选项"（已展开，不能点！）
     """
-    # 1. 点"更多及自定义"展开隐藏的筛选区
-    showmore_clicked = False
+    # 1. 智能处理全局展开：只有"更多选项"才点，"收起选项"跳过
     try:
-        showmore = await page.select("span.btn-showmore", timeout=3)
+        more_btn = await page.select("div.more.btn-more", timeout=3)
     except Exception:
-        showmore = None
-    if showmore:
-        showmore_clicked = await human_click(page, showmore, "btn-showmore")
-    if not showmore_clicked:
-        log.warning("未能点击'更多及自定义'，尝试直接找面积档位")
-    await asyncio.sleep(1.5)
+        more_btn = None
+    if more_btn:
+        try:
+            btn_text = await more_btn.apply("(el) => el.textContent.trim()")
+        except Exception:
+            btn_text = ""
+        if "更多选项" in (btn_text or ""):
+            log.info("[3] 点击全局'更多选项'展开")
+            await human_click(page, more_btn, "global btn-more")
+            await page
+            await asyncio.sleep(1.5)
+        else:
+            log.info("[3] 筛选区已展开(按钮=%s)，跳过全局点击", btn_text)
 
-    # 2. 找面积档位链接（70-90㎡ = a3）
-    # 面积档位映射（和贝壳一致）
+    # 2. 在所有 dl.hide.hasmore 中找到 dt[title*="面积"] 的那个
+    try:
+        containers = await page.select_all("dl.hide.hasmore", timeout=3)
+    except Exception:
+        containers = []
+
+    area_container = None
+    for c in containers:
+        try:
+            tit = await c.apply(
+                "(el) => { const t = el.querySelector('dt'); return t ? t.title || t.textContent.trim() : ''; }"
+            )
+        except Exception:
+            tit = ""
+        if "面积" in tit:
+            area_container = c
+            break
+
+    if area_container is None:
+        raise RuntimeError("未找到面积筛选区（含 dt[title*=面积] 的 dl.hide.hasmore）")
+
+    # 3. 点击面积区内的 btn-showmore 展开
+    try:
+        btns = await area_container.query_selector_all("span.btn-showmore")
+    except Exception:
+        btns = []
+    if btns:
+        log.info("[3] 点击面积区的 btn-showmore 展开")
+        await human_click(page, btns[0], "btn-showmore")
+        await page
+        await asyncio.sleep(1.5)
+
+    # 4. 找面积档位链接（注意：搜索结果页 href 格式 /ershoufang/a3rs绿景虹湾/）
     segments = [
         (0, 50, "a1"),
         (50, 70, "a2"),
@@ -162,30 +244,29 @@ async def apply_area_filter(page, area_min, area_max):
         (90, 110, "a4"),
         (110, 140, "a5"),
         (140, 170, "a6"),
-        (170, 99999, "a7"),
+        (170, 200, "a7"),
+        (200, 99999, "a8"),
     ]
     target_codes = [code for low, high, code in segments if area_min < high and area_max > low]
     if not target_codes:
         raise RuntimeError(f"面积区间无可用档位: {area_min}-{area_max}")
 
-    # 点第一个匹配的档位（70-90 对应 a3）
     segment_code = target_codes[0]
-    selector = f"a[href*='/{segment_code}/']"
-    log.info("[3] 目标面积档位: %s, 选择器: %s", segment_code, selector)
+    log.info("[3] 目标面积档位: %s", segment_code)
 
     area_link = None
     try:
-        area_link = await page.select(selector, timeout=3)
+        links = await area_container.query_selector_all("a")
     except Exception:
-        area_link = None
-
-    # 兜底：按文本找"70-90㎡"
-    if not area_link:
-        area_label = f"{int(area_min)}-{int(area_max)}㎡"
+        links = []
+    for lnk in links:
         try:
-            area_link = await page.find(area_label, timeout=3)
+            href = await lnk.apply("(el) => el.getAttribute('href')")
         except Exception:
-            area_link = None
+            href = ""
+        if segment_code in (href or ""):
+            area_link = lnk
+            break
 
     if not area_link:
         raise RuntimeError(f"未找到面积档位: {segment_code}")
@@ -205,12 +286,15 @@ async def apply_area_filter(page, area_min, area_max):
 def print_summary(
     *,
     open_file: Optional[Path],
+    search_after_file: Optional[Path],
     area_file: Optional[Path],
     error_file: Optional[Path],
     open_url: str,
     open_title: Optional[str],
     open_blocked: bool,
     open_block_reason: Optional[str],
+    search_blocked: bool,
+    search_block_reason: Optional[str],
     area_confirmed: bool,
     segment_code: str,
     area_url: str,
@@ -222,12 +306,15 @@ def print_summary(
     print("=" * 60)
     print("链家测试完成")
     print(f"打开首页 HTML: {open_file}")
+    print(f"搜索后 HTML: {search_after_file}")
     print(f"面积筛选后 HTML: {area_file}")
     print(f"异常现场 HTML: {error_file}")
     print(f"首次打开 URL: {open_url}")
     print(f"首次打开标题: {open_title}")
     print(f"首次是否被拦: {open_blocked}")
     print(f"首次拦截原因: {open_block_reason}")
+    print(f"搜索后是否被拦: {search_blocked}")
+    print(f"搜索后拦截原因: {search_block_reason}")
     print(f"面积筛选点击: {area_confirmed}")
     print(f"面积档位: {segment_code}")
     print(f"面积筛选后 URL: {area_url}")
@@ -254,6 +341,9 @@ async def main(manual_login: bool = False, debug: bool = False):
     open_blocked = False
     open_block_reason: Optional[str] = None
     body_len: Optional[int] = None
+    search_after_file = None
+    search_blocked = False
+    search_block_reason: Optional[str] = None
     area_file = None
     area_confirmed = False
     segment_code = ""
@@ -289,9 +379,33 @@ async def main(manual_login: bool = False, debug: bool = False):
             page = await browser.get(START_URL)
             await page
             await asyncio.sleep(3)
+            open_file = await dump_html(page, "lj_reopened")
 
-        # ---- 第3步：面积筛选（先展开"更多及自定义"，再点面积档位）----
+        # ---- 第2步：搜索小区 ----
         if not open_blocked or manual_login:
+            log.info("[2] 搜索小区: %s", COMMUNITY_NAME)
+            try:
+                result_html = await _search_community(page, COMMUNITY_NAME)
+                search_after_file = await dump_html(page, "lj_search_after")
+                result_url = page.target.url or ""
+
+                # 搜索成功判定：页面含 sellListContent 和小区名
+                search_success = (
+                    "sellListContent" in result_html
+                    and community_name in result_html
+                )
+                if not search_success:
+                    search_blocked = True
+                    search_block_reason = "搜索未成功（页面无数据）"
+
+                log.info("[2] 搜索后 URL: %s, 搜索成功: %s", result_url, search_success)
+            except Exception as exc:
+                log.warning("[2] 搜索异常: %s", exc)
+                search_blocked = True
+                search_block_reason = f"搜索异常: {exc}"
+
+        # ---- 第3步：面积筛选 ----
+        if not search_blocked:
             log.info("[3] 填写面积筛选: %d-%d", AREA_MIN, AREA_MAX)
             area_confirmed, segment_code = await apply_area_filter(page, AREA_MIN, AREA_MAX)
             area_file = await dump_html(page, "lj_after_area")
@@ -303,19 +417,24 @@ async def main(manual_login: bool = False, debug: bool = False):
         # 判定结论
         if open_blocked and not manual_login:
             conclusion = f"首次被拦：{open_block_reason}，建议加 --manual-login。"
+        elif search_blocked:
+            conclusion = f"搜索后被拦：{search_block_reason}。"
         elif area_confirmed:
-            conclusion = f"面积筛选成功：{AREA_MIN}-{AREA_MAX}㎡ 档位 {segment_code}，在售 {area_prices_count} 条。"
+            conclusion = f"搜索+面积筛选成功：{COMMUNITY_NAME} {AREA_MIN}-{AREA_MAX}㎡ 档位 {segment_code}，在售 {area_prices_count} 条。"
         else:
             conclusion = "面积筛选未能成功，需查看 HTML。"
 
         print_summary(
             open_file=open_file,
+            search_after_file=search_after_file,
             area_file=area_file,
             error_file=None,
             open_url=open_url,
             open_title=open_title,
             open_blocked=open_blocked,
             open_block_reason=open_block_reason,
+            search_blocked=search_blocked,
+            search_block_reason=search_block_reason,
             area_confirmed=area_confirmed,
             segment_code=segment_code,
             area_url=area_url,
