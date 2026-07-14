@@ -5,6 +5,7 @@ from app.platforms import (
     AjkPlatformAdapter,
     FangPlatformAdapter,
     KePlatformAdapter,
+    LjPlatformAdapter,
     LyjPlatformAdapter,
     PlatformAdapter,
 )
@@ -12,4 +13,10 @@ from app.platforms import (
 
 def build_default_adapters() -> list[PlatformAdapter]:
     """默认启用的平台列表。"""
-    return [KePlatformAdapter(), AjkPlatformAdapter(), FangPlatformAdapter(), LyjPlatformAdapter()]
+    return [
+        KePlatformAdapter(),
+        AjkPlatformAdapter(),
+        FangPlatformAdapter(),
+        LjPlatformAdapter(),
+        LyjPlatformAdapter(),
+    ]

@@ -7,10 +7,10 @@ import argparse
 
 import uvicorn
 
-import config
+from app.core import config
 from app.api import create_app
-from app.debug_utils import set_debug_mode
-from app.logging_utils import setup_logging
+from app.utils.debug_utils import set_debug_mode
+from app.utils.logging_utils import setup_logging
 from app.runtime import RPARuntime
 
 

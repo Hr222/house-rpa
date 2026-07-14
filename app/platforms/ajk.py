@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import logging
 
-from app import ajk_adapter
-from app.models import InquiryRequest, PlatformSession
+from app.platforms.adapters import ajk as ajk_adapter
+from app.core.models import InquiryRequest, PlatformSession
 from app.platforms.ajk_constants import START_URL
 from app.platforms.base import PlatformAdapter
 
@@ -49,3 +49,6 @@ class AjkPlatformAdapter(PlatformAdapter):
 
     async def keepalive(self, session: PlatformSession) -> tuple[bool, str]:
         return await ajk_adapter.keepalive(session.page)
+
+    def detect_block(self, url: str, html: str) -> tuple[bool, str]:
+        return ajk_adapter.detect_block(url, html)

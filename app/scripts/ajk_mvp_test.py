@@ -19,11 +19,11 @@ from typing import Optional
 
 import nodriver as uc
 
-import config
-from app.debug_utils import dump_html as shared_dump_html
-from app.debug_utils import set_debug_mode
-from app.models import ListingSnapshot
-from app.algorithm import decide
+from app.core import config
+from app.utils.debug_utils import dump_html as shared_dump_html
+from app.utils.debug_utils import set_debug_mode
+from app.core.models import ListingSnapshot
+from app.core.algorithm import decide
 
 logging.basicConfig(
     level=logging.INFO,

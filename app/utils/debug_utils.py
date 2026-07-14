@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import config
+from app.core import config
 
 log = logging.getLogger(__name__)
 

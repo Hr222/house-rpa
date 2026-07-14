@@ -13,11 +13,12 @@ from typing import Callable, Optional
 
 import nodriver as uc
 
-import config
-from app.models import InquiryRequest, InquiryResult, PlatformSession
+from app.core import config
+from app.core.models import InquiryRequest, InquiryResult, PlatformSession
 from app.registry import build_default_adapters
 from app.service import RPAInquiryService
-from app.window_control import ensure_browser_foreground
+from app.utils.task_store import delete_task, save_task, load_pending_tasks
+from app.utils.window_control import ensure_browser_foreground
 
 log = logging.getLogger(__name__)
 
@@ -159,6 +160,8 @@ class RPARuntime:
         self._focus_browser_window("启动完成，等待登录")
         self.worker_task = asyncio.create_task(self._worker_loop(), name="rpa-worker")
         self.keepalive_task = asyncio.create_task(self._keepalive_loop(), name="rpa-keepalive")
+        # 恢复崩溃前残留的未完成任务
+        self._restore_pending_tasks()
         if self.enable_console_ready_confirmation:
             self.console_confirmation_task = asyncio.create_task(
                 self._console_confirmation_loop(),
@@ -213,6 +216,8 @@ class RPARuntime:
         record = InquiryTaskRecord(task_id=task_id, request=request)
         self.tasks[task_id] = record
         await self.queue.put(task_id)
+        # 持久化兜底：入队后写 JSON，进程崩溃后可恢复
+        save_task(task_id, asdict(request))
         return self._serialize_task(record)
 
     async def confirm_platform_ready(self, code: str) -> dict:
@@ -284,6 +289,8 @@ class RPARuntime:
                 record.finished_at = time.time()
                 self.current_task_id = None
                 self.queue.task_done()
+                # 任务完成（成功或失败），删除持久化文件
+                delete_task(task_id)
 
     async def _keepalive_loop(self):
         while True:
@@ -426,3 +433,25 @@ class RPARuntime:
             return
         log.info("尝试将浏览器置前: %s", reason)
         ensure_browser_foreground(self.browser_pid)
+
+    def _restore_pending_tasks(self):
+        """启动时恢复崩溃前未完成的任务（持久化兜底）。
+
+        正常情况下 persist 目录为空，仅在进程异常退出时残留 JSON 文件。
+        """
+        pending = load_pending_tasks()
+        if not pending:
+            return
+        for task_data in pending:
+            task_id = task_data.pop("task_id")
+            request = InquiryRequest(
+                community_name=task_data["community_name"],
+                area_min=task_data["area_min"],
+                area_max=task_data["area_max"],
+                city=task_data.get("city", "深圳"),
+                request_id=task_id,
+            )
+            record = InquiryTaskRecord(task_id=task_id, request=request)
+            self.tasks[task_id] = record
+            self.queue.put_nowait(task_id)
+        log.info("restored %d pending task(s) from crash", len(pending))

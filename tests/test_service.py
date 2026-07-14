@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from app.models import PlatformResult
+from app.core.models import PlatformResult
 from app.service import build_inquiry_result
 
 

@@ -25,9 +25,9 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-import config
-from app.debug_utils import dump_html
-from app.models import ListingSnapshot, PlatformResult
+from app.core import config
+from app.utils.debug_utils import dump_html
+from app.core.models import ListingSnapshot, PlatformResult
 from app.platforms.fang_constants import START_URL
 
 log = logging.getLogger(__name__)
@@ -61,6 +61,15 @@ def _is_login_html(html: str) -> bool:
         "扫码登录",
     )
     return any(marker in html for marker in markers)
+
+
+def detect_block(url: str, html: str) -> tuple[bool, str]:
+    """房天下风控/登录检测。"""
+    if _is_captcha_url(url) or _is_captcha_html(html or ""):
+        return True, "命中验证码拦截"
+    if _is_login_html(html or ""):
+        return True, "命中登录页"
+    return False, ""
 
 
 # ============================================================

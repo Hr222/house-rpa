@@ -9,14 +9,14 @@ import logging
 
 import nodriver as uc
 
-import config
-from app.debug_utils import set_debug_mode
-from app.logging_utils import setup_logging
-from app.models import InquiryRequest
-from app.price_utils import format_price
+from app.core import config
+from app.utils.debug_utils import set_debug_mode
+from app.utils.logging_utils import setup_logging
+from app.core.models import InquiryRequest
+from app.core.price_utils import format_price
 from app.registry import build_default_adapters
 from app.service import RPAInquiryService
-from app.window_control import ensure_browser_foreground
+from app.utils.window_control import ensure_browser_foreground
 
 TEST_COMMUNITY = "绿景虹湾"
 TEST_AREA_MIN = 70.0

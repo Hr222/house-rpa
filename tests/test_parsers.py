@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
-from app.models import DealRecord
-from app.parsers import (
+from app.core.models import DealRecord
+from app.parsers.ke import (
     filter_deal_prices_by_area,
     find_detail_link,
     find_sold_list_url,

@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app.models import InquiryRequest
+from app.core.models import InquiryRequest
 from app.runtime import RPARuntime
 
 

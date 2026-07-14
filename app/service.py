@@ -6,11 +6,11 @@ from __future__ import annotations
 import logging
 from typing import Iterable, Optional
 
-import config
-from app.algorithm import decide, mean
-from app.models import InquiryRequest, InquiryResult, PlatformResult, PlatformSession
+from app.core import config
+from app.core.algorithm import decide, mean
+from app.core.models import InquiryRequest, InquiryResult, PlatformResult, PlatformSession
 from app.platforms.base import PlatformAdapter
-from app.price_utils import format_price, round_price
+from app.core.price_utils import format_price, round_price
 
 log = logging.getLogger(__name__)
 
