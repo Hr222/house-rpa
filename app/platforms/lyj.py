@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import logging
 
-from app import lyj_adapter
-from app.models import InquiryRequest, PlatformSession
+from app.platforms.adapters import lyj as lyj_adapter
+from app.core.models import InquiryRequest, PlatformSession
 from app.platforms.base import PlatformAdapter
 from app.platforms.lyj_constants import START_URL
 
@@ -49,3 +49,6 @@ class LyjPlatformAdapter(PlatformAdapter):
 
     async def keepalive(self, session: PlatformSession) -> tuple[bool, str]:
         return await lyj_adapter.keepalive(session.page)
+
+    def detect_block(self, url: str, html: str) -> tuple[bool, str]:
+        return lyj_adapter.detect_block(url, html)

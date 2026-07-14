@@ -23,6 +23,8 @@ BASE_DIR = Path(__file__).resolve().parent
 DEBUG_DIR = BASE_DIR / "debug"
 #日志输出文件夹
 LOG_DIR = BASE_DIR / "logs"
+#任务持久化文件夹(崩溃兜底)
+PERSIST_DIR = BASE_DIR / "persist"
 
 # ===== 浏览器 =====
 BROWSER_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
@@ -30,6 +32,11 @@ BROWSER_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 # ===== API =====
 API_HOST = "127.0.0.1"
 API_PORT = 8000
+
+# ===== 结果回调（采集完成后主动通知客户端，客户端不轮询）=====
+# 格式：POST {CALLBACK_URL}/{task_id}，body 为询价结果 JSON。
+# 目前未定，先用占位符，后续客户端接口确定后填入。
+CALLBACK_URL = None
 
 # ===== 风控规避 =====
 DETAIL_TAB_LINGER_SECONDS = 60

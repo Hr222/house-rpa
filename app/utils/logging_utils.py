@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from threading import RLock
 
-import config
+from app.core import config
 
 
 class DailyFileHandler(logging.Handler):

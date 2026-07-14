@@ -20,12 +20,12 @@ from typing import Optional
 
 import nodriver as uc
 
-import config
-from app.algorithm import decide
-from app.debug_utils import dump_html as shared_dump_html
-from app.debug_utils import set_debug_mode
-from app.models import ListingSnapshot
-from app.price_utils import format_price
+from app.core import config
+from app.core.algorithm import decide
+from app.utils.debug_utils import dump_html as shared_dump_html
+from app.utils.debug_utils import set_debug_mode
+from app.core.models import ListingSnapshot
+from app.core.price_utils import format_price
 
 logging.basicConfig(
     level=logging.INFO,

@@ -5,7 +5,7 @@ import json
 import re
 from typing import Iterable, List, Optional
 
-from app.models import DealRecord, ListingSnapshot
+from app.core.models import DealRecord, ListingSnapshot
 
 try:
     from bs4 import BeautifulSoup

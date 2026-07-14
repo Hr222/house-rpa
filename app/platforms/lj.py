@@ -1,21 +1,21 @@
 # -*- coding: utf-8 -*-
-"""房天下平台适配器。"""
+"""链家平台适配器。"""
 
 from __future__ import annotations
 
 import logging
 
-from app.platforms.adapters import fang as fang_adapter
+from app.platforms.adapters import lj as lj_adapter
 from app.core.models import InquiryRequest, PlatformSession
 from app.platforms.base import PlatformAdapter
-from app.platforms.fang_constants import START_URL
+from app.platforms.lj_constants import START_URL
 
 log = logging.getLogger(__name__)
 
 
-class FangPlatformAdapter(PlatformAdapter):
-    code = "fang"
-    name = "房天下"
+class LjPlatformAdapter(PlatformAdapter):
+    code = "lj"
+    name = "链家"
     start_url = START_URL
 
     async def open_session(self, browser) -> PlatformSession:
@@ -30,7 +30,7 @@ class FangPlatformAdapter(PlatformAdapter):
         )
 
     async def collect(self, browser, session: PlatformSession, request: InquiryRequest):
-        result = await fang_adapter.collect(
+        result = await lj_adapter.collect(
             browser=browser,
             main_page=session.page,
             community_name=request.community_name,
@@ -39,16 +39,16 @@ class FangPlatformAdapter(PlatformAdapter):
             request_id=request.request_id,
         )
         try:
-            session.page = await fang_adapter.reset_to_start_page(session.page)
+            session.page = await lj_adapter.reset_to_start_page(session.page)
         except Exception as exc:
-            log.warning("failed to reset fang main page to standby: %s", exc)
+            log.warning("failed to reset lj main page to standby: %s", exc)
         return result
 
     async def check_ready(self, session: PlatformSession) -> tuple[bool, str]:
-        return await fang_adapter.probe_ready(session.page)
+        return await lj_adapter.probe_ready(session.page)
 
     async def keepalive(self, session: PlatformSession) -> tuple[bool, str]:
-        return await fang_adapter.keepalive(session.page)
+        return await lj_adapter.keepalive(session.page)
 
     def detect_block(self, url: str, html: str) -> tuple[bool, str]:
-        return fang_adapter.detect_block(url, html)
+        return lj_adapter.detect_block(url, html)

@@ -10,10 +10,11 @@ import re
 import time
 from typing import Optional
 
-import config
-from app import parsers
-from app.debug_utils import dump_html
-from app.models import ListingSnapshot, PlatformResult
+from app.core import config
+from app.parsers import ke as parsers
+from app.utils.debug_utils import dump_html
+from app.core.models import ListingSnapshot, PlatformResult
+from app.platforms.base import wait_for_manual_unblock
 from app.platforms.ke_constants import AREA_SEGMENTS, START_URL
 
 log = logging.getLogger(__name__)
@@ -84,6 +85,21 @@ def _is_manual_verify_html(html: str) -> bool:
         "点击按钮开始验证",
     )
     return any(marker in html for marker in markers)
+
+
+def detect_block(url: str, html: str) -> tuple[bool, str]:
+    """贝壳风控/登录检测。
+
+    贝壳区分人机验证和登录失效：
+    - 人机验证 → (True, "命中验证码拦截")
+    - 登录失效 → (True, "命中登录页")
+    - 正常     → (False, "")
+    """
+    if _is_manual_verify_html(html or ""):
+        return True, "命中验证码拦截"
+    if _is_login_url(url or "") or _is_login_html(html or ""):
+        return True, "命中登录页"
+    return False, ""
 
 
 def _extract_xiaoqu_id(detail_url: Optional[str]) -> Optional[str]:
@@ -336,6 +352,15 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
     for page_no in range(1, total_pages + 1):
         if page_no > 1:
             last_html = await _click_page_number(page, page_no)
+
+            # 翻页后风控检测（和链家同安全系统，被拦暂停等人工）
+            current_url = page.target.url or ""
+            blocked, reason = detect_block(current_url, last_html)
+            if blocked:
+                log.warning("第 %d 页翻页后被拦截(%s)，等待人工处理", page_no, reason)
+                await wait_for_manual_unblock()
+                # 人工处理后重新翻到当前页
+                last_html = await _click_page_number(page, page_no)
 
         await _human_linger_on_result_page(page, page_no)
         last_html = await page.get_content()

@@ -11,9 +11,9 @@ from typing import Iterable, Optional
 
 import nodriver as uc
 
-import config
-from app.debug_utils import dump_html as shared_dump_html
-from app.debug_utils import set_debug_mode
+from app.core import config
+from app.utils.debug_utils import dump_html as shared_dump_html
+from app.utils.debug_utils import set_debug_mode
 from app.platforms.ke_constants import START_URL
 
 logging.basicConfig(

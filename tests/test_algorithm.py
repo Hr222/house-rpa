@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """算法单元测试。"""
-from app.algorithm import mean, decide
+from app.core.algorithm import mean, decide
 
 
 class TestMean:

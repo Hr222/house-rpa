@@ -14,11 +14,11 @@ from typing import Optional
 
 import nodriver as uc
 
-import config
-from app import parsers
-from app.debug_utils import dump_html as shared_dump_html
-from app.debug_utils import set_debug_mode
-from app.ke_adapter import _get_search_input, _human_click, _submit_search
+from app.core import config
+from app.parsers import ke as parsers
+from app.utils.debug_utils import dump_html as shared_dump_html
+from app.utils.debug_utils import set_debug_mode
+from app.platforms.adapters.ke import _get_search_input, _human_click, _submit_search
 from app.platforms.ke_constants import START_URL
 
 logging.basicConfig(
