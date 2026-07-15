@@ -27,7 +27,7 @@ def test_build_inquiry_result_averages_all_platforms():
     assert result.quote_avg == 150.0
     # deal_avg = mean([90, 100]) = 95.0
     assert result.deal_avg == 95.0
-    # diff = |150-95|/150 = 36.7% > 10% → DEAL_ONLY → 95.0
+    # diff = |150-95|/95 = 57.9% > 10% → DEAL_ONLY → 95.0
     assert result.final_price == 95.0
     assert result.branch == "DEAL_ONLY"
 

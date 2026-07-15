@@ -39,10 +39,15 @@ BROWSER_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 API_HOST = "127.0.0.1"
 API_PORT = 8000
 
-# ===== 结果回调（采集完成后主动通知客户端，客户端不轮询）=====
+# ===== 结果回调（采集完成后主动 POST 推送给客户端，客户端不轮询）=====
 # 格式：POST {CALLBACK_URL}/{task_id}，body 为询价结果 JSON。
-# 目前未定，先用占位符，后续客户端接口确定后填入。
-CALLBACK_URL = None
+# 未配置（None / 空）则不推送，客户端可用 GET /inquiries/{taskId} 兜底（受限流约束）。
+CALLBACK_URL = os.getenv("RPA_CALLBACK_URL") or None
+
+# ===== GET 查询限流（防止客户端高强度轮询）=====
+# 同一 taskId 两次 GET /inquiries/{taskId} 的最小间隔秒数。
+# 客户端主要靠回调拿结果，GET 只是偶发兜底，故设下限。
+GET_INQUIRY_MIN_INTERVAL = float(os.getenv("RPA_GET_MIN_INTERVAL", "10"))
 
 # ===== 风控规避 =====
 DETAIL_TAB_LINGER_SECONDS = 15

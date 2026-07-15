@@ -29,7 +29,6 @@ from app.platforms.base import human_linger
 
 log = logging.getLogger(__name__)
 
-PAGE_LINGER_SECONDS = config.PAGE_LINGER_SECONDS
 
 
 # ============================================================

@@ -28,6 +28,7 @@
 - 浏览器常驻，不为每次询价重新冷启动。
 - 由人工先完成登录，确认就绪后才允许接单。
 - 后台接收询价请求，并串行执行采集流程。
+- 采集完成后主动 POST 回调通知客户端（客户端无需轮询）；GET 查询保留作兜底并受限流。
 - 平台被风控或登录失效时，服务状态可明确降级。
 - 调试模式下可导出关键 HTML，方便定位页面结构变化。
 - 日志按自然日切分，适合 7x24 值守机运行。
@@ -169,12 +170,11 @@ jeethink-rpa/
 │  │  └─ window_control.py  # Windows 浏览器置前控制
 │  ├─ scripts/
 │  │  ├─ api_server.py      # 服务启动入口
-│  │  ├─ mvp_test.py        # 贝壳 MVP 测试
+│  │  ├─ ke_mvp_test.py     # 贝壳 MVP 测试
 │  │  ├─ ajk_mvp_test.py    # 安居客 MVP 测试
 │  │  ├─ lj_mvp_test.py     # 链家 MVP 测试
 │  │  ├─ fang_mvp_test.py   # 房天下 MVP 测试
-│  │  ├─ lyj_mvp_test.py    # 乐有家 MVP 测试
-│  │  └─ batch_mvp_test.py  # 批量测试
+│  │  └─ lyj_mvp_test.py    # 乐有家 MVP 测试
 │  ├─ api.py                # FastAPI 路由定义
 │  ├─ runtime.py            # 服务运行时
 │  ├─ service.py            # 服务编排
@@ -280,6 +280,7 @@ FastAPI 入口。接口清单：
 | `logging_utils.py` | 日志：控制台 + 文件，按自然日切换 |
 | `debug_utils.py` | 调试 HTML 导出，`--debug` 或 `RPA_DEBUG=1` 开启 |
 | `task_store.py` | 任务持久化：入队写 JSON，完成删，崩溃恢复 |
+| `callback.py` | 结果回调推送：任务结束主动 POST 给客户端（带重试） |
 | `window_control.py` | Windows 浏览器置前（Win32 API） |
 
 ## 8. 配置与常量边界
@@ -289,11 +290,15 @@ FastAPI 入口。接口清单：
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `DEBUG_MODE` | `False` | 调试开关（`RPA_DEBUG=1`） |
-| `BROWSER_PATH` | Edge 默认路径 | 浏览器可执行文件 |
+| `BROWSER_PATH` | Chrome 默认路径 | 浏览器可执行文件 |
 | `API_HOST` / `API_PORT` | `127.0.0.1:8000` | API 监听 |
-| `DETAIL_TAB_LINGER_SECONDS` | `60` | 详情页停留时间 |
-| `PLATFORM_KEEPALIVE_INTERVAL` | `300` | 保活间隔（秒） |
-| `PAGE_LINGER_SECONDS` | `8.0` | 结果页滚动停留 |
+| `DETAIL_TAB_LINGER_SECONDS` | `15` | 详情页停留时间 |
+| `REQUEST_TIMEOUT` | `30` | 请求超时（秒） |
+| `PLATFORM_KEEPALIVE_INTERVAL` | `120` | 保活间隔（秒） |
+| `HEARTBEAT_INTERVAL` | `20` | WebSocket 心跳间隔（秒） |
+| `PAGE_LINGER_SECONDS` | `3.5` | 结果页滚动停留 |
+| `CALLBACK_URL` | `None` | 结果回调基址（`RPA_CALLBACK_URL`）。配置后任务结束主动 POST 推送，为空则不推送，客户端走 GET 兜底 |
+| `GET_INQUIRY_MIN_INTERVAL` | `10` | GET 查询限流：同一 taskId 两次查询最小间隔秒数（`RPA_GET_MIN_INTERVAL`） |
 | `DEAL_DIFF_THRESHOLD` | `0.10` | 差值阈值 |
 | `get_no_deal_discount()` | `0.9` | 无成交折扣（可运行时更新，弱持久化） |
 
@@ -339,17 +344,19 @@ python -m app.scripts.api_server --debug
 ### 单平台 MVP 测试
 
 ```bash
-python -m app.scripts.mvp_test          # 贝壳
+python -m app.scripts.ke_mvp_test       # 贝壳
 python -m app.scripts.ajk_mvp_test      # 安居客
 python -m app.scripts.lj_mvp_test       # 链家
 python -m app.scripts.fang_mvp_test     # 房天下
 python -m app.scripts.lyj_mvp_test      # 乐有家
 ```
 
-### 批量测试
+### 接单测试
+
+服务就绪后，用根目录 `test_inquiry.py` 发一次真实询价，观察浏览器采集并轮询结果：
 
 ```bash
-python -m app.scripts.batch_mvp_test --scenario "绿景虹湾,70,90" --scenario "半岛城邦花园一期,110,140"
+python test_inquiry.py
 ```
 
 ## 11. API 约定
@@ -383,9 +390,53 @@ python -m app.scripts.batch_mvp_test --scenario "绿景虹湾,70,90" --scenario 
 }
 ```
 
-### 查询询价结果
+### 结果回调（主机制）
+
+配置 `RPA_CALLBACK_URL` 后，服务在每次询价任务结束（成功或失败）时，主动 `POST` 推送结果到 `{RPA_CALLBACK_URL}/{taskId}`，客户端**无需轮询**。未配置时则不推送。
+
+请求 body 示例（成功）：
+
+```json
+{
+  "taskId": "demo-001",
+  "statusCode": "COMPLETED",
+  "status": "已完成",
+  "success": true,
+  "quoteAvg": 85635.00,
+  "dealAvg": 71086.50,
+  "finalPrice": 71086.50,
+  "branchCode": "TAKE_LOWER",
+  "branch": "差异在阈值内，取较低值"
+}
+```
+
+请求 body 示例（失败）：
+
+```json
+{
+  "taskId": "demo-001",
+  "statusCode": "FAILED",
+  "status": "失败",
+  "success": false,
+  "error": "采集异常原因"
+}
+```
+
+推送可靠性：HTTP 非 2xx 或网络异常会重试（默认 3 次，递增延迟），全部失败仅记日志，不影响任务结果落库。
+
+### 查询询价结果（兜底，受限流约束）
 
 `GET /inquiries/{taskId}`
+
+作为回调的兜底手段，客户端可偶尔查一次。为防高强度轮询，同一 `taskId` 两次查询最小间隔 `RPA_GET_MIN_INTERVAL`（默认 10 秒，见 §8），间隔内重复查询返回 `429`：
+
+```json
+{
+  "code": "TOO_MANY_REQUESTS",
+  "message": "查询过于频繁，请在 10 秒后重试",
+  "data": { "taskId": "demo-001", "retryAfter": 10 }
+}
+```
 
 完成后返回的 `data` 核心结构：
 
@@ -509,11 +560,11 @@ app/core/persist/
 ## 14. 当前约束
 
 - 运行环境以 Windows 值守机为前提。
-- 浏览器使用 Edge。
+- 浏览器使用 Chrome（`config.BROWSER_PATH`）。
 - 平台需要人工前置登录。
 - 命中平台人机验证时，仍需要人工介入。
-- 当前仅实现单浏览器、单任务串行执行。
-- 当前服务层选第一个 `SUCCESS` 平台结果出价，未做多平台汇总均值。
-- 当前仅贝壳有独立 HTML 解析器（`parsers/ke.py`），其他平台解析逻辑在各自 adapter 内。
+- 任务串行执行；每个平台分配独立浏览器实例，采集时多平台并行（`asyncio.gather`）。
+- 服务层把所有 `SUCCESS` 平台的在售均价、成交单价**跨平台累加平均**后，再走 `decide()` 算最终价（不再是取第一个 `SUCCESS` 平台）。
+- 仅贝壳有独立 HTML 解析器（`parsers/ke.py`），其他平台解析逻辑在各自 adapter 内。
 
 这些约束是有意为之，优先保证稳定可用，而不是过早做复杂并发或多浏览器编排。

@@ -19,8 +19,6 @@ from app.platforms.ke_constants import AREA_SEGMENTS, START_URL
 
 log = logging.getLogger(__name__)
 
-PAGE_LINGER_SECONDS = config.PAGE_LINGER_SECONDS
-
 
 async def _delay(min_s: float = 1.5, max_s: float = 3.5):
     """真人操作间隔。"""

@@ -7,7 +7,7 @@
 ## 1. 模块定位
 
 jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + nodriver),
-做房产询价的浏览器自动化采集。当前已接入贝壳(ke)、安居客(ajk),按多平台可扩展设计。
+做房产询价的浏览器自动化采集。已接入贝壳(ke)、安居客(ajk)、链家(lj)、房天下(fang)、乐有家(lyj) 共 5 个平台,按多平台可扩展设计。
 
 - 入口服务:`app/scripts/api_server.py`
 - 平台扩展指南:`docs/平台扩展对接文档.md`
@@ -18,7 +18,7 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 - Python 3.14,nodriver(反检测浏览器库,**非 selenium/playwright**)。
 - 分层:`api → runtime → service → platform adapter → parser/algorithm`。
 - 平台适配器统一继承 `app/platforms/base.py:PlatformAdapter`。
-- 最终取值走 `app/algorithm.py:decide()`,**纯函数,所有平台共用**。
+- 最终取值走 `app/core/algorithm.py:decide()`,**纯函数,所有平台共用**。
 
 ## 3. ★ 业务流程不可擅改(最高约束)
 
@@ -27,7 +27,7 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 **业务流程是定死的。没有用户的明确指令,AI 不得擅自:**
 - 增删采集步骤(如自作主张加循环检测、删掉某步)
 - 改变步骤顺序
-- 修改 `algorithm.py` / `service.py` / `models.py` / `runtime.py` / `api.py`
+- 修改 `core/algorithm.py` / `service.py` / `core/models.py` / `runtime.py` / `api.py`
 - 改变 `decide()` 的决策规则或阈值
 
 **平台差异 ≠ 改流程。** 某平台因特性"略过"某步(如安居客无成交→不点详情),
@@ -54,10 +54,10 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
    - `evaluate` 要拿返回值传 `return_by_value=True`
 5. **正式落地三件套**(MVP 验证通过后):
    - `app/platforms/<code>_constants.py` — 平台固有常量(首页 URL、档位等)
-   - `app/<code>_adapter.py` — 真实采集逻辑(MVP 验证过的函数移植过来)
+   - `app/platforms/adapters/<code>.py` — 真实采集逻辑(MVP 验证过的函数移植过来)
    - `app/platforms/<code>.py` — 薄壳适配器,委托给 adapter
 6. **注册两处**:`app/platforms/__init__.py` 导出 + `app/registry.py` 追加。
-7. **不改核心层**:`models/algorithm/service/runtime/api` 一行不改。
+7. **不改核心层**:`core/models` / `core/algorithm` / `service` / `runtime` / `api` 一行不改。
 
 ## 5. 平台特性差异记录
 
@@ -67,12 +67,19 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 |---|---|---|---|---|---|---|
 | 贝壳 | ke | 预设档位 a1-a7 | 有,翻页 | 详情页有 | 详情页有,采 | 必须点 |
 | 安居客 | ajk | 自定义输入框填值 | 无,单页全展示 | **无** | 结果页社区卡片(从业者认为有水分) | 不用点 |
+| 链家 | lj | 更多选项→自定义输入 | 有,翻页 | 详情→成交列表翻页 | 不取 | 必须点 |
+| 房天下 | fang | 自定义输入框填值 | 有,翻页 | 详情→小区成交 tab | 不取 | Ctrl+点击 |
+| 乐有家 | lyj | 自定义输入框填值 | 有,翻页 | **无** | 结果页社区信息卡 | 不用点 |
 
 ### 安居客特殊处理(已落地,勿改)
 - **无成交记录**:业务上把**挂牌均价顶替 `deal_prices`**,让 `decide()` 正常走对比逻辑。
-  代码在 `ajk_adapter._do_collect`,注释已标明。
+  代码在 `ajk` adapter `_do_collect`,注释已标明。
 - **无分页**:滚动到底即可(`_scroll_to_bottom`)。
 - **不点详情**:挂牌均价在结果页社区卡片就有(`parse_community_avg_price`)。
+
+### 乐有家特殊处理(已落地,勿改)
+- 与安居客同理:**无成交记录**,业务上用**小区均价顶替 `deal_prices`**。
+- 搜索走 URL 参数(`/esf/?c={小区名}`),不走输入框回车。
 
 ## 6. 编码风格
 
@@ -80,7 +87,7 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 - 日志用 `logging.getLogger(__name__)`,关键步骤打 info,异常打 warning/error 带上下文。
 - 函数前缀约定:模块内部用 `_` 前缀(如 `_human_click`),对外标准接口不加(如 `collect`/`probe_ready`)。
 - 真人节奏:nodriver 操作间用 `asyncio.sleep` 加随机间隔,模拟真人,降低风控触发。
-- 调试 HTML 导出走 `app/debug_utils.py:dump_html`,默认不导出,`--debug` 或 `RPA_DEBUG=1` 开启。
+- 调试 HTML 导出走 `app/utils/debug_utils.py:dump_html`,默认不导出,`--debug` 或 `RPA_DEBUG=1` 开启。
 
 ## 7. 验证要求
 
@@ -93,14 +100,17 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 
 | 文件 | 职责 | 改动频率 |
 |---|---|---|
-| `app/algorithm.py` | 最终取值决策(纯函数) | 极低,业务规则锁定 |
+| `app/core/algorithm.py` | 最终取值决策(纯函数) | 极低,业务规则锁定 |
 | `app/service.py` | 平台调度+汇总 | 低 |
 | `app/runtime.py` | 浏览器/队列/保活/状态机 | 低 |
 | `app/api.py` | FastAPI 接口 | 低 |
-| `app/models.py` | 数据模型(平台无关) | 低 |
-| `app/parsers.py` | 贝壳 HTML 解析 | 跟随贝壳页面变化 |
-| `app/ke_adapter.py` | 贝壳采集 | 跟随贝壳页面变化 |
-| `app/ajk_adapter.py` | 安居客采集 | 跟随安居客页面变化 |
+| `app/core/models.py` | 数据模型(平台无关) | 低 |
+| `app/parsers/ke.py` | 贝壳 HTML 解析 | 跟随贝壳页面变化 |
+| `app/platforms/adapters/ke.py` | 贝壳采集 | 跟随贝壳页面变化 |
+| `app/platforms/adapters/ajk.py` | 安居客采集 | 跟随安居客页面变化 |
+| `app/platforms/adapters/lj.py` | 链家采集 | 跟随链家页面变化 |
+| `app/platforms/adapters/fang.py` | 房天下采集 | 跟随房天下页面变化 |
+| `app/platforms/adapters/lyj.py` | 乐有家采集 | 跟随乐有家页面变化 |
 | `app/platforms/<code>.py` | 平台薄壳适配器 | 新平台接入时 |
 | `app/platforms/<code>_constants.py` | 平台固有常量 | 新平台接入时 |
 | `app/scripts/<code>_mvp_test.py` | MVP 验证脚本 | 对接期间,验证完保留 |
