@@ -18,6 +18,7 @@ from app.core.models import InquiryRequest, InquiryResult, PlatformSession
 from app.registry import build_default_adapters
 from app.service import RPAInquiryService
 from app.utils.task_store import delete_task, save_task, load_pending_tasks
+from app.utils.callback import notify_result
 from app.utils.window_control import ensure_browser_foreground, tile_browser_windows
 
 log = logging.getLogger(__name__)
@@ -136,6 +137,7 @@ class RPARuntime:
         self.current_task_id: Optional[str] = None
         self.status = "BOOTING"
         self.message = "启动中"
+        self._last_get_at: dict[str, float] = {}  # GET 限流：taskId -> 上次查询时间戳
 
     async def start(self):
         if self.service is not None:
@@ -230,6 +232,23 @@ class RPARuntime:
         if record is None:
             return None
         return self._serialize_task(record)
+
+    def check_get_allowed(self, task_id: str) -> tuple[bool, float]:
+        """GET 查询限流：同一 taskId 两次查询最小间隔 GET_INQUIRY_MIN_INTERVAL 秒。
+
+        Returns:
+            (是否允许, 需等待秒数)。允许时等待秒数为 0。
+        """
+        now = time.time()
+        last = self._last_get_at.get(task_id)
+        if last is None:
+            return True, 0.0
+        wait = config.GET_INQUIRY_MIN_INTERVAL - (now - last)
+        return wait <= 0, max(wait, 0.0)
+
+    def register_get(self, task_id: str) -> None:
+        """记录一次 GET 查询的时间戳。"""
+        self._last_get_at[task_id] = time.time()
 
     async def enqueue_inquiry(self, request: InquiryRequest) -> dict:
         if not self.is_ready():
@@ -348,6 +367,8 @@ class RPARuntime:
                 self.queue.task_done()
                 # 任务完成（成功或失败），删除持久化文件
                 delete_task(task_id)
+                # 主动推送结果给客户端（配置了 CALLBACK_URL 才生效）
+                await self._notify_callback(record)
 
     async def _keepalive_loop(self):
         while True:
@@ -529,3 +550,30 @@ class RPARuntime:
             self.tasks[task_id] = record
             self.queue.put_nowait(task_id)
         log.info("restored %d pending task(s) from crash", len(pending))
+
+    def _build_callback_payload(self, record: InquiryTaskRecord) -> dict:
+        """组装回调 body：任务号 + 状态 + 计算结果。"""
+        payload: dict = {
+            "taskId": record.task_id,
+            "statusCode": record.status,
+            "status": TASK_STATUS_TEXT.get(record.status, record.status),
+            "success": record.result is not None and record.result.success,
+        }
+        if record.status == "COMPLETED" and record.result is not None:
+            payload["quoteAvg"] = record.result.quote_avg
+            payload["dealAvg"] = record.result.deal_avg
+            payload["finalPrice"] = record.result.final_price
+            payload["branchCode"] = record.result.branch
+            payload["branch"] = BRANCH_TEXT.get(record.result.branch, record.result.branch)
+        elif record.status == "FAILED":
+            payload["error"] = record.error
+        return payload
+
+    async def _notify_callback(self, record: InquiryTaskRecord) -> None:
+        """任务结束后主动推送结果。CALLBACK_URL 未配置则跳过。"""
+        callback_url = config.CALLBACK_URL
+        if not callback_url:
+            return
+        payload = self._build_callback_payload(record)
+        log.info("开始推送回调: taskId=%s status=%s", record.task_id, record.status)
+        await notify_result(callback_url, record.task_id, payload)

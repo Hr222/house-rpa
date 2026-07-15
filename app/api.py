@@ -116,9 +116,22 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
     @app.get("/inquiries/{task_id}")
     async def get_inquiry(task_id: str):
         current_runtime: RPARuntime = app.state.runtime
+        # 限流：同一 taskId 两次查询最小间隔 GET_INQUIRY_MIN_INTERVAL 秒
+        allowed, wait = current_runtime.check_get_allowed(task_id)
+        if not allowed:
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "code": "TOO_MANY_REQUESTS",
+                    "message": f"查询过于频繁，请在 {wait:.0f} 秒后重试",
+                    "data": {"taskId": task_id, "retryAfter": round(wait)},
+                },
+            )
         task = current_runtime.get_task(task_id)
         if task is None:
+            # 不存在的任务不计入限流
             raise HTTPException(status_code=404, detail="未找到对应任务")
+        current_runtime.register_get(task_id)
         if task["statusCode"] == "COMPLETED" and task["result"] is not None:
             data = task["result"]["data"]
         else:

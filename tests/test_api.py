@@ -9,6 +9,7 @@ class FakeRuntime:
     def __init__(self):
         self.ready = False
         self.task = None
+        self._last_get_at = {}
         self.platform = {
             "code": "ke",
             "name": "贝壳",
@@ -84,6 +85,18 @@ class FakeRuntime:
             return task
         return None
 
+    def check_get_allowed(self, task_id: str):
+        import time
+        now = time.time()
+        last = self._last_get_at.get(task_id)
+        if last is None:
+            return True, 0.0
+        return False, 10.0  # 测试里固定返回"还需等 10 秒"
+
+    def register_get(self, task_id: str):
+        import time
+        self._last_get_at[task_id] = time.time()
+
 
 def test_health_ready_returns_503_when_not_ready():
     app = create_app(runtime=FakeRuntime(), manage_runtime=False)
@@ -130,3 +143,30 @@ def test_confirm_ready_then_create_and_query_inquiry():
         "dealAvg": 71086.5,
         "finalPrice": 71086.5,
     }
+
+
+def test_get_inquiry_rate_limited_after_first_call():
+    """同一 taskId 第二次 GET 应返回 429，并带 retryAfter。"""
+    app = create_app(runtime=FakeRuntime(), manage_runtime=False)
+    with TestClient(app) as client:
+        client.post("/admin/platforms/ke/confirm-ready")  # 先置就绪
+        client.post("/inquiries", json={"communityName": "x", "areaMin": 70, "areaMax": 90})
+        first = client.get("/inquiries/task-1")
+        second = client.get("/inquiries/task-1")
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert second.json()["code"] == "TOO_MANY_REQUESTS"
+    assert second.json()["data"]["retryAfter"] == 10
+    assert "taskId" in second.json()["data"]
+
+
+def test_get_inquiry_404_not_counted_as_rate_limit():
+    """查询不存在的任务返回 404，不计入限流（连续两次都 404，不触发 429）。"""
+    app = create_app(runtime=FakeRuntime(), manage_runtime=False)
+    with TestClient(app) as client:
+        first = client.get("/inquiries/not-exist")
+        second = client.get("/inquiries/not-exist")
+
+    assert first.status_code == 404
+    assert second.status_code == 404
