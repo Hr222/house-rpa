@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """安居客 MVP 测试脚本。
 
-逐步迭代：在同一脚本里一步步验证安居客链路，不另建脚本。
-当前覆盖：第1步 首页打开 / 第2步 搜索绿景虹湾。
+完整业务链路：打开首页 → 人工登录 → 搜索小区 → 面积筛选 →
+在售解析 → 挂牌均价顶替成交 → 算法决策。
 
-安居客城市站规则：https://{城市全拼}.anjuke.com/sale/
-与贝壳的拼音缩写（sz/sh/bj）不同，安居客用全拼。
+用法：
+  python -m app.scripts.ajk_mvp_test --manual-login --debug
 """
 
 from __future__ import annotations
@@ -24,11 +24,10 @@ from app.utils.debug_utils import dump_html as shared_dump_html
 from app.utils.debug_utils import set_debug_mode
 from app.core.models import ListingSnapshot
 from app.core.algorithm import decide
+from app.utils.mvp_result import print_mvp_result
+from app.utils.logging_utils import setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+setup_logging()
 log = logging.getLogger("ajk-mvp-test")
 
 # 安居客深圳二手房首页
@@ -427,61 +426,52 @@ def print_summary(
     before_file: Optional[Path],
     after_file: Optional[Path],
     area_file: Optional[Path],
-    error_file: Optional[Path],
     open_url: str,
     open_blocked: bool,
     open_block_reason: Optional[str],
-    search_input_selector: Optional[str],
-    submit_selector: Optional[str],
     result_url: str,
-    result_title: Optional[str],
     result_blocked: bool,
     result_block_reason: Optional[str],
     area_confirmed: bool,
     area_url: str,
-    area_prices_count: int,
-    main_listing_prices: list,
+    listing_snapshots: list,
     listing_avg: Optional[float],
     listing_price: Optional[float],
-    deal_avg: Optional[float],
     final_price: Optional[float],
     branch: str,
-    body_len: Optional[int],
-    prices_count: int,
     conclusion: str,
 ):
-    print()
-    print("=" * 60)
-    print("安居客测试完成")
-    print(f"打开首页 HTML: {open_file}")
-    print(f"搜索前 HTML: {before_file}")
-    print(f"搜索后 HTML: {after_file}")
-    print(f"面积筛选后 HTML: {area_file}")
-    print(f"异常现场 HTML: {error_file}")
-    print(f"首次打开 URL: {open_url}")
-    print(f"首次是否被拦: {open_blocked}")
-    print(f"首次拦截原因: {open_block_reason}")
-    print(f"搜索框命中选择器: {search_input_selector}")
-    print(f"提交按钮命中选择器: {submit_selector}")
-    print(f"结果页 URL: {result_url}")
-    print(f"结果页标题: {result_title}")
-    print(f"结果页是否被拦: {result_blocked}")
-    print(f"结果页拦截原因: {result_block_reason}")
-    print(f"面积确定点击: {area_confirmed}")
-    print(f"面积筛选后 URL: {area_url}")
-    print(f"面积筛选后在售单价数量: {area_prices_count}")
-    print(f"主结果区在售单价数: {len(main_listing_prices)}")
-    if main_listing_prices:
-        print(f"主结果区在售均价(quoteAvg): {listing_avg:.2f} 元/㎡")
-        print(f"主结果区在售单价前10条: {main_listing_prices[:10]}")
-    print(f"挂牌均价(顶替成交 dealAvg): {listing_price}")
-    print(f"最终取值(finalPrice): {final_price}")
-    print(f"决策分支(branch): {branch}")
-    print(f"结果页正文长度: {body_len}")
-    print(f"在售单价数量: {prices_count}")
-    print(f"结论: {conclusion}")
-    print("=" * 60)
-    print()
+    print_mvp_result(
+        platform="安居客",
+        community_name=COMMUNITY_NAME,
+        area_min=AREA_MIN,
+        area_max=AREA_MAX,
+        trace={
+            "home_blocked": open_blocked,
+            "search_url": result_url,
+            "area_ok": area_confirmed,
+            "area_url": area_url,
+            "area_pages": 0,
+        },
+        listings={
+            "count": len(listing_snapshots),
+            "avg": listing_avg,
+            "snapshots": listing_snapshots,
+        },
+        deals={
+            "count": 0,
+            "avg": listing_price,
+            "records": [],
+            "substitute": f"挂牌均价顶替 {listing_price}元/㎡",
+        },
+        result={
+            "quote_avg": listing_avg or 0,
+            "deal_avg": listing_price,
+            "final_price": final_price or 0,
+            "branch": branch,
+        },
+        elapsed=0,
+    )
 
 
 async def main(manual_login: bool = False, debug: bool = False):
@@ -652,7 +642,7 @@ async def main(manual_login: bool = False, debug: bool = False):
                 quote_avg=listing_avg,
                 deal_avg=deal_avg,
                 diff_threshold=config.DEAL_DIFF_THRESHOLD,
-                no_deal_discount=config.NO_DEAL_DISCOUNT,
+                no_deal_discount=config.get_no_deal_discount(),
             )
             final_price = decision.final_price
             branch = decision.branch
@@ -689,27 +679,19 @@ async def main(manual_login: bool = False, debug: bool = False):
             before_file=before_file,
             after_file=after_file,
             area_file=area_file,
-            error_file=None,
             open_url=open_url,
             open_blocked=open_blocked,
             open_block_reason=open_block_reason,
-            search_input_selector=search_input_selector,
-            submit_selector=submit_selector,
             result_url=result_url,
-            result_title=result_title,
             result_blocked=result_blocked,
             result_block_reason=result_block_reason,
             area_confirmed=area_confirmed,
             area_url=area_url,
-            area_prices_count=area_prices_count,
-            main_listing_prices=main_listing_prices,
+            listing_snapshots=listing_snapshots,
             listing_avg=listing_avg,
             listing_price=listing_price,
-            deal_avg=deal_avg,
             final_price=final_price,
             branch=branch,
-            body_len=body_len,
-            prices_count=prices_count,
             conclusion=conclusion,
         )
 

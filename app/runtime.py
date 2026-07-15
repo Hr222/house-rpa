@@ -18,7 +18,7 @@ from app.core.models import InquiryRequest, InquiryResult, PlatformSession
 from app.registry import build_default_adapters
 from app.service import RPAInquiryService
 from app.utils.task_store import delete_task, save_task, load_pending_tasks
-from app.utils.window_control import ensure_browser_foreground
+from app.utils.window_control import ensure_browser_foreground, tile_browser_windows
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +102,7 @@ async def _default_browser_factory():
         headless=False,
         browser_executable_path=config.BROWSER_PATH,
         lang="zh-CN",
+        browser_args=["--force-device-scale-factor=1"],
     )
 
 
@@ -122,7 +123,7 @@ class RPARuntime:
         self.keepalive_interval = keepalive_interval
         self.enable_console_ready_confirmation = enable_console_ready_confirmation
 
-        self.browser = None
+        self.browsers: dict[str, object] = {}
         self.browser_pid: Optional[int] = None
         self.service: Optional[RPAInquiryService] = None
         self.platform_states: dict[str, PlatformRuntimeState] = {}
@@ -130,6 +131,7 @@ class RPARuntime:
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.worker_task: Optional[asyncio.Task] = None
         self.keepalive_task: Optional[asyncio.Task] = None
+        self.heartbeat_task: Optional[asyncio.Task] = None
         self.console_confirmation_task: Optional[asyncio.Task] = None
         self.current_task_id: Optional[str] = None
         self.status = "BOOTING"
@@ -141,10 +143,29 @@ class RPARuntime:
 
         self.status = "BOOTING"
         self.message = "启动浏览器中"
-        self.browser = await self.browser_factory()
-        self.browser_pid = getattr(getattr(self.browser, "_process", None), "pid", None)
-        self.service = RPAInquiryService(self.browser, self.adapters)
+
+        # 为每个平台创建独立浏览器实例
+        self.browsers = {}
+        for adapter in self.adapters:
+            browser = await self.browser_factory()
+            self.browsers[adapter.code] = browser
+            log.info("browser started for %s", adapter.name)
+
+        self.browser_pid = getattr(
+            getattr(list(self.browsers.values())[0], "_process", None), "pid", None
+        ) if self.browsers else None
+
+        self.service = RPAInquiryService(self.browsers, self.adapters)
         sessions = await self.service.start()
+
+        # 将 5 个浏览器窗口平铺填满屏幕
+        browser_pids = [
+            getattr(getattr(b, "_process", None), "pid", None)
+            for b in self.browsers.values()
+        ]
+        browser_pids = [p for p in browser_pids if p is not None]
+        tile_browser_windows(browser_pids)
+        await asyncio.sleep(1.5)  # 等窗口位置生效
 
         for code, session in sessions.items():
             self.platform_states[code] = PlatformRuntimeState(
@@ -160,8 +181,7 @@ class RPARuntime:
         self._focus_browser_window("启动完成，等待登录")
         self.worker_task = asyncio.create_task(self._worker_loop(), name="rpa-worker")
         self.keepalive_task = asyncio.create_task(self._keepalive_loop(), name="rpa-keepalive")
-        # 恢复崩溃前残留的未完成任务
-        self._restore_pending_tasks()
+        self.heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="rpa-heartbeat")
         if self.enable_console_ready_confirmation:
             self.console_confirmation_task = asyncio.create_task(
                 self._console_confirmation_loop(),
@@ -169,20 +189,24 @@ class RPARuntime:
             )
 
     async def stop(self):
-        for task in (self.worker_task, self.keepalive_task, self.console_confirmation_task):
+        for task in (self.worker_task, self.keepalive_task, self.heartbeat_task, self.console_confirmation_task):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
 
-        if self.browser is not None:
-            self.browser.stop()
+        for browser in getattr(self, "browsers", {}).values():
+            try:
+                browser.stop()
+            except Exception:
+                pass
 
-        self.browser = None
+        self.browsers = {}
         self.browser_pid = None
         self.service = None
         self.worker_task = None
         self.keepalive_task = None
+        self.heartbeat_task = None
         self.console_confirmation_task = None
         self.current_task_id = None
         self.status = "STOPPING"
@@ -241,6 +265,21 @@ class RPARuntime:
             self._focus_browser_window(f"{state.name} 仍需人工处理")
         return self._serialize_platform_state(state)
 
+    def _tile_after_login(self):
+        """登录确认后重新平铺窗口。"""
+        if not hasattr(self, "browsers"):
+            return
+        pids = []
+        for b in self.browsers.values():
+            try:
+                pid = getattr(getattr(b, "_process", None), "pid", None)
+                if pid:
+                    pids.append(pid)
+            except Exception:
+                pass
+        if pids:
+            tile_browser_windows(pids)
+
     def _refresh_service_status(self):
         states = list(self.platform_states.values())
         if not states:
@@ -249,6 +288,8 @@ class RPARuntime:
             return
 
         if all(item.status == "READY" for item in states):
+            if self.status != "READY":
+                self._tile_after_login()
             self.status = "READY"
             self.message = "所有平台已就绪"
             return
@@ -266,6 +307,18 @@ class RPARuntime:
         self.status = "DEGRADED"
         self.message = "存在异常平台"
 
+    async def _wait_until_ready(self):
+        """等待所有平台确认就绪后再执行任务。"""
+        while True:
+            unready = [
+                code for code, state in self.platform_states.items()
+                if state.status == "WAIT_LOGIN"
+            ]
+            if not unready:
+                return
+            log.info("等待 %d 个平台就绪: %s", len(unready), unready)
+            await asyncio.sleep(3)
+
     async def _worker_loop(self):
         while True:
             task_id = await self.queue.get()
@@ -274,6 +327,10 @@ class RPARuntime:
             record.started_at = time.time()
             self.current_task_id = task_id
             try:
+                # 等待所有平台就绪
+                await self._wait_until_ready()
+                # 置前浏览器窗口（nodriver 操作需要焦点）
+                self._focus_browser_window("开始执行采集任务")
                 assert self.service is not None
                 result = await self.service.run_inquiry(record.request)
                 record.result = result
@@ -323,6 +380,23 @@ class RPARuntime:
                     self._focus_browser_window(f"{state.name} 状态变为 {state.status}")
 
             self._refresh_service_status()
+
+    async def _heartbeat_loop(self):
+        """每 HEARTBEAT_INTERVAL 秒发轻量 ping 保持 WebSocket 存活。"""
+        while True:
+            await asyncio.sleep(config.HEARTBEAT_INTERVAL)
+            if self.current_task_id is not None:
+                continue  # 采集任务进行中，不打断
+            for code, state in self.platform_states.items():
+                if state.status not in {"READY", "WAIT_LOGIN"}:
+                    continue
+                try:
+                    session = self.service.sessions.get(code)
+                    if session:
+                        await session.page.select("body", timeout=3)
+                        await session.page
+                except Exception:
+                    pass
 
     async def _console_confirmation_loop(self):
         while True:

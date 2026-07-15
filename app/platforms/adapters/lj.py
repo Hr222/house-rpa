@@ -31,7 +31,7 @@ from typing import Optional
 from app.core import config
 from app.utils.debug_utils import dump_html
 from app.core.models import ListingSnapshot, PlatformResult
-from app.platforms.base import wait_for_manual_unblock
+from app.platforms.base import wait_for_manual_unblock, human_linger
 from app.platforms.lj_constants import START_URL
 
 log = logging.getLogger(__name__)
@@ -110,12 +110,12 @@ async def _human_click(page, element, label: str) -> bool:
         pass
     await asyncio.sleep(0.3)
     last_error = None
-    for clicker in ("mouse", "js"):
+    for clicker in ("js", "mouse"):
         try:
-            if clicker == "mouse":
-                await element.mouse_click()
-            else:
+            if clicker == "js":
                 await element.click()
+            else:
+                await element.mouse_click()
             await page
             await asyncio.sleep(0.8)
             return True
@@ -395,26 +395,6 @@ async def _click_listing_page_number(page, page_no: int) -> str:
     return await page.get_content()
 
 
-async def _human_linger_on_result_page(page, page_no: int, linger_seconds: float = config.PAGE_LINGER_SECONDS):
-    """真人式滚动停留，参考贝壳 human_linger_on_result_page。"""
-    start = time.monotonic()
-    scroll_steps = [
-        ("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.25));", 1.6),
-        ("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.55));", 1.8),
-        ("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.82));", 1.8),
-        ("window.scrollTo(0, document.body.scrollHeight);", 1.2),
-    ]
-    for expression, pause in scroll_steps:
-        try:
-            await page.evaluate(expression)
-            await page
-        except Exception:
-            pass
-        await asyncio.sleep(pause)
-    remain = linger_seconds - (time.monotonic() - start)
-    if remain > 0:
-        await asyncio.sleep(remain)
-
 
 async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
     """逐页采集在售 HTML，合并后返回。参考贝壳 collect_listing_pages。
@@ -434,7 +414,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
     for page_no in range(1, total_pages + 1):
         if page_no > 1:
             # 翻页前真人滚动停留（防风控）
-            await _human_linger_on_result_page(page, page_no)
+            await human_linger(page, page_no)
             last_html = await _click_listing_page_number(page, page_no)
 
             # 翻页后用通用风控检测
@@ -448,7 +428,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
 
             all_html_parts.append(_cut_main(last_html))
         else:
-            await _human_linger_on_result_page(page, page_no)
+            await human_linger(page, page_no)
 
         last_html = await page.get_content()
         if page_no > 1:
@@ -601,6 +581,14 @@ def _filter_deal_records(records: list, area_min: float, area_max: float, months
 # 页面复位
 # ============================================================
 
+async def _close_tab_later(tab):
+    """详情页停留后关闭。"""
+    try:
+        await asyncio.sleep(config.DETAIL_TAB_LINGER_SECONDS)
+        await tab.close()
+    except Exception as exc:
+        log.warning("关闭详情标签异常: %s", exc)
+
 async def reset_to_start_page(page):
     """回到链家二手房首页，并获取新的页面上下文。"""
     refreshed_page = await page.get(START_URL)
@@ -614,7 +602,11 @@ async def reset_to_start_page(page):
 # ============================================================
 
 async def probe_ready(main_page) -> tuple[bool, str]:
-    """检查当前页是否已登录、未被风控、且能执行搜索。"""
+    """检查当前页是否已登录、未被风控、且能执行搜索。
+
+    正向检测：搜索框 + 页面有房源列表（sellListContent）说明已登录且正常。
+    captcha/login 拦截检测保留在 _do_collect 的关键步骤中。
+    """
     try:
         await main_page.select("body", timeout=10)
         await main_page
@@ -623,9 +615,8 @@ async def probe_ready(main_page) -> tuple[bool, str]:
     except Exception as exc:
         return False, f"页面不可用: {exc}"
 
-    blocked, reason = detect_block(current_url, html)
-    if blocked:
-        return False, reason
+    if "lianjia.com" not in current_url:
+        return False, f"未在链家域名，当前 URL: {current_url}"
 
     try:
         inp = await main_page.select("#searchInput", timeout=3)
@@ -633,6 +624,11 @@ async def probe_ready(main_page) -> tuple[bool, str]:
             return False, "未找到搜索框，页面未就绪"
     except Exception:
         return False, "未找到搜索框，页面未就绪"
+
+    # 已登录的首页一定会有 sellListContent（房源列表区）
+    if "sellListContent" not in (html or ""):
+        return False, "页面无房源列表，可能未登录或未加载完成"
+
     return True, "READY"
 
 
@@ -713,14 +709,18 @@ async def _do_collect(
     await _dump(main_page, "lj_keyword_result")
     keyword_url = main_page.target.url or ""
 
-    # 3. 判风控/登录（用通用检测）
-    blocked, reason = detect_block(keyword_url, keyword_html)
-    if blocked:
-        status = "WAIT_MANUAL_VERIFY" if "验证" in reason else "LOGIN_EXPIRED"
+    # 3. 判搜索成功（正向检测，避免标记词误判）
+    search_ok = (
+        "sellListContent" in keyword_html
+        and community_name in keyword_html
+    )
+    if not search_ok:
         return PlatformResult(
-            name="链家", status=status,
-            reason=f"搜索后{reason}",
-            request_id=request_id, elapsed_seconds=_elapsed(),
+            name="链家",
+            status="WAIT_MANUAL_VERIFY" if "验证" in keyword_html else "NO_DATA",
+            reason="搜索未返回有效房源" if "sellListContent" not in keyword_html else f"未匹配到: {community_name}",
+            request_id=request_id,
+            elapsed_seconds=_elapsed(),
         )
 
     # 4. 填面积筛选
@@ -730,14 +730,6 @@ async def _do_collect(
 
     area_url = main_page.target.url or ""
     area_html = await main_page.get_content()
-    blocked, reason = detect_block(area_url, area_html)
-    if blocked:
-        status = "WAIT_MANUAL_VERIFY" if "验证" in reason else "LOGIN_EXPIRED"
-        return PlatformResult(
-            name="链家", status=status,
-            reason=f"面积筛选后{reason}",
-            request_id=request_id, elapsed_seconds=_elapsed(),
-        )
     if not area_confirmed:
         return PlatformResult(
             name="链家", status="ERROR",
@@ -767,6 +759,8 @@ async def _do_collect(
 
     # 8. 详情页抓小区均价 + 点"查看全部成交记录"
     deal_prices = []
+    deal_record_dicts = []
+    deal_tab2 = None  # 成交记录标签页引用
     if detail_clicked and detail_tab is not None:
         await detail_tab
         await asyncio.sleep(3)
@@ -818,6 +812,10 @@ async def _do_collect(
 
                     filtered_deals = _filter_deal_records(all_deals, area_min, area_max, months=6)
                     deal_prices = [d[3] for d in filtered_deals if d[3] is not None]
+                    deal_record_dicts = [
+                        {"area": d[0], "date": d[1], "price": d[3]}
+                        for d in filtered_deals if d[3] is not None
+                    ]
                     log.info(
                         "成交记录: 总 %d 条, %.0f-%.0f㎡且近半年 %d 条",
                         len(all_deals), area_min, area_max, len(filtered_deals),
@@ -834,12 +832,24 @@ async def _do_collect(
         len(quote_prices),
     )
 
+    # 关闭详情/成交标签，切回主页面
+    for t in [detail_tab, deal_tab2 if deal_clicked else None]:
+        if t is not None:
+            asyncio.ensure_future(_close_tab_later(t))
+    try:
+        await main_page.activate()
+        await main_page
+    except Exception as exc:
+        log.warning("切回主页面失败: %s", exc)
+
     return PlatformResult(
         name="链家",
         status="SUCCESS",
         community_avg_price=None,
         quote_prices=quote_prices,
         deal_prices=deal_prices,
+        deal_records=deal_record_dicts,
+        deal_source="成交记录",
         request_id=request_id,
         detail_url=None,
         elapsed_seconds=_elapsed(),

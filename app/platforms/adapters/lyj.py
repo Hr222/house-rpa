@@ -25,6 +25,7 @@ from app.core import config
 from app.utils.debug_utils import dump_html
 from app.core.models import ListingSnapshot, PlatformResult
 from app.platforms.lyj_constants import START_URL
+from app.platforms.base import human_linger
 
 log = logging.getLogger(__name__)
 
@@ -103,12 +104,12 @@ async def _human_click(page, element, label: str) -> bool:
         pass
     await asyncio.sleep(0.3)
     last_error = None
-    for clicker in ("mouse", "js"):
+    for clicker in ("js", "mouse"):
         try:
-            if clicker == "mouse":
-                await element.mouse_click()
-            else:
+            if clicker == "js":
                 await element.click()
+            else:
+                await element.mouse_click()
             await page
             await asyncio.sleep(1.0)
             return True
@@ -372,25 +373,6 @@ async def _click_page_number(page, page_no: int) -> str:
     return await _wait_for_results_loaded(page, expected_page=page_no)
 
 
-async def _human_linger_on_result_page(page, linger_seconds: float = PAGE_LINGER_SECONDS):
-    start_val = time.monotonic()
-    scroll_steps = [
-        ("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.25));", 1.6),
-        ("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.55));", 1.8),
-        ("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.82));", 1.8),
-        ("window.scrollTo(0, document.body.scrollHeight);", 1.2),
-    ]
-    for expression, pause in scroll_steps:
-        try:
-            await page.evaluate(expression)
-            await page
-        except Exception:
-            pass
-        await asyncio.sleep(pause)
-    remain = linger_seconds - (time.monotonic() - start_val)
-    if remain > 0:
-        await asyncio.sleep(remain)
-
 
 async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
     """逐页采集在售房源快照。"""
@@ -401,7 +383,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
         if page_no > 1:
             last_html = await _click_page_number(page, page_no)
 
-        await _human_linger_on_result_page(page)
+        await human_linger(page, 0)
         last_html = await page.get_content()
         await _dump(page, f"lyj_area_page_{page_no}")
 
@@ -439,11 +421,12 @@ async def probe_ready(main_page) -> tuple[bool, str]:
     if _is_login_html(html):
         return False, "当前会话未登录或已失效"
 
-    # 乐有家首页有筛选区就算就绪
+    # 已登录的首页一定会有筛选区
     try:
         await main_page.select("div.selected-index", timeout=3)
     except Exception:
-        return False, "未找到筛选区，页面未就绪"
+        return False, "未找到筛选区，页面可能未登录或未加载完成"
+
     return True, "READY"
 
 
@@ -539,12 +522,14 @@ async def _do_collect(
             elapsed_seconds=round(time.time() - started_at, 2),
         )
     if "很抱歉，没有找到" in keyword_html:
+        log.info("乐有家无匹配小区: %s，记作在售0/成交0", community_name)
         return PlatformResult(
             name="乐有家",
-            status="NO_DATA",
-            reason=f"搜索无匹配结果: {community_name}",
+            status="SUCCESS",
+            reason=f"乐有家无{community_name}在售记录和成交记录",
             request_id=request_id,
             elapsed_seconds=round(time.time() - started_at, 2),
+            deal_source="无数据",
         )
 
     # 4. 填面积筛选
@@ -607,6 +592,7 @@ async def _do_collect(
         community_avg_price=None,
         quote_prices=quote_prices,
         deal_prices=deal_prices,
+        deal_source="小区均价顶替",
         request_id=request_id,
         detail_url=None,
         elapsed_seconds=round(time.time() - started_at, 2),

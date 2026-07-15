@@ -29,6 +29,7 @@ from app.core import config
 from app.utils.debug_utils import dump_html
 from app.core.models import ListingSnapshot, PlatformResult
 from app.platforms.fang_constants import START_URL
+from app.platforms.base import human_linger
 
 log = logging.getLogger(__name__)
 
@@ -154,12 +155,12 @@ async def _human_click(page, element, label: str) -> bool:
         pass
     await asyncio.sleep(0.3)
     last_error = None
-    for clicker in ("mouse", "js"):
+    for clicker in ("js", "mouse"):
         try:
-            if clicker == "mouse":
-                await element.mouse_click()
-            else:
+            if clicker == "js":
                 await element.click()
+            else:
+                await element.mouse_click()
             await page
             await asyncio.sleep(0.8)
             return True
@@ -301,30 +302,6 @@ async def _click_page_number(page, page_no: int) -> str:
     return await _wait_for_results_loaded(page, expected_page=page_no)
 
 
-async def _human_linger_on_result_page(page, page_no: int, linger_seconds: float = config.PAGE_LINGER_SECONDS):
-    """真人式滚动停留，参考贝壳 human_linger_on_result_page。
-
-    渐进式滚动到 25%/55%/82%/100%，每档停留，总停留约 PAGE_LINGER_SECONDS。
-    """
-    start = time.monotonic()
-    scroll_steps = [
-        ("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.25));", 1.6),
-        ("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.55));", 1.8),
-        ("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.82));", 1.8),
-        ("window.scrollTo(0, document.body.scrollHeight);", 1.2),
-    ]
-    for expression, pause in scroll_steps:
-        try:
-            await page.evaluate(expression)
-            await page
-        except Exception:
-            pass
-        await asyncio.sleep(pause)
-
-    remain = linger_seconds - (time.monotonic() - start)
-    if remain > 0:
-        await asyncio.sleep(remain)
-
 
 async def _collect_listing_pages(page, first_page_html: str, total_pages: int, dump_prefix: str = "fang_area_page"):
     """逐页采集，合并所有页的主结果区 HTML 供后续解析。参考贝壳 collect_listing_pages。
@@ -349,7 +326,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, d
             last_html = await _click_page_number(page, page_no)
             all_html_parts.append(_cut_main(last_html))
 
-        await _human_linger_on_result_page(page, page_no)
+        await human_linger(page, page_no)
         last_html = await page.get_content()
         page_file = await _dump(page, f"{dump_prefix}_{page_no}")
         page_files.append(page_file)
@@ -378,13 +355,9 @@ async def _wait_for_new_tab(browser, old_tab_ids: set, expected_url, timeout=20)
 
 
 async def _click_detail_link(browser, page):
-    """Ctrl+点击"小区详情"在后台打开新标签页，返回 (是否成功, 详情标签页)。
+    """点击"小区详情"打开新标签页，返回 (是否成功, 详情标签页)。
 
-    DOM: <a class="href_xq" target="_blank" href="/loupan/xxx.htm">小区详情&gt;</a>
-    入口只在第一页有，必须在翻页前点。
-
-    关键：必须用 Ctrl+点击（modifiers=2），让新标签在后台打开，
-    焦点留在当前主页面，否则详情标签会抢占焦点导致主页面翻页卡住。
+    多浏览器模式下直接用 human_click，每个平台独立浏览器，打开新标签不影响其他平台。
     """
     old_tab_ids = {id(tab) for tab in browser.tabs}
 
@@ -406,25 +379,7 @@ async def _click_detail_link(browser, page):
     if not detail_link:
         return False, None
 
-    try:
-        await detail_link.scroll_into_view()
-    except Exception:
-        pass
-    await asyncio.sleep(0.3)
-
-    # Ctrl+点击：取元素中心坐标，用 Tab.mouse_click 传 modifiers=2
-    # Element.mouse_click 的 modifiers 参数实际没传给 CDP，所以用 Tab 级别
-    try:
-        pos = await detail_link.get_position()
-        if pos and pos.center:
-            cx, cy = pos.center
-            await page.mouse_click(cx, cy, modifiers=2)
-            await page
-            await asyncio.sleep(1.5)
-        else:
-            return False, None
-    except Exception as exc:
-        log.warning("ctrl+click detail link failed: %s", exc)
+    if not await _human_click(page, detail_link, "detail link"):
         return False, None
 
     detail_tab = await _wait_for_new_tab(browser, old_tab_ids, "/loupan/")
@@ -442,17 +397,83 @@ async def _click_deal_tab(detail_tab):
         deal_link = await detail_tab.find("小区成交", timeout=4)
     except Exception:
         deal_link = None
-    if deal_link and await _human_click(detail_tab, deal_link, "deal tab"):
-        return True
+    if deal_link:
+        try:
+            await deal_link.click()
+            await detail_tab
+            await asyncio.sleep(2)
+            return True
+        except Exception:
+            pass
     # 兜底：精确选择器，必须同时含 /loupan/ 和 /chengjiao/
     for selector in ("a[href*='/loupan/'][href*='/chengjiao/']",):
         try:
             deal_link = await detail_tab.select(selector, timeout=4)
         except Exception:
             deal_link = None
-        if deal_link and await _human_click(detail_tab, deal_link, "deal tab"):
-            return True
+        if deal_link:
+            try:
+                await deal_link.click()
+                await detail_tab
+                await asyncio.sleep(2)
+                return True
+            except Exception:
+                pass
     return False
+
+
+# ============================================================
+# ============================================================
+# 成交页导航与解析（后台并行任务）
+# ============================================================
+
+async def _navigate_and_parse_deals(detail_tab, main_page, area_min: float, area_max: float) -> tuple[list, list]:
+    """在 detail_tab 上导航到成交页并解析（与分页并行）。
+
+    解析完后立刻关闭 detail_tab 并切回 main_page，避免下一页单被卡住。
+    """
+    deal_prices: list = []
+    deal_record_dicts: list = []
+    try:
+        await detail_tab
+        await _dump(detail_tab, "fang_detail")
+        detail_html = await detail_tab.get_content()
+        deal_match = re.search(
+            r'href=["\'](//[^"\']+?/loupan/\d+/chengjiao/[^"\']*)["\']',
+            detail_html,
+        )
+        if deal_match:
+            deal_url = f"https:{deal_match.group(1)}" if deal_match.group(1).startswith("//") else deal_match.group(1)
+            log.info("导航到成交页: %s", deal_url)
+            await detail_tab.get(deal_url)
+            await detail_tab
+            log.info("成交页当前 URL: %s", detail_tab.target.url)
+        else:
+            log.warning("详情页未找到成交页链接")
+            return deal_prices, deal_record_dicts
+
+        await _dump(detail_tab, "fang_deal")
+        deal_html = await detail_tab.get_content()
+        all_deals = _parse_deal_records(deal_html)
+        filtered_deals = _filter_deal_records(all_deals, area_min, area_max, months=6)
+        deal_prices = [d[3] for d in filtered_deals]
+        deal_record_dicts = [
+            {"area": d[0], "date": d[1], "price": d[3]}
+            for d in filtered_deals if d[3] is not None
+        ]
+        log.info(
+            "成交记录: 总 %d 条, %.0f-%.0f㎡且近半年 %d 条",
+            len(all_deals), area_min, area_max, len(filtered_deals),
+        )
+    except Exception as exc:
+        log.warning("成交页导航/解析失败: %s", exc)
+    finally:
+        # 解析完立刻切回主页，tab 等 _close_tab_later 自动关
+        try:
+            await main_page.activate()
+        except Exception as exc:
+            log.warning("切回主页面失败: %s", exc)
+    return deal_prices, deal_record_dicts
 
 
 # ============================================================
@@ -622,6 +643,15 @@ async def _search_community(page, community_name: str) -> str:
 # 页面复位
 # ============================================================
 
+async def _close_tab_later(tab):
+    """详情页停留后关闭。"""
+    try:
+        await asyncio.sleep(config.DETAIL_TAB_LINGER_SECONDS)
+        await tab.close()
+    except Exception as exc:
+        log.warning("关闭详情标签异常: %s", exc)
+
+
 async def reset_to_start_page(page):
     """回到房天下二手房首页，并获取新的页面上下文。"""
     refreshed_page = await page.get(START_URL)
@@ -782,9 +812,19 @@ async def _do_collect(
     else:
         log.warning("未能打开小区详情页")
 
-    # 6. 分页采集在售房源
+    # 6. 并行：分页采集在售房源 + 导航成交页
     total_pages = _parse_total_pages(area_html)
     log.info("总页数: %d", total_pages)
+
+    # 启动成交页导航任务（后台并行，解析完自动关成交 tab 切回主页）
+    deal_prices_future: Optional[asyncio.Task] = None
+    deal_record_dicts_future: Optional[asyncio.Task] = None
+    if detail_tab is not None:
+        deal_prices_future = asyncio.ensure_future(
+            _navigate_and_parse_deals(detail_tab, main_page, area_min, area_max)
+        )
+
+    # 分页采集在售房源（主线程，和成交导航并行）
     merged_html, page_counts, page_files, last_page_html = await _collect_listing_pages(
         main_page, area_html, total_pages
     )
@@ -801,37 +841,13 @@ async def _do_collect(
             request_id=request_id,
             elapsed_seconds=round(time.time() - started_at, 2),
         )
-
     quote_avg = sum(quote_prices) / len(quote_prices)
 
-    # 8. 切到详情标签，点"小区成交"tab，抓成交记录
+    # 8. 等待成交导航完成（已在后台并行，途中已自动关 tab + 切回主页）
     deal_prices = []
-    if detail_tab is not None:
-        try:
-            await detail_tab.activate()
-            await detail_tab
-        except Exception as exc:
-            log.warning("激活详情标签失败: %s", exc)
-        await asyncio.sleep(3)
-        await _dump(detail_tab, "fang_detail")
-
-        deal_clicked = await _click_deal_tab(detail_tab)
-        if deal_clicked:
-            await detail_tab
-            await asyncio.sleep(3)
-            await _dump(detail_tab, "fang_deal")
-            deal_html = await detail_tab.get_content()
-            all_deals = _parse_deal_records(deal_html)
-            filtered_deals = _filter_deal_records(all_deals, area_min, area_max, months=6)
-            deal_prices = [d[3] for d in filtered_deals]
-            log.info(
-                "成交记录: 总 %d 条, %.0f-%.0f㎡且近半年 %d 条",
-                len(all_deals), area_min, area_max, len(filtered_deals),
-            )
-        else:
-            log.warning("未能点击小区成交 tab")
-    else:
-        log.warning("无详情标签，跳过成交记录采集")
+    deal_record_dicts = []
+    if deal_prices_future is not None:
+        deal_prices, deal_record_dicts = await deal_prices_future
 
     deal_avg = sum(deal_prices) / len(deal_prices) if deal_prices else None
 
@@ -842,12 +858,18 @@ async def _do_collect(
         len(quote_prices),
     )
 
+    # 9. 关掉详情/成交标签（已被并行任务关闭，二次关防御）
+    if detail_tab is not None:
+        asyncio.ensure_future(_close_tab_later(detail_tab))
+
     return PlatformResult(
         name="房天下",
         status="SUCCESS",
         community_avg_price=None,
         quote_prices=quote_prices,
         deal_prices=deal_prices,
+        deal_records=deal_record_dicts,
+        deal_source="成交记录",
         request_id=request_id,
         detail_url=None,
         elapsed_seconds=round(time.time() - started_at, 2),

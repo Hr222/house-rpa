@@ -40,11 +40,13 @@ class PlatformResult:
     community_avg_price: Optional[float] = None   # 详情页小区均价(元/㎡) = P_quote
     quote_prices: List[float] = field(default_factory=list)   # 在售单价列表
     deal_prices: List[float] = field(default_factory=list)    # 成交单价列表(筛选后)
+    deal_records: List[dict] = field(default_factory=list)     # 成交记录详情 [{area,date,total,price},...]
     reason: Optional[str] = None
     request_id: Optional[str] = None
     detail_url: Optional[str] = None
     elapsed_seconds: Optional[float] = None
     listing_snapshots: List[ListingSnapshot] = field(default_factory=list)
+    deal_source: str = ""   # 成交来源说明: "成交记录" / "挂牌均价顶替" / "小区均价顶替" / "无"
 
 
 @dataclass(slots=True)

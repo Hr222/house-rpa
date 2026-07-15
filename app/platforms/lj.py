@@ -18,8 +18,8 @@ class LjPlatformAdapter(PlatformAdapter):
     name = "链家"
     start_url = START_URL
 
-    async def open_session(self, browser) -> PlatformSession:
-        page = await browser.get(self.start_url)
+    async def open_session(self, browser, new_tab=False) -> PlatformSession:
+        page = await browser.get(self.start_url, new_tab=new_tab)
         await page
         return PlatformSession(
             code=self.code,
@@ -44,11 +44,20 @@ class LjPlatformAdapter(PlatformAdapter):
             log.warning("failed to reset lj main page to standby: %s", exc)
         return result
 
-    async def check_ready(self, session: PlatformSession) -> tuple[bool, str]:
-        return await lj_adapter.probe_ready(session.page)
-
-    async def keepalive(self, session: PlatformSession) -> tuple[bool, str]:
-        return await lj_adapter.keepalive(session.page)
+    async def _probe_ready(self, page, html: str) -> tuple[bool, str]:
+        """链家特有：域名 + 搜索框 + 房源列表。登录检测由基类负责。"""
+        current_url = page.target.url or ""
+        if "lianjia.com" not in current_url:
+            return False, f"未在链家域名，当前 URL: {current_url}"
+        try:
+            inp = await page.select("#searchInput", timeout=3)
+            if inp is None:
+                return False, "未找到搜索框"
+        except Exception:
+            return False, "未找到搜索框"
+        if "sellListContent" not in (html or ""):
+            return False, "页面无房源列表"
+        return True, "READY"
 
     def detect_block(self, url: str, html: str) -> tuple[bool, str]:
         return lj_adapter.detect_block(url, html)

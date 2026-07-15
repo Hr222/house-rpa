@@ -1,24 +1,25 @@
 # jeethink-rpa
 
-面向房产询价场景的 RPA 服务工程。当前已接入贝壳二手房平台，整体按“多平台可扩展”思路设计，后续可以继续接入链家、安居客、房天下、乐有家等平台。
+面向房产询价场景的 RPA 服务工程。已接入贝壳、安居客、链家、房天下、乐有家 5 个房产平台，整体按"多平台可扩展"思路设计。
 
 项目目标不是一次性脚本，而是一套可长期驻留、可人工介入、可接收外部询价请求的 RPA 工程。
 
 ## 目录索引
 
 - [1. 项目定位](#1-项目定位)
-- [2. 当前业务链路](#2-当前业务链路)
-- [3. 业务取值规则](#3-业务取值规则)
-- [4. 架构分层](#4-架构分层)
-- [5. 目录说明](#5-目录说明)
-- [6. 核心模块说明](#6-核心模块说明)
-- [7. 配置与常量边界](#7-配置与常量边界)
-- [8. 启动流程](#8-启动流程)
-- [9. 运行方式](#9-运行方式)
-- [10. API 约定](#10-api-约定)
-- [11. 日志与调试](#11-日志与调试)
-- [12. 当前约束](#12-当前约束)
-- [13. 后续扩展建议](#13-后续扩展建议)
+- [2. 已接入平台及差异](#2-已接入平台及差异)
+- [3. 业务链路](#3-业务链路)
+- [4. 业务取值规则](#4-业务取值规则)
+- [5. 架构分层](#5-架构分层)
+- [6. 目录说明](#6-目录说明)
+- [7. 核心模块说明](#7-核心模块说明)
+- [8. 配置与常量边界](#8-配置与常量边界)
+- [9. 启动流程](#9-启动流程)
+- [10. 运行方式](#10-运行方式)
+- [11. API 约定](#11-api-约定)
+- [12. 崩溃恢复与弱持久化](#12-崩溃恢复与弱持久化)
+- [13. 日志与调试](#13-日志与调试)
+- [14. 当前约束](#14-当前约束)
 
 ## 1. 项目定位
 
@@ -30,30 +31,46 @@
 - 平台被风控或登录失效时，服务状态可明确降级。
 - 调试模式下可导出关键 HTML，方便定位页面结构变化。
 - 日志按自然日切分，适合 7x24 值守机运行。
+- 任务入队时持久化，进程崩溃后重启自动恢复未完成任务。
+- 算法参数（无成交折扣）支持运行时动态更新，弱持久化重启不丢失。
 
-当前只接入了贝壳平台，但核心结构已经为多平台预留。
+## 2. 已接入平台及差异
 
-## 2. 当前业务链路
+| 平台 | code | 面积筛选 | 分页 | 成交记录 | 小区均价 | 详情页 |
+|------|------|---------|------|---------|---------|--------|
+| 贝壳 | ke | 预设档位 a1-a7 | 有，翻页 | 详情页有 | 详情页有 | 必须点 |
+| 安居客 | ajk | 自定义输入框填值 | 无，滚动到底 | **无**（挂牌均价顶替） | 结果页社区卡片 | 不点 |
+| 链家 | lj | 更多选项→自定义输入 | 有，翻页 | 详情→成交列表翻页 | 不取 | 必须点 |
+| 房天下 | fang | 自定义输入框填值 | 有，翻页 | 详情→小区成交 tab | 不取 | Ctrl+点击 |
+| 乐有家 | lyj | 自定义输入框填值 | 有，翻页 | **无**（小区均价顶替） | 结果页社区信息卡 | 不点 |
 
-贝壳平台当前主流程如下：
+### 平台差异说明
 
-1. 启动浏览器并打开二手房首页。
-2. 人工在前台完成人机登录。
-3. 回到终端按回车，确认平台 `READY`。
+- **安居客**：无成交记录，业务上用挂牌均价顶替 `deal_prices`；无分页，滚动到底即可；不点详情页。
+- **乐有家**：同安居客，无成交记录，小区均价顶替 `deal_prices`；搜索走 URL 参数。
+- **链家**：贝壳子公司，DOM 高度相似但面积筛选走"更多选项→自定义输入"，成交筛选用严格区间 + 近半年（与贝壳 ±20% 容差不同）。
+- **房天下**：成交筛选用严格区间 + 近半年；详情入口只在第一页，Ctrl+点击后台打开。
+
+## 3. 业务链路
+
+通用主流程（各平台按差异微调）：
+
+1. 启动浏览器并打开各平台二手房首页。
+2. 人工在前台完成各平台登录。
+3. 通过 API `POST /admin/platforms/{code}/confirm-ready` 或终端回车确认就绪。
 4. 接收询价请求：`communityName`、`areaMin`、`areaMax`。
 5. 刷新常驻页面，执行轻量保活。
-6. 先搜索目标小区。
-7. 再在结果页点击面积档位。
-8. 抓取主结果区在售单价，过滤广告和猜你喜欢。
-9. 如存在分页，按真实点击页码方式翻页并采集。
-10. 点击“小区详情”。
-11. 抓取小区参考均价和成交案例。
-12. 对成交案例按面积做筛选后计算成交均价。
+6. 搜索目标小区。
+7. 结果页按面积筛选。
+8. 抓取主结果区在售单价，过滤推荐/广告区块。
+9. 如有分页，按真实点击页码方式翻页并采集。
+10. 如需详情页，打开小区详情。
+11. 抓取小区均价和成交案例（平台有则采，无则跳过或顶替）。
+12. 对成交案例按面积筛选后计算成交均价。
 13. 按业务规则计算最终单价。
-14. 返回结果。
-15. 详情页后台停留一段时间后自动关闭，主页面回到首页待命。
+14. 返回结果，页面回到待命状态。
 
-当前核心返回字段：
+核心返回字段：
 
 ```json
 {
@@ -63,283 +80,243 @@
 }
 ```
 
-## 3. 业务取值规则
+## 4. 业务取值规则
 
 ### 在售均价
 
-- 从抓到的在售单价列表中取平均值。
+从抓到的在售单价列表中取平均值。
 
 ### 成交均价
 
-- 先对成交案例按面积做筛选。
-- 筛选规则为：落在请求面积上下浮动 `20%` 以内的数据才保留。
-- 对筛选后的成交单价取平均值。
+各平台成交筛选规则不同：
+
+- **贝壳**：对成交案例按请求面积上下浮动 `20%` 筛选后取均价。
+- **链家 / 房天下**：严格面积区间 + 近半年（6 个月）筛选后取均价。
+- **安居客 / 乐有家**：无成交记录，用平台挂牌均价顶替 `deal_prices`。
 
 ### 最终取值
 
-- 业务目标口径：按当前所有已接入平台的数据理解。
-- 当前实现口径：由于当前仅接入贝壳，现阶段结果等价于贝壳单平台结果。
+代码位置：`app/core/algorithm.py:decide()`
+
 - 若 `quoteAvg` 和 `dealAvg` 都存在：
-- 先计算差值比例：`|quoteAvg - dealAvg| / dealAvg`
-- 若差值比例 `<= 10%`，取较低值。
-- 若差值比例 `> 10%`，只取 `dealAvg`。
-- 若没有 `dealAvg`，取 `quoteAvg * 0.9`。
-- 若没有 `quoteAvg` 但有 `dealAvg`，直接取 `dealAvg`。
+  - 先计算差值比例：`|quoteAvg - dealAvg| / dealAvg`
+  - 若差值比例 `<= 10%`，取较低值。（`TAKE_LOWER`）
+  - 若差值比例 `> 10%`，只取 `dealAvg`。（`DEAL_ONLY`）
+- 若没有 `dealAvg`，取 `quoteAvg * noDealDiscount`（默认 0.9）。（`QUOTE_DISCOUNT`）
+- 若没有 `quoteAvg` 但有 `dealAvg`，直接取 `dealAvg`。（`DEAL_ONLY`）
+- 都没有：`FAILED`。
 
-对应代码位置：
+其中 `noDealDiscount` 可通过 API 动态调整（见 [11. API 约定](#11-api-约定)）。
 
-- `app/parsers.py`
-- `app/algorithm.py`
-- `app/service.py`
-
-## 4. 架构分层
+## 5. 架构分层
 
 整体分为 5 层：
 
-1. `API 层`
-   接收 HTTP 请求，对外暴露健康检查、状态查询、询价接口。
-2. `Runtime 层`
-   管理浏览器实例、平台会话、任务队列、服务状态、保活流程。
-3. `Service 层`
-   负责调度多个平台适配器，汇总平台结果并计算最终报价。
-4. `Platform Adapter 层`
-   每个平台一个适配器，统一实现打开会话、检查就绪、保活、执行采集。
-5. `Parser / Algorithm 层`
-   负责页面解析和纯算法决策，不承担浏览器控制。
+1. **API 层** — `app/api.py`
+   FastAPI 入口，接收 HTTP 请求，对外暴露健康检查、状态查询、询价接口、参数管理。
 
-简化关系如下：
+2. **Runtime 层** — `app/runtime.py`
+   管理浏览器实例、平台会话、任务队列、服务状态、保活流程、崩溃恢复。
 
-```mermaid
-flowchart LR
-    A["外部请求方"] --> B["FastAPI"]
-    B --> C["RPARuntime"]
-    C --> D["RPAInquiryService"]
-    D --> E["PlatformAdapter(贝壳/后续平台)"]
-    E --> F["Parser + Algorithm"]
-    C --> G["常驻浏览器"]
+3. **Service 层** — `app/service.py`
+   调度多个平台适配器，汇总平台结果并计算最终报价。
+
+4. **Platform Adapter 层** — `app/platforms/`
+   每个平台两件套：薄壳适配器（`platforms/<code>.py`）+ 采集逻辑（`platforms/adapters/<code>.py`）。
+
+5. **Parser / Algorithm 层** — `app/parsers/` + `app/core/algorithm.py`
+   页面解析和纯算法决策，不承担浏览器控制。
+
+```
+外部请求方 → FastAPI (api.py)
+  → RPARuntime (runtime.py)
+    → RPAInquiryService (service.py)
+      → PlatformAdapter (platforms/ke.py 等)
+        → Adapter (platforms/adapters/ke.py 等)
+          → Parser (parsers/ke.py) + Algorithm (core/algorithm.py)
 ```
 
-## 5. 目录说明
+## 6. 目录说明
 
 ```text
 jeethink-rpa/
 ├─ app/
-│  ├─ api.py
-│  ├─ runtime.py
-│  ├─ service.py
-│  ├─ registry.py
-│  ├─ models.py
-│  ├─ algorithm.py
-│  ├─ parsers.py
-│  ├─ ke_adapter.py
-│  ├─ price_utils.py
-│  ├─ logging_utils.py
-│  ├─ debug_utils.py
-│  ├─ window_control.py
+│  ├─ core/
+│  │  ├─ config.py          # 运行配置 + 弱持久化参数管理
+│  │  ├─ models.py          # 数据模型（平台无关）
+│  │  ├─ algorithm.py       # 最终取值决策（纯函数）
+│  │  └─ price_utils.py     # 价格格式化工具
 │  ├─ platforms/
-│  │  ├─ base.py
-│  │  ├─ ke.py
-│  │  └─ ke_constants.py
-│  └─ scripts/
-│     ├─ api_server.py
-│     ├─ mvp_test.py
-│     ├─ batch_mvp_test.py
-│     ├─ quote_detail_test.py
-│     ├─ combined_flow_test.py
-│     ├─ more_options_test.py
-│     └─ search_flow_test.py
-├─ tests/
-├─ debug/
-├─ logs/
-├─ config.py
+│  │  ├─ base.py            # 平台适配器抽象基类
+│  │  ├─ __init__.py        # 平台导出集合
+│  │  ├─ ke.py / ke_constants.py       # 贝壳：薄壳适配器 + 常量
+│  │  ├─ ajk.py / ajk_constants.py     # 安居客：薄壳适配器 + 常量
+│  │  ├─ lj.py / lj_constants.py       # 链家：薄壳适配器 + 常量
+│  │  ├─ fang.py / fang_constants.py   # 房天下：薄壳适配器 + 常量
+│  │  ├─ lyj.py / lyj_constants.py     # 乐有家：薄壳适配器 + 常量
+│  │  └─ adapters/
+│  │     ├─ ke.py           # 贝壳真实采集逻辑
+│  │     ├─ ajk.py          # 安居客真实采集逻辑
+│  │     ├─ lj.py           # 链家真实采集逻辑
+│  │     ├─ fang.py         # 房天下真实采集逻辑
+│  │     └─ lyj.py          # 乐有家真实采集逻辑
+│  ├─ parsers/
+│  │  └─ ke.py              # 贝壳 HTML 解析器
+│  ├─ utils/
+│  │  ├─ logging_utils.py   # 日志配置（按日切分）
+│  │  ├─ debug_utils.py     # 调试 HTML 导出
+│  │  ├─ task_store.py      # 任务持久化（崩溃恢复兜底）
+│  │  └─ window_control.py  # Windows 浏览器置前控制
+│  ├─ scripts/
+│  │  ├─ api_server.py      # 服务启动入口
+│  │  ├─ mvp_test.py        # 贝壳 MVP 测试
+│  │  ├─ ajk_mvp_test.py    # 安居客 MVP 测试
+│  │  ├─ lj_mvp_test.py     # 链家 MVP 测试
+│  │  ├─ fang_mvp_test.py   # 房天下 MVP 测试
+│  │  ├─ lyj_mvp_test.py    # 乐有家 MVP 测试
+│  │  └─ batch_mvp_test.py  # 批量测试
+│  ├─ api.py                # FastAPI 路由定义
+│  ├─ runtime.py            # 服务运行时
+│  ├─ service.py            # 服务编排
+│  └─ registry.py           # 平台注册
+├─ tests/                   # 单元测试
+├─ docs/                    # 对接文档
 ├─ requirements.txt
 └─ README.md
 ```
 
-## 6. 核心模块说明
+## 7. 核心模块说明
+
+### `app/core/config.py`
+
+运行配置中心，包含：
+
+- 调试开关（`DEBUG_MODE`）
+- 浏览器路径、API 监听地址
+- 风控参数（保活间隔、详情页停留时间等）
+- 算法参数：
+  - `DEAL_DIFF_THRESHOLD = 0.10` — 差值阈值
+  - `get_no_deal_discount()` / `set_no_deal_discount()` — 无成交折扣，支持弱持久化
+
+### `app/core/models.py`
+
+平台无关的数据模型：
+
+- `InquiryRequest` — 询价请求
+- `PlatformResult` — 单平台采集结果（含在售列表、成交列表、房源快照）
+- `InquiryResult` — 最终询价结果（含决策分支、最终价格）
+- `ListingSnapshot` / `DealRecord` — 房源摘要 / 成交记录
+
+### `app/core/algorithm.py`
+
+纯函数 `decide(quote_avg, deal_avg, diff_threshold, no_deal_discount)`，4 条决策分支，无 IO，所有平台共用。
 
 ### `app/api.py`
 
-FastAPI 入口。
+FastAPI 入口。接口清单：
 
-当前主要接口：
-
-- `GET /health/live`
-- `GET /health/ready`
-- `GET /admin/status`
-- `POST /admin/platforms/{code}/confirm-ready`
-- `POST /inquiries`
-- `GET /inquiries/{taskId}`
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/health/live` | 存活检查 |
+| GET | `/health/ready` | 就绪检查 |
+| GET | `/admin/status` | 服务状态 |
+| POST | `/admin/platforms/{code}/confirm-ready` | 确认平台就绪 |
+| POST | `/inquiries` | 创建询价任务 |
+| GET | `/inquiries/{taskId}` | 查询任务结果 |
+| GET | `/admin/algorithm/no-deal-discount` | 查询无成交折扣 |
+| PUT | `/admin/algorithm/no-deal-discount` | 更新无成交折扣 |
 
 ### `app/runtime.py`
 
-服务运行时核心。
-
-职责：
+服务运行时核心。职责：
 
 - 启动常驻浏览器。
 - 打开各平台常驻页面。
-- 维护平台状态。
-- 管理任务队列。
-- 串行执行询价任务。
-- 定时保活。
+- 维护平台状态（`PlatformRuntimeState`）。
+- 管理任务队列（`asyncio.Queue`，串行消费）。
+- 定时保活循环（默认 300s）。
+- 崩溃恢复：启动时从 `persist/` 恢复未完成任务。
 - 需要人工处理时尝试将浏览器置前。
 
 ### `app/service.py`
 
 平台调度与结果汇总层。
 
-职责：
-
-- 调用一个或多个平台适配器执行询价。
-- 汇总平台结果。
-- 记录采集日志。
-- 生成最终 `InquiryResult`。
-
-当前结果选择策略：
-
-- 优先取第一个 `SUCCESS` 平台结果。
-- 若没有成功结果，则退化使用第一个非 `ERROR` 结果。
-
-说明：
-
-- 这代表当前服务层还没有做“多平台汇总均值”。
-- 因为当前只接入贝壳，所以现阶段与“所有已接入平台”在结果上没有差别。
-- 当第二个平台接入后，如果要严格实现“所有已接入平台汇总”，这里需要继续升级。
+- `build_inquiry_result()` — 从多平台结果中选第一个 `SUCCESS`，调用 `decide()` 算最终价。
+- `RPAInquiryService` — 管理各平台 session，执行 `run_inquiry()`。
 
 ### `app/platforms/base.py`
 
-平台适配器抽象基类。
+平台适配器抽象基类 `PlatformAdapter`。每个平台必须实现：
 
-每个平台必须实现：
+- `open_session(browser)` → `PlatformSession`
+- `collect(browser, session, request)` → `PlatformResult`
+- `check_ready(session)` → `(bool, str)`
+- `detect_block(url, html)` → `(bool, str)`
+- `keepalive(session)` → `(bool, str)`（有默认实现）
 
-- `open_session`
-- `collect`
-- `check_ready`
-- `keepalive`
+### `app/platforms/<code>.py` + `adapters/<code>.py`
 
-### `app/platforms/ke.py`
+平台适配器两件套：
 
-贝壳平台适配器，负责将贝壳接入统一抽象。
+- 薄壳适配器（`platforms/<code>.py`）：实现 `PlatformAdapter` 接口，委托给 adapter。
+- 采集逻辑（`platforms/adapters/<code>.py`）：搜索、筛选、分页、解析、风控检测等真实逻辑。
 
-### `app/platforms/ke_constants.py`
+### `app/parsers/ke.py`
 
-贝壳平台固有常量。
+贝壳 HTML 解析器（BeautifulSoup + 正则兜底）：
 
-例如：
+- `parse_listing_records()` — 在售房源 ID + 单价
+- `parse_listing_snapshots()` — 房源摘要
+- `find_detail_link()` — 小区详情链接
+- `parse_community_avg_price()` — 小区均价
+- `parse_deal_records()` — 成交记录
+- `filter_deal_prices_by_area()` — 按面积 ±20% 筛选
 
-- 首页 URL
-- 面积档位映射
+### `app/utils/`
 
-### `app/ke_adapter.py`
+| 文件 | 职责 |
+|------|------|
+| `logging_utils.py` | 日志：控制台 + 文件，按自然日切换 |
+| `debug_utils.py` | 调试 HTML 导出，`--debug` 或 `RPA_DEBUG=1` 开启 |
+| `task_store.py` | 任务持久化：入队写 JSON，完成删，崩溃恢复 |
+| `window_control.py` | Windows 浏览器置前（Win32 API） |
 
-贝壳真实采集逻辑主体。
+## 8. 配置与常量边界
 
-职责：
+### 运行配置（`app/core/config.py`）
 
-- 搜索框交互
-- 面积筛选点击
-- 分页点击
-- 在售单价抓取
-- 小区详情点击
-- 成交案例抓取
-- 登录和验证状态探测
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `DEBUG_MODE` | `False` | 调试开关（`RPA_DEBUG=1`） |
+| `BROWSER_PATH` | Edge 默认路径 | 浏览器可执行文件 |
+| `API_HOST` / `API_PORT` | `127.0.0.1:8000` | API 监听 |
+| `DETAIL_TAB_LINGER_SECONDS` | `60` | 详情页停留时间 |
+| `PLATFORM_KEEPALIVE_INTERVAL` | `300` | 保活间隔（秒） |
+| `PAGE_LINGER_SECONDS` | `8.0` | 结果页滚动停留 |
+| `DEAL_DIFF_THRESHOLD` | `0.10` | 差值阈值 |
+| `get_no_deal_discount()` | `0.9` | 无成交折扣（可运行时更新，弱持久化） |
 
-### `app/parsers.py`
+### 平台常量
 
-页面内容解析器。
+各平台独立常量文件（`platforms/<code>_constants.py`）：
 
-负责把 HTML 解析成结构化数据，例如：
+- `START_URL` — 平台首页 URL
+- `AREA_SEGMENTS` — 面积档位映射（仅贝壳有，其他平台是自定义输入）
 
-- 在售房源单价
-- 房源摘要
-- 小区详情链接
-- 小区均价
-- 成交记录
-
-### `app/algorithm.py`
-
-最终单价决策算法。
-
-### `app/price_utils.py`
-
-价格格式化与两位小数处理工具。
-
-### `app/logging_utils.py`
-
-日志配置。
-
-特点：
-
-- 同时输出控制台和文件。
-- 日志文件按自然日切换。
-- 文件名格式为 `logs/YYYYMMDD-info.log`。
-
-### `app/debug_utils.py`
-
-RPA 调试辅助。
-
-特点：
-
-- 默认不导出 HTML。
-- 仅在调试模式开启时导出到 `debug/`。
-- 调试模式可通过 `--debug` 或环境变量 `RPA_DEBUG=1` 开启。
-
-### `app/window_control.py`
-
-Windows 浏览器置前控制。
-
-当前用于：
-
-- 服务启动后提示人工登录。
-- 登录失效或命中人机验证时提示人工介入。
-
-## 7. 配置与常量边界
-
-### `config.py`
-
-只放“运行时可能调整”的配置：
-
-- 浏览器路径
-- API 监听地址
-- 调试开关
-- 保活间隔
-- 详情页停留时间
-- 算法参数
-
-当前与取值规则相关的关键配置：
-
-- `DEAL_DIFF_THRESHOLD = 0.10`
-- `NO_DEAL_DISCOUNT = 0.9`
-
-### 平台常量文件
-
-放“平台固有定义”，例如贝壳的：
-
-- 起始 URL
-- 面积档位编码
-
-这样做的原因：
-
-- 部署配置和平台规则职责分离。
-- 避免把不该改的内容暴露成配置项。
-- 后续接入第二个平台时更容易按平台目录归档。
-
-## 8. 启动流程
-
-服务启动流程：
+## 9. 启动流程
 
 1. 启动浏览器。
-2. 打开平台常驻页面。
+2. 打开各平台常驻页面。
 3. 浏览器置前，等待人工登录。
-4. 人工完成登录后回到终端按回车。
-5. 平台执行 `ready` 检查。
-6. 全部平台就绪后，服务状态切换为 `READY`。
-7. 这时才允许 `/inquiries` 接单。
+4. 人工完成登录后，通过 API 或终端回车确认平台就绪。
+5. 全部平台就绪后，服务状态切换为 `READY`。
+6. 恢复崩溃前残留的未完成任务。
+7. 开始接收 `/inquiries` 请求。
 
-如果未就绪时收到询价请求，服务会返回 `503 SERVICE_NOT_READY`。
+未就绪时收到询价请求，返回 `503 SERVICE_NOT_READY`。
 
-## 9. 运行方式
+## 10. 运行方式
 
 ### 安装依赖
 
@@ -359,31 +336,23 @@ python -m app.scripts.api_server
 python -m app.scripts.api_server --debug
 ```
 
-### 单次演示脚本
+### 单平台 MVP 测试
 
 ```bash
-python -m app.scripts.mvp_test
+python -m app.scripts.mvp_test          # 贝壳
+python -m app.scripts.ajk_mvp_test      # 安居客
+python -m app.scripts.lj_mvp_test       # 链家
+python -m app.scripts.fang_mvp_test     # 房天下
+python -m app.scripts.lyj_mvp_test      # 乐有家
 ```
 
-### 批量演示脚本
-
-```bash
-python -m app.scripts.batch_mvp_test
-```
-
-自定义场景示例：
+### 批量测试
 
 ```bash
 python -m app.scripts.batch_mvp_test --scenario "绿景虹湾,70,90" --scenario "半岛城邦花园一期,110,140"
 ```
 
-### 详情链路测试脚本
-
-```bash
-python -m app.scripts.quote_detail_test --manual-login
-```
-
-## 10. API 约定
+## 11. API 约定
 
 ### 创建询价任务
 
@@ -430,19 +399,51 @@ python -m app.scripts.quote_detail_test --manual-login
 
 字段说明：
 
-- `quoteAvg`：在售均价。基于抓到的在售单价列表计算得到的平均值，单位为 `元/平`。
-- `dealAvg`：成交均价。基于成交案例先做面积 `20%` 范围筛选，再对筛选后的成交单价取平均值，单位为 `元/平`。
-- `finalPrice`：最终取值。按业务规则对 `quoteAvg` 和 `dealAvg` 进行决策后的最终建议单价，单位为 `元/平`。
+- `quoteAvg`：在售均价（元/平）。
+- `dealAvg`：成交均价（元/平）。各平台筛选规则不同，见 [4. 业务取值规则](#4-业务取值规则)。
+- `finalPrice`：最终建议单价（元/平）。
 
-说明：
+### 查询无成交折扣
 
-- 文档示例按两位小数展示，便于阅读。
-- 实际接口返回为 JSON number，像 `71086.50` 在部分序列化场景下可能显示为 `71086.5`，数值含义不变。
-- 业务上“所有网站”应理解为“当前所有已接入平台”。当前只接入贝壳，因此现阶段等价于贝壳单平台结果。
+`GET /admin/algorithm/no-deal-discount`
+
+```json
+{
+  "code": "OK",
+  "message": "查询成功",
+  "data": {
+    "noDealDiscount": 0.9,
+    "isDefault": true
+  }
+}
+```
+
+### 更新无成交折扣
+
+`PUT /admin/algorithm/no-deal-discount`
+
+请求体：
+
+```json
+{
+  "noDealDiscount": 0.85
+}
+```
+
+返回：
+
+```json
+{
+  "code": "OK",
+  "message": "参数已更新",
+  "data": { "noDealDiscount": 0.85 }
+}
+```
+
+- 值必须在 `(0, 1)` 区间，否则返回 400。
+- 更新后立即持久化到 `persist/runtime.json`，重启后自动恢复。
 
 ### 服务未就绪
-
-当平台还未人工登录确认时：
 
 ```json
 {
@@ -455,7 +456,29 @@ python -m app.scripts.quote_detail_test --manual-login
 }
 ```
 
-## 11. 日志与调试
+## 12. 崩溃恢复与弱持久化
+
+### 任务持久化
+
+- 每个询价任务入队时写一个 `persist/{taskId}.json`，内容为 `InquiryRequest` 的序列化。
+- 任务执行完成（成功或失败）后立即删除对应文件。
+- 进程崩溃重启时，`RPARuntime.start()` 会遍历 `persist/*.json`，恢复所有残留任务重新入队。
+
+### 算法参数持久化
+
+- `noDealDiscount` 通过 `PUT /admin/algorithm/no-deal-discount` 更新时，同步写入 `persist/runtime.json`。
+- 启动时自动读取，文件不存在则使用默认值 `0.9`。
+- 这是**弱持久化**：仅保证重启不丢失，不做分布式一致性等强保证。
+
+### 持久化文件结构
+
+```
+app/core/persist/
+├── runtime.json          # 算法参数（常驻）
+└── {taskId}.json         # 任务数据（入队写，完成删）
+```
+
+## 13. 日志与调试
 
 ### 日志
 
@@ -468,16 +491,13 @@ python -m app.scripts.quote_detail_test --manual-login
 
 - 查询小区与面积范围
 - 平台抓到的房源摘要
-- 在售均价
-- 成交均价
-- 最终取值
+- 在售均价 / 成交均价 / 最终取值
 - 异常和风控信息
+- 参数变更记录
 
 ### 调试 HTML
 
-开启调试模式后，会把关键页面导出到：
-
-- `debug/*.html`
+开启调试模式（`--debug` 或 `RPA_DEBUG=1`）后，关键页面 HTML 导出到 `debug/*.html`。
 
 主要用于：
 
@@ -486,26 +506,14 @@ python -m app.scripts.quote_detail_test --manual-login
 - 排查风控跳转
 - 分析分页 DOM
 
-## 12. 当前约束
-
-当前版本有以下明确边界：
+## 14. 当前约束
 
 - 运行环境以 Windows 值守机为前提。
 - 浏览器使用 Edge。
 - 平台需要人工前置登录。
 - 命中平台人机验证时，仍需要人工介入。
 - 当前仅实现单浏览器、单任务串行执行。
-- 当前仅接入贝壳平台。
+- 当前服务层选第一个 `SUCCESS` 平台结果出价，未做多平台汇总均值。
+- 当前仅贝壳有独立 HTML 解析器（`parsers/ke.py`），其他平台解析逻辑在各自 adapter 内。
 
 这些约束是有意为之，优先保证稳定可用，而不是过早做复杂并发或多浏览器编排。
-
-## 13. 后续扩展建议
-
-当第二个平台接入时，建议沿用现有结构：
-
-1. 在 `app/platforms/` 下新增平台适配器与平台常量。
-2. 在 `app/registry.py` 注册新平台。
-3. 复用 `runtime/service/models/api`，不改外部协议。
-4. 各平台内部自行处理搜索、筛选、详情、风控逻辑。
-
-这样可以保证“新增平台”是增量开发，而不是重搭框架。

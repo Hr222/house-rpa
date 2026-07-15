@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """房天下 MVP 测试脚本。
 
-逐步迭代：在同一脚本里一步步验证房天下链路，不另建脚本。
-当前覆盖：第1步 首页打开 / 第2步 搜索绿景虹湾 / 第3步 面积筛选 70-90 / 第4步 分页采集。
+完整业务链路：打开首页 → 人工登录 → 搜索小区 → 面积筛选 →
+分页翻页 → 在售解析 → 详情页 → 成交记录 → 算法决策。
 
-房天下二手房：https://{城市拼音缩写}.esf.fang.com/
+用法：
+  python -m app.scripts.fang_mvp_test --manual-login --debug
 """
 
 from __future__ import annotations
@@ -26,11 +27,10 @@ from app.utils.debug_utils import dump_html as shared_dump_html
 from app.utils.debug_utils import set_debug_mode
 from app.core.models import ListingSnapshot
 from app.core.price_utils import format_price
+from app.utils.mvp_result import print_mvp_result
+from app.utils.logging_utils import setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+setup_logging()
 log = logging.getLogger("fang-mvp-test")
 
 # 房天下深圳二手房首页
@@ -624,42 +624,42 @@ def print_summary(
     body_len: Optional[int],
     prices_count: int,
     conclusion: str,
+    listing_snapshots: list,
+    filtered_deals: list,
+    quote_avg: Optional[float],
 ):
-    print()
-    print("=" * 60)
-    print("房天下测试完成")
-    print(f"打开首页 HTML: {open_file}")
-    print(f"搜索前 HTML: {before_file}")
-    print(f"搜索后 HTML: {after_file}")
-    print(f"面积筛选后 HTML: {area_file}")
-    print(f"异常现场 HTML: {error_file}")
-    print(f"首次打开 URL: {open_url}")
-    print(f"首次是否被拦: {open_blocked}")
-    print(f"首次拦截原因: {open_block_reason}")
-    print(f"搜索框命中选择器: {search_input_selector}")
-    print(f"提交按钮命中选择器: {submit_selector}")
-    print(f"结果页 URL: {result_url}")
-    print(f"结果页标题: {result_title}")
-    print(f"结果页是否被拦: {result_blocked}")
-    print(f"结果页拦截原因: {result_block_reason}")
-    print(f"面积确定点击: {area_confirmed}")
-    print(f"面积筛选后 URL: {area_url}")
-    print(f"面积筛选后在售单价数量: {area_prices_count}")
-    print(f"小区详情点击: {detail_clicked}")
-    print(f"详情页 HTML: {detail_file}")
-    print(f"详情页 URL: {detail_url}")
-    print(f"详情页标题: {detail_title}")
-    print(f"成交页 HTML: {deal_file}")
-    print(f"成交页 URL: {deal_url}")
-    print(f"成交页标题: {deal_title}")
-    print(f"成交记录总数: {all_deals_count}")
-    print(f"70-90㎡近半年成交数: {filtered_deals_count}")
-    print(f"成交均价(dealAvg): {deal_avg}")
-    print(f"结果页正文长度: {body_len}")
-    print(f"在售单价数量: {prices_count}")
-    print(f"结论: {conclusion}")
-    print("=" * 60)
-    print()
+    print_mvp_result(
+        platform="房天下",
+        community_name=COMMUNITY_NAME,
+        area_min=AREA_MIN,
+        area_max=AREA_MAX,
+        trace={
+            "home_blocked": open_blocked,
+            "search_url": result_url,
+            "area_ok": area_confirmed,
+            "area_url": area_url,
+            "area_pages": 0,
+            "detail_ok": detail_clicked,
+            "detail_url": detail_url,
+        },
+        listings={
+            "count": len(listing_snapshots),
+            "avg": quote_avg,
+            "snapshots": listing_snapshots,
+        },
+        deals={
+            "count": len(filtered_deals),
+            "avg": deal_avg,
+            "records": [],
+        },
+        result={
+            "quote_avg": quote_avg or 0,
+            "deal_avg": deal_avg,
+            "final_price": final_price or 0,
+            "branch": branch,
+        },
+        elapsed=0,
+    )
 
 
 async def main(manual_login: bool = False, debug: bool = False):
@@ -911,7 +911,7 @@ async def main(manual_login: bool = False, debug: bool = False):
                     quote_avg=quote_avg,
                     deal_avg=deal_avg,
                     diff_threshold=config.DEAL_DIFF_THRESHOLD,
-                    no_deal_discount=config.NO_DEAL_DISCOUNT,
+                    no_deal_discount=config.get_no_deal_discount(),
                 )
                 final_price = decision.final_price
 

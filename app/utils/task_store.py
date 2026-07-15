@@ -49,14 +49,21 @@ def delete_task(task_id: str) -> None:
         pass
 
 
+_RUNTIME_FILE_NAME = "runtime.json"
+
+
 def load_pending_tasks() -> list[dict]:
     """启动时读所有残留任务，用于恢复。
+
+    跳过 runtime.json（那是算法参数的弱持久化文件，不是任务）。
 
     返回 [{task_id, ...request_data}, ...] 列表。
     """
     persist_dir = _persist_dir()
     tasks = []
     for task_file in sorted(persist_dir.glob("*.json")):
+        if task_file.name == _RUNTIME_FILE_NAME:
+            continue
         try:
             data = json.loads(task_file.read_text(encoding="utf-8"))
             data["task_id"] = task_file.stem

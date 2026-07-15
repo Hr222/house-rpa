@@ -29,13 +29,12 @@ from app.core import config
 from app.core.algorithm import decide
 from app.utils.debug_utils import dump_html as shared_dump_html
 from app.utils.debug_utils import set_debug_mode
+from app.utils.mvp_result import print_mvp_result
+from app.utils.logging_utils import setup_logging
 from app.core.models import ListingSnapshot
 from app.core.price_utils import format_price
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+setup_logging()
 log = logging.getLogger("lyj-mvp-test")
 
 # 乐有家深圳二手房首页
@@ -519,7 +518,39 @@ def print_summary(
     body_len: Optional[int],
     conclusion: str,
 ):
-    print()
+    print_mvp_result(
+        platform="乐有家",
+        community_name=COMMUNITY_NAME,
+        area_min=AREA_MIN,
+        area_max=AREA_MAX,
+        trace={
+            "home_blocked": open_blocked,
+            "search_url": result_url,
+            "area_ok": area_confirmed,
+            "area_url": area_url,
+            "area_pages": total_pages,
+        },
+        listings={
+            "count": quote_prices_count,
+            "avg": listing_avg,
+            "snapshots": listing_snapshots,
+        },
+        deals={
+            "count": 0,
+            "avg": listing_price,
+            "records": [],
+            "substitute": f"小区均价顶替 {listing_price}元/㎡",
+        },
+        result={
+            "quote_avg": listing_avg or 0,
+            "deal_avg": listing_price,
+            "final_price": final_price or 0,
+            "branch": branch,
+        },
+        elapsed=0,
+    )
+    return
+    print()  # dead code
     print("=" * 60)
     print("乐有家测试完成")
     print(f"打开首页 HTML: {open_file}")
@@ -709,7 +740,7 @@ async def main(manual_login: bool = False, debug: bool = False):
                 quote_avg=listing_avg,
                 deal_avg=deal_avg,
                 diff_threshold=config.DEAL_DIFF_THRESHOLD,
-                no_deal_discount=config.NO_DEAL_DISCOUNT,
+                no_deal_discount=config.get_no_deal_discount(),
             )
             final_price = decision.final_price
             branch = decision.branch

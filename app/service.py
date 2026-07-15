@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Iterable, Optional
 
@@ -16,24 +17,31 @@ log = logging.getLogger(__name__)
 
 
 def build_inquiry_result(platform_results: list[PlatformResult]) -> InquiryResult:
-    """当前版本按平台优先级选第一个成功结果出最终价。"""
-    selected = next(
-        (result for result in platform_results if result.status == "SUCCESS"),
-        None,
-    )
-    if selected is None:
-        selected = next((result for result in platform_results if result.status != "ERROR"), None)
+    """所有平台累加平均后计算最终价。无数据(空列表)的平台不参与。"""
+    # 收集所有平台的在售均价（优先用 community_avg_price，其次 quote_prices 均值）
+    all_quote_avgs: list[float] = []
+    all_deal_prices: list[float] = []
 
-    if selected is None:
+    for r in platform_results:
+        if r.status != "SUCCESS":
+            continue
+        # 在售均价
+        quote = r.community_avg_price or mean(r.quote_prices)
+        if quote is not None and quote > 0:
+            all_quote_avgs.append(quote)
+        # 成交单价
+        all_deal_prices.extend(r.deal_prices)
+
+    if not all_quote_avgs:
         return InquiryResult(success=False, branch="FAILED", platform_results=platform_results)
 
-    quote_avg = selected.community_avg_price or mean(selected.quote_prices)
-    deal_avg = mean(selected.deal_prices) if selected.deal_prices else None
+    quote_avg = sum(all_quote_avgs) / len(all_quote_avgs)
+    deal_avg = mean(all_deal_prices) if all_deal_prices else None
     decision = decide(
         quote_avg,
         deal_avg,
         config.DEAL_DIFF_THRESHOLD,
-        config.NO_DEAL_DISCOUNT,
+        config.get_no_deal_discount(),
     )
     return InquiryResult(
         success=decision.final_price is not None,
@@ -41,7 +49,7 @@ def build_inquiry_result(platform_results: list[PlatformResult]) -> InquiryResul
         branch=decision.branch,
         quote_avg=round_price(quote_avg),
         deal_avg=round_price(deal_avg),
-        platform=selected,
+        platform=None,
         platform_results=platform_results,
     )
 
@@ -49,14 +57,16 @@ def build_inquiry_result(platform_results: list[PlatformResult]) -> InquiryResul
 class RPAInquiryService:
     """管理常驻浏览器、平台标签页和单次询价流程。"""
 
-    def __init__(self, browser, adapters: Iterable[PlatformAdapter]):
-        self.browser = browser
+    def __init__(self, browsers: dict, adapters: Iterable[PlatformAdapter]):
+        self.browsers = browsers            # {code: browser}
         self.adapters = list(adapters)
         self.sessions: dict[str, PlatformSession] = {}
 
     async def start(self):
         for adapter in self.adapters:
-            session = await adapter.open_session(self.browser)
+            browser = self.browsers[adapter.code]
+            # 每个平台有独立浏览器，只需导航空白标签页即可
+            session = await adapter.open_session(browser, new_tab=False)
             self.sessions[adapter.code] = session
             log.info("platform ready: %s -> %s", adapter.name, session.start_url)
         return self.sessions
@@ -81,11 +91,24 @@ class RPAInquiryService:
             codes = set(platform_codes)
             adapters = [adapter for adapter in self.adapters if adapter.code in codes]
 
-        platform_results: list[PlatformResult] = []
-        for adapter in adapters:
+        async def _collect_one(adapter):
             session = self.sessions[adapter.code]
-            result = await adapter.collect(self.browser, session, request)
-            platform_results.append(result)
+            browser = self.browsers[adapter.code]
+            try:
+                await session.page.activate()
+                return await adapter.collect(browser, session, request)
+            except Exception as exc:
+                log.exception("%s 采集异常", adapter.name)
+                return PlatformResult(
+                    name=adapter.name,
+                    status="ERROR",
+                    reason=str(exc),
+                    request_id=request.request_id,
+                )
+
+        platform_results: list[PlatformResult] = await asyncio.gather(
+            *[_collect_one(a) for a in adapters], return_exceptions=True
+        )
 
         inquiry_result = build_inquiry_result(platform_results)
         self._log_inquiry_result(inquiry_result)
@@ -93,6 +116,7 @@ class RPAInquiryService:
 
     def _log_inquiry_result(self, inquiry_result: InquiryResult):
         for platform_result in inquiry_result.platform_results:
+            # 在售房源
             if platform_result.listing_snapshots:
                 for item in platform_result.listing_snapshots:
                     log.info(
@@ -111,6 +135,35 @@ class RPAInquiryService:
                     platform_result.status,
                     platform_result.reason or "",
                 )
+
+            # 成交记录
+            deal_records = platform_result.deal_records
+            if deal_records:
+                for r in deal_records:
+                    log.info(
+                        "%s成交: {面积: %s㎡, 日期: %s, 总价: %s万, 单价: %s元/平}",
+                        platform_result.name,
+                        r.get("area", ""),
+                        r.get("date", ""),
+                        r.get("total_price", ""),
+                        r.get("price", ""),
+                    )
+            elif platform_result.deal_source:
+                log.info(
+                    "%s成交: 无（%s %s元/㎡）",
+                    platform_result.name,
+                    platform_result.deal_source,
+                    platform_result.deal_prices[0] if platform_result.deal_prices else "—",
+                )
+            elif platform_result.deal_prices:
+                log.info(
+                    "%s成交: %s（共%d条）",
+                    platform_result.name,
+                    platform_result.deal_prices,
+                    len(platform_result.deal_prices),
+                )
+            else:
+                log.info("%s成交: 未采集到", platform_result.name)
 
         log.info("在售均价(单位:元/平): %s", format_price(inquiry_result.quote_avg))
         log.info("成交均价(单位:元/平): %s", format_price(inquiry_result.deal_avg))
