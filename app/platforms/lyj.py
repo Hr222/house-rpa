@@ -18,8 +18,8 @@ class LyjPlatformAdapter(PlatformAdapter):
     name = "乐有家"
     start_url = START_URL
 
-    async def open_session(self, browser) -> PlatformSession:
-        page = await browser.get(self.start_url)
+    async def open_session(self, browser, new_tab=False) -> PlatformSession:
+        page = await browser.get(self.start_url, new_tab=new_tab)
         await page
         return PlatformSession(
             code=self.code,
@@ -44,11 +44,17 @@ class LyjPlatformAdapter(PlatformAdapter):
             log.warning("failed to reset lyj main page to standby: %s", exc)
         return result
 
-    async def check_ready(self, session: PlatformSession) -> tuple[bool, str]:
-        return await lyj_adapter.probe_ready(session.page)
-
-    async def keepalive(self, session: PlatformSession) -> tuple[bool, str]:
-        return await lyj_adapter.keepalive(session.page)
+    async def _probe_ready(self, page, html: str) -> tuple[bool, str]:
+        """乐有家特有：验证码 + 筛选区。登录检测由基类负责。"""
+        if lyj_adapter._is_captcha_html(html):
+            return False, "命中验证码拦截"
+        if lyj_adapter._is_login_html(html):
+            return False, "当前会话未登录或已失效"
+        try:
+            await page.select("div.selected-index", timeout=3)
+        except Exception:
+            return False, "未找到筛选区"
+        return True, "READY"
 
     def detect_block(self, url: str, html: str) -> tuple[bool, str]:
         return lyj_adapter.detect_block(url, html)

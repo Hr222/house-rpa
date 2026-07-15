@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """链家 MVP 测试脚本。
 
-逐步迭代：在同一脚本里一步步验证链家链路，不另建脚本。
-当前覆盖：第1步 首页打开 + 探测拦截。
+完整业务链路：打开首页 → 人工登录 → 搜索小区 → 面积筛选（更多选项+更多及自定义）→
+分页翻页 → 在售解析 → 详情页 → 成交记录 → 算法决策。
 
-链家二手房：https://{城市拼音缩写}.lianjia.com/ershoufang/
+用法：
+  python -m app.scripts.lj_mvp_test --manual-login --debug
 """
 
 from __future__ import annotations
@@ -22,13 +23,12 @@ from app.core import config
 from app.core.algorithm import decide
 from app.utils.debug_utils import dump_html as shared_dump_html
 from app.utils.debug_utils import set_debug_mode
+from app.utils.mvp_result import print_mvp_result
+from app.utils.logging_utils import setup_logging
 from app.core.models import ListingSnapshot
 from app.core.price_utils import format_price
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+setup_logging()
 log = logging.getLogger("lj-mvp-test")
 
 # 链家深圳二手房首页
@@ -687,7 +687,40 @@ def print_summary(
     body_len: Optional[int],
     conclusion: str,
 ):
-    print()
+    print_mvp_result(
+        platform="链家",
+        community_name=COMMUNITY_NAME,
+        area_min=AREA_MIN,
+        area_max=AREA_MAX,
+        trace={
+            "home_blocked": open_blocked,
+            "search_url": search_url,
+            "area_ok": area_confirmed,
+            "area_url": area_url,
+            "area_pages": total_pages,
+            "detail_ok": detail_clicked,
+            "detail_url": detail_url,
+        },
+        listings={
+            "count": listing_count,
+            "avg": quote_avg,
+            "snapshots": listing_snapshots,
+        },
+        deals={
+            "count": filtered_deals_count,
+            "avg": deal_avg,
+            "records": [],
+        },
+        result={
+            "quote_avg": quote_avg or 0,
+            "deal_avg": deal_avg,
+            "final_price": final_price or 0,
+            "branch": branch,
+        },
+        elapsed=0,
+    )
+    return
+    print()  # dead code, keep for edit stability
     print("=" * 60)
     print("链家测试完成")
     print(f"打开首页 HTML: {open_file}")
@@ -994,7 +1027,7 @@ async def main(manual_login: bool = False, debug: bool = False, search_only: boo
                     quote_avg=quote_avg,
                     deal_avg=deal_avg,
                     diff_threshold=config.DEAL_DIFF_THRESHOLD,
-                    no_deal_discount=config.NO_DEAL_DISCOUNT,
+                    no_deal_discount=config.get_no_deal_discount(),
                 )
                 final_price = decision.final_price
                 print()

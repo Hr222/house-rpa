@@ -15,6 +15,8 @@ user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 SW_RESTORE = 9
+HWND_TOP = 0
+SWP_NOZORDER = 0x0004
 
 
 @dataclass(slots=True)
@@ -57,7 +59,7 @@ def find_browser_window(pid: int) -> Optional[WindowInfo]:
         return None
 
     for item in windows:
-        if "Edge" in item.title or "贝壳" in item.title or "链家" in item.title:
+        if "Chrome" in item.title or "贝壳" in item.title or "链家" in item.title:
             return item
     return windows[0]
 
@@ -108,3 +110,84 @@ def ensure_browser_foreground(pid: int) -> bool:
     if ok:
         log.info("浏览器窗口已置前: pid=%s title=%s", pid, window.title)
     return ok
+
+
+def enumerate_browser_windows() -> list[WindowInfo]:
+    """枚举所有可见的 Edge 顶层窗口（过滤小弹窗）。"""
+    windows: list[WindowInfo] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def enum_proc(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        if user32.GetParent(hwnd):
+            return True
+
+        title = _get_window_text(hwnd)
+        if not title or "Chrome" not in title:
+            return True
+
+        # 过滤掉小弹窗（验证码/提示窗口通常 < 400px 宽 或 < 300px 高）
+        rect = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        w = rect.right - rect.left
+        h = rect.bottom - rect.top
+        if w < 400 or h < 300:
+            return True
+
+        process_id = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        windows.append(WindowInfo(hwnd=hwnd, pid=process_id.value, title=title))
+        return True
+
+    user32.EnumWindows(enum_proc, 0)
+    return windows
+
+
+def tile_browser_windows(pids: list[int] | None = None, margin: int = 0):
+    """将多个浏览器窗口平铺填满屏幕。
+
+    5 个窗口：上排 3 个 + 下排 2 个。
+
+    Args:
+        pids: 浏览器进程 PID 列表（保留兼容，未使用；改为自动枚举）
+        margin: 窗口间边距（像素），默认给任务栏留 60
+    """
+    screen_w = user32.GetSystemMetrics(0)
+    screen_h = user32.GetSystemMetrics(1)
+
+    windows = enumerate_browser_windows()
+    n = len(windows)
+    if n == 0:
+        log.warning("未发现 Edge 窗口")
+        return
+
+    if n == 5:
+        layout = [(0, 0, 3), (1, 0, 2)]
+        rows = 2
+    elif n <= 3:
+        layout = [(0, 0, n)]
+        rows = 1
+    else:
+        rows = min(n, 2 + (n > 4))
+        per_row = (n + rows - 1) // rows
+        layout = []
+        remaining = n
+        for r in range(rows):
+            cols = min(per_row, remaining)
+            layout.append((r, 0, cols))
+            remaining -= cols
+
+    row_h = (screen_h - margin) // rows
+    idx = 0
+    for row_idx, _left_off, cols in layout:
+        col_w = screen_w // cols
+        for col in range(cols):
+            if idx >= n:
+                break
+            win = windows[idx]
+            idx += 1
+            x = col * col_w
+            y = row_idx * row_h
+            user32.SetWindowPos(win.hwnd, HWND_TOP, x, y, col_w, row_h, SWP_NOZORDER)
+            log.info("窗口平铺 [%d] %s → (%d,%d %dx%d)", idx, win.title[:40], x, y, col_w, row_h)

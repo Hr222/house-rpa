@@ -130,12 +130,12 @@ async def _human_click(page, element, label: str) -> bool:
         pass
     await asyncio.sleep(0.3)
     last_error = None
-    for clicker in ("mouse", "js"):
+    for clicker in ("js", "mouse"):
         try:
-            if clicker == "mouse":
-                await element.mouse_click()
-            else:
+            if clicker == "js":
                 await element.click()
+            else:
+                await element.mouse_click()
             await page
             await asyncio.sleep(0.8)
             return True
@@ -570,6 +570,7 @@ async def _do_collect(
         community_avg_price=None,
         quote_prices=quote_prices,
         deal_prices=deal_prices,
+        deal_source="挂牌均价顶替",
         request_id=request_id,
         detail_url=None,
         elapsed_seconds=round(time.time() - started_at, 2),

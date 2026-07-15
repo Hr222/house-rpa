@@ -14,7 +14,7 @@ from app.core import config
 from app.parsers import ke as parsers
 from app.utils.debug_utils import dump_html
 from app.core.models import ListingSnapshot, PlatformResult
-from app.platforms.base import wait_for_manual_unblock
+from app.platforms.base import wait_for_manual_unblock, human_linger
 from app.platforms.ke_constants import AREA_SEGMENTS, START_URL
 
 log = logging.getLogger(__name__)
@@ -42,22 +42,6 @@ async def _reset_to_start_page(page):
 
 async def reset_to_start_page(page):
     return await _reset_to_start_page(page)
-
-
-def _pick_segments(area_min: float, area_max: float) -> list[str]:
-    """请求区间 [min, max] 对应的面积档位。"""
-    segments: list[str] = []
-    for low, high, code in AREA_SEGMENTS:
-        if area_min < high and area_max > low:
-            segments.append(code)
-    return segments
-
-
-def _build_segment_candidates(area_min: float, area_max: float) -> list[str]:
-    segments = _pick_segments(area_min, area_max)
-    if not segments:
-        raise RuntimeError(f"面积区间无可用档位: {area_min}-{area_max}")
-    return segments
 
 
 def _is_login_url(url: str) -> bool:
@@ -159,17 +143,18 @@ async def _human_click(page, element, label: str) -> bool:
 
     await _delay(0.2, 0.5)
     last_error = None
-    for clicker in ("mouse", "js"):
+    # 优先 JS click（精确点击目标元素，避免坐标偏移被悬浮客服/广告拦截）
+    for clicker in ("js", "mouse"):
         try:
-            if clicker == "mouse":
+            if clicker == "js":
+                await element.click()
+            else:
                 try:
                     await element.mouse_move()
                     await _delay(0.1, 0.3)
                 except Exception:
                     pass
                 await element.mouse_click()
-            else:
-                await element.click()
             await page
             await _delay(0.5, 1.0)
             return True
@@ -250,7 +235,8 @@ async def _submit_search(page, inp=None):
 
 
 async def _wait_for_results_loaded(page, expected_page: Optional[int] = None) -> str:
-    await page.select("ul.sellListContent", timeout=15)
+    # 翻页后 DOM 树重建，使用 page.find 替代 page.select 以自动重试
+    await page.find("ul.sellListContent", timeout=15)
     await page
 
     last_html = ""
@@ -306,23 +292,6 @@ async def keepalive(main_page) -> tuple[bool, str]:
     return await probe_ready(main_page)
 
 
-async def _human_linger_on_result_page(page, page_no: int, linger_seconds: float = PAGE_LINGER_SECONDS):
-    log.info("lingering on result page %s for %.1fs", page_no, linger_seconds)
-    start = time.monotonic()
-    scroll_steps = [
-        ("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.25));", 1.6),
-        ("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.55));", 1.8),
-        ("window.scrollTo(0, Math.floor(document.body.scrollHeight * 0.82));", 1.8),
-        ("window.scrollTo(0, document.body.scrollHeight);", 1.2),
-    ]
-    for expression, pause in scroll_steps:
-        try:
-            await page.evaluate(expression)
-            await page
-        except Exception:
-            pass
-        await asyncio.sleep(pause)
-
     remain = linger_seconds - (time.monotonic() - start)
     if remain > 0:
         await asyncio.sleep(remain)
@@ -362,7 +331,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
                 # 人工处理后重新翻到当前页
                 last_html = await _click_page_number(page, page_no)
 
-        await _human_linger_on_result_page(page, page_no)
+        await human_linger(page, page_no)
         last_html = await page.get_content()
         await _dump(page, f"ke_area_page_{page_no}")
 
@@ -417,23 +386,126 @@ async def _click_detail_link(browser, page, expected_url: Optional[str]):
     return True, None
 
 
-async def _apply_area_filter_on_result_page(page, community_name: str, segment_code: str):
-    expected_href = f"/ershoufang/{segment_code}rs{community_name}"
-    selectors = [
-        f"a[href='{expected_href}']",
-        f"a[href^='/ershoufang/{segment_code}rs']",
-    ]
+async def _apply_area_filter(page, area_min, area_max):
+    """贝壳面积筛选：智能展开 → 面积区"更多及自定义" → 填值 → 确定。
 
-    for selector in selectors:
+    首页：筛选区已展开；搜索结果页：需先点"更多选项"全局展开。
+    """
+    # 1. 智能全局展开
+    try:
+        more_btn = await page.select("div.more.btn-more", timeout=3)
+    except Exception:
+        more_btn = None
+    if more_btn:
         try:
-            element = await page.select(selector, timeout=2)
+            btn_text = await more_btn.apply("(el) => el.textContent.trim()")
         except Exception:
-            element = None
-        if element and await _human_click(page, element, f"result area segment {segment_code}"):
-            html = await _wait_for_results_loaded(page, expected_page=1)
-            return html
+            btn_text = ""
+        if "更多选项" in (btn_text or ""):
+            await _human_click(page, more_btn, "global btn-more")
+            await page
+            await asyncio.sleep(1.5)
 
-    raise RuntimeError(f"结果页未找到可点击的面积筛选项: {segment_code}")
+    # 2. 在所有 dl.hide.hasmore 中找到 dt[title*="建筑面积"] 的那个
+    try:
+        containers = await page.select_all("dl.hide.hasmore", timeout=3)
+    except Exception:
+        containers = []
+
+    area_container = None
+    for c in containers:
+        try:
+            tit = await c.apply(
+                "(el) => { const t = el.querySelector('dt'); return t ? t.title || '' : ''; }"
+            )
+        except Exception:
+            tit = ""
+        if "建筑面积" in tit:
+            area_container = c
+            break
+
+    if area_container is None:
+        raise RuntimeError("未找到建筑面积筛选区")
+
+    try:
+        btns = await area_container.query_selector_all("span.btn-showmore")
+    except Exception:
+        btns = []
+    if btns:
+        await _human_click(page, btns[0], "btn-showmore")
+        await page
+        await asyncio.sleep(1.5)
+
+    try:
+        custom = await area_container.query_selector_all("span.customFilter[data-role='area']")
+    except Exception:
+        custom = []
+    if not custom:
+        raise RuntimeError("未找到面积自定义输入区")
+
+    min_el = max_el = None
+    try:
+        m = await custom[0].query_selector_all("input[role='minValue']")
+        min_el = m[0] if m else None
+    except Exception:
+        min_el = None
+    try:
+        m = await custom[0].query_selector_all("input[role='maxValue']")
+        max_el = m[0] if m else None
+    except Exception:
+        max_el = None
+    if min_el is None or max_el is None:
+        raise RuntimeError("未找到面积自定义输入框")
+
+    await _human_click(page, min_el, "area min input")
+    try:
+        await min_el.clear_input()
+    except Exception:
+        pass
+    await asyncio.sleep(0.3)
+    await min_el.send_keys(str(int(area_min)))
+    await page
+    await asyncio.sleep(0.5)
+
+    await _human_click(page, max_el, "area max input")
+    try:
+        await max_el.clear_input()
+    except Exception:
+        pass
+    await asyncio.sleep(0.3)
+    await max_el.send_keys(str(int(area_max)))
+    await page
+    await asyncio.sleep(0.8)
+
+    try:
+        btns = await custom[0].query_selector_all("button.btn-range")
+    except Exception:
+        btns = []
+    if not btns:
+        raise RuntimeError("未找到面积确定按钮")
+
+    try:
+        await _human_click(page, btns[0], "area confirm")
+    except Exception:
+        pass
+    else:
+        await page
+        await asyncio.sleep(3)
+        return
+
+    # JS 兜底
+    await page.evaluate(
+        """
+        (() => {
+            const btn = document.querySelector('.customFilter[data-role=\"area\"] .btn-range');
+            if (btn) { btn.classList.remove('hide'); btn.click(); return true; }
+            return false;
+        })()
+        """,
+        return_by_value=True,
+    )
+    await page
+    await asyncio.sleep(3)
 
 
 async def _search_community(page, community_name: str) -> tuple[str, str, Optional[str]]:
@@ -529,40 +601,35 @@ async def _do_collect(
             elapsed_seconds=round(time.time() - started_at, 2),
         )
 
-    segment_codes = _build_segment_candidates(area_min, area_max)
+    # 4. 面积筛选（更多及自定义）
+    log.info("[6-9] 面积筛选: %d-%d", area_min, area_max)
+    await _apply_area_filter(main_page, area_min, area_max)
+    await _dump(main_page, "ke_after_area")
+
     all_listing_prices: list[float] = []
     all_listing_snapshots: dict[str, ListingSnapshot] = {}
-    last_page_html = keyword_html
 
-    for index, segment_code in enumerate(segment_codes):
-        log.info("[6-9] 搜索结果页点击面积档位: %s", segment_code)
-        filtered_html = await _apply_area_filter_on_result_page(main_page, community_name, segment_code)
-        await _dump(main_page, f"ke_after_area_{segment_code}")
-
-        filtered_url = main_page.target.url or ""
-        if _is_login_url(filtered_url) or _is_login_html(filtered_html):
-            status = "WAIT_MANUAL_VERIFY" if _is_manual_verify_html(filtered_html) else "LOGIN_EXPIRED"
-            return PlatformResult(
-                name="贝壳",
-                status=status,
-                reason=f"面积筛选 {segment_code} 后进入登录或验证页面",
-                request_id=request_id,
-                detail_url=detail_url,
-                elapsed_seconds=round(time.time() - started_at, 2),
-            )
-
-        total_pages = _parse_total_pages(filtered_html)
-        listing_map, listing_snapshots, last_page_html = await _collect_listing_pages(
-            main_page,
-            filtered_html,
-            total_pages,
+    filtered_html = await _wait_for_results_loaded(main_page, expected_page=1)
+    filtered_url = main_page.target.url or ""
+    if _is_login_url(filtered_url) or _is_login_html(filtered_html):
+        status = "WAIT_MANUAL_VERIFY" if _is_manual_verify_html(filtered_html) else "LOGIN_EXPIRED"
+        return PlatformResult(
+            name="贝壳",
+            status=status,
+            reason="面积筛选后进入登录或验证页面",
+            request_id=request_id,
+            detail_url=detail_url,
+            elapsed_seconds=round(time.time() - started_at, 2),
         )
-        all_listing_prices.extend(list(listing_map.values()))
-        all_listing_snapshots.update(listing_snapshots)
 
-        if index < len(segment_codes) - 1:
-            keyword_html, keyword_url, detail_url = await _search_community(main_page, community_name)
-            await _dump(main_page, f"ke_keyword_result_{segment_code}_return")
+    total_pages = _parse_total_pages(filtered_html)
+    listing_map, listing_snapshots, last_page_html = await _collect_listing_pages(
+        main_page,
+        filtered_html,
+        total_pages,
+    )
+    all_listing_prices.extend(list(listing_map.values()))
+    all_listing_snapshots.update(listing_snapshots)
 
     if not all_listing_prices:
         return PlatformResult(
@@ -618,6 +685,11 @@ async def _do_collect(
         community_avg_price=community_avg_price,
         quote_prices=all_listing_prices,
         deal_prices=filtered_deal_prices,
+        deal_records=[
+            {"area": r.area, "price": r.unit_price}
+            for r in deal_records if r.unit_price is not None
+        ][:10],
+        deal_source="成交记录" if filtered_deal_prices else "无成交",
         request_id=request_id,
         detail_url=detail_url,
         elapsed_seconds=round(time.time() - started_at, 2),
@@ -626,11 +698,9 @@ async def _do_collect(
 
 
 async def _close_tab_later(tab):
-    """详情页停留 60s 后关闭。"""
+    """详情页停留后关闭。"""
     try:
-        log.info("[15] 详情页停留 %ds 后关闭", config.DETAIL_TAB_LINGER_SECONDS)
         await asyncio.sleep(config.DETAIL_TAB_LINGER_SECONDS)
         await tab.close()
-        log.info("[15] 详情页已关闭")
     except Exception as exc:
-        log.warning("[15] 关闭异常: %s", exc)
+        log.warning("关闭详情标签异常: %s", exc)

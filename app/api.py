@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from app.core import config
 from app.core.models import InquiryRequest
 from app.runtime import RPARuntime
 
@@ -20,6 +21,14 @@ class InquiryCreatePayload(BaseModel):
     area_max: float = Field(..., gt=0, alias="areaMax")
     city: str = "深圳"
     request_id: Optional[str] = Field(default=None, alias="requestId")
+
+    model_config = {
+        "populate_by_name": True,
+    }
+
+
+class NoDealDiscountPayload(BaseModel):
+    no_deal_discount: float = Field(..., gt=0, lt=1, alias="noDealDiscount")
 
     model_config = {
         "populate_by_name": True,
@@ -119,6 +128,29 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
                 "statusCode": task["statusCode"],
             }
         return {"code": "OK", "message": "查询成功", "data": data}
+
+    @app.get("/admin/algorithm/no-deal-discount")
+    async def get_no_deal_discount():
+        return {
+            "code": "OK",
+            "message": "查询成功",
+            "data": {
+                "noDealDiscount": config.get_no_deal_discount(),
+                "isDefault": config.is_no_deal_discount_default(),
+            },
+        }
+
+    @app.put("/admin/algorithm/no-deal-discount")
+    async def update_no_deal_discount(payload: NoDealDiscountPayload):
+        try:
+            new_value = config.set_no_deal_discount(payload.no_deal_discount)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {
+            "code": "OK",
+            "message": "参数已更新",
+            "data": {"noDealDiscount": new_value},
+        }
 
     return app
 

@@ -18,8 +18,8 @@ class KePlatformAdapter(PlatformAdapter):
     name = "贝壳"
     start_url = START_URL
 
-    async def open_session(self, browser) -> PlatformSession:
-        page = await browser.get(self.start_url)
+    async def open_session(self, browser, new_tab=False) -> PlatformSession:
+        page = await browser.get(self.start_url, new_tab=new_tab)
         await page
         return PlatformSession(
             code=self.code,
@@ -44,11 +44,15 @@ class KePlatformAdapter(PlatformAdapter):
             log.warning("failed to reset ke main page to standby: %s", exc)
         return result
 
-    async def check_ready(self, session: PlatformSession) -> tuple[bool, str]:
-        return await ke_adapter.probe_ready(session.page)
-
-    async def keepalive(self, session: PlatformSession) -> tuple[bool, str]:
-        return await ke_adapter.keepalive(session.page)
+    async def _probe_ready(self, page, html: str) -> tuple[bool, str]:
+        """贝壳特有：人机验证 + 搜索框。登录检测由基类 check_ready 负责。"""
+        if ke_adapter._is_manual_verify_html(html):
+            return False, "命中人机验证，等待人工处理"
+        try:
+            await ke_adapter._get_search_input(page)
+        except Exception:
+            return False, "未找到搜索框，页面未就绪"
+        return True, "READY"
 
     def detect_block(self, url: str, html: str) -> tuple[bool, str]:
         return ke_adapter.detect_block(url, html)

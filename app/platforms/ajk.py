@@ -17,9 +17,10 @@ class AjkPlatformAdapter(PlatformAdapter):
     code = "ajk"
     name = "安居客"
     start_url = START_URL
+    requires_login = False
 
-    async def open_session(self, browser) -> PlatformSession:
-        page = await browser.get(self.start_url)
+    async def open_session(self, browser, new_tab=False) -> PlatformSession:
+        page = await browser.get(self.start_url, new_tab=new_tab)
         await page
         return PlatformSession(
             code=self.code,
@@ -43,12 +44,6 @@ class AjkPlatformAdapter(PlatformAdapter):
         except Exception as exc:
             log.warning("failed to reset ajk main page to standby: %s", exc)
         return result
-
-    async def check_ready(self, session: PlatformSession) -> tuple[bool, str]:
-        return await ajk_adapter.probe_ready(session.page)
-
-    async def keepalive(self, session: PlatformSession) -> tuple[bool, str]:
-        return await ajk_adapter.keepalive(session.page)
 
     def detect_block(self, url: str, html: str) -> tuple[bool, str]:
         return ajk_adapter.detect_block(url, html)
