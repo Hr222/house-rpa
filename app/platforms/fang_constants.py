@@ -8,5 +8,5 @@
 
 START_URL = "https://sz.esf.fang.com/"
 
-# 房天下面积筛选是自定义输入框（填值+点确定），不是预设档位，
-# 因此没有贝壳那种 AREA_SEGMENTS 档位映射。
+# 房天下面积筛选档位因城市而异，不再硬编码。
+# 改为运行时从结果页 HTML 动态读取（见 parsers/fang.py:parse_area_segments）。

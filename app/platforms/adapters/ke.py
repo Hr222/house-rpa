@@ -290,11 +290,6 @@ async def keepalive(main_page) -> tuple[bool, str]:
     return await probe_ready(main_page)
 
 
-    remain = linger_seconds - (time.monotonic() - start)
-    if remain > 0:
-        await asyncio.sleep(remain)
-
-
 async def _click_page_number(page, page_no: int) -> str:
     selector = f".house-lst-page-box a[data-page='{page_no}']"
     try:
@@ -382,6 +377,62 @@ async def _click_detail_link(browser, page, expected_url: Optional[str]):
         return True, page
 
     return True, None
+
+
+async def _click_area_segment(page, area: Optional[float]) -> bool:
+    """从结果页面积筛选区动态读取档位，点击匹配 area 的那个档位链接。
+
+    档位因城市而异，不能硬编码，必须从 HTML 实时读取。
+    匹配规则：左闭右开（area >= min 且 area < max）。
+
+    贝壳档位是 <a> 链接（如 .../a3/），点击即筛选，不需要填输入框或点确定。
+
+    Args:
+        page: 结果页
+        area: 精确面积。为 None 时用 area_min/area_max 旧行为（兼容）。
+
+    Returns:
+        True 表示成功点击了某个档位。
+    """
+    if area is None:
+        log.info("未传精确面积，跳过面积档位筛选")
+        return True
+
+    html = await page.get_content()
+    segments = parsers.parse_area_segments(html)
+    if not segments:
+        log.warning("未从页面读到面积档位，跳过面积筛选")
+        return True
+
+    log.info("贝壳读到面积档位: %s", [(t, lo, hi) for t, lo, hi in segments])
+
+    # 左闭右开匹配
+    target = None
+    for text, lo, hi in segments:
+        if lo <= area < hi:
+            target = text
+            break
+
+    if target is None:
+        target = segments[-1][0]
+        log.info("面积 %.1f 超出档位范围，取末档 %s", area, target)
+    else:
+        log.info("贝壳面积 %.1f 匹配档位 %s", area, target)
+
+    # 点击对应的档位链接（通过文本定位）
+    try:
+        el = await page.find(target, timeout=4)
+    except Exception:
+        el = None
+    if el is None:
+        log.warning("未找到面积档位按钮: %s", target)
+        return False
+
+    clicked = await _human_click(page, el, f"面积档位 {target}")
+    if clicked:
+        await page
+        await asyncio.sleep(3)
+    return clicked
 
 
 async def _apply_area_filter(page, area_min, area_max):
@@ -537,9 +588,10 @@ async def collect(
     area_min: float,
     area_max: float,
     request_id: Optional[str] = None,
+    area: Optional[float] = None,
 ) -> PlatformResult:
     start = time.time()
-    log.info("[4] 收到请求: 小区=%s 面积=%.0f~%.0f㎡", community_name, area_min, area_max)
+    log.info("[4] 收到请求: 小区=%s 面积=%.0f~%.0f㎡ area=%s", community_name, area_min, area_max, area)
     try:
         return await _do_collect(
             browser=browser,
@@ -547,6 +599,7 @@ async def collect(
             community_name=community_name,
             area_min=area_min,
             area_max=area_max,
+            area=area,
             request_id=request_id,
             started_at=start,
         )
@@ -570,6 +623,7 @@ async def _do_collect(
     area_max: float,
     request_id: Optional[str],
     started_at: float,
+    area: Optional[float] = None,
 ) -> PlatformResult:
     log.info("[5] 刷新页面（保活插口）")
     main_page = await _reset_to_start_page(main_page)
@@ -599,9 +653,8 @@ async def _do_collect(
             elapsed_seconds=round(time.time() - started_at, 2),
         )
 
-    # 4. 面积筛选（更多及自定义）
-    log.info("[6-9] 面积筛选: %d-%d", area_min, area_max)
-    await _apply_area_filter(main_page, area_min, area_max)
+    # 4. 面积筛选（动态读取页面档位，点击对应区间链接）
+    await _click_area_segment(main_page, area)
     await _dump(main_page, "ke_after_area")
 
     all_listing_prices: list[float] = []

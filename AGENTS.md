@@ -52,9 +52,10 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
    - `Element` **没有** `select_all`(那是 `Tab` 的),Element 用 `query_selector_all`
    - `Element.apply(js_function)` 会自动调用箭头函数并传入元素,**不需要** IIFE
    - `evaluate` 要拿返回值传 `return_by_value=True`
-5. **正式落地三件套**(MVP 验证通过后):
+5. **正式落地四件套**(MVP 验证通过后):
    - `app/platforms/<code>_constants.py` — 平台固有常量(首页 URL、档位等)
-   - `app/platforms/adapters/<code>.py` — 真实采集逻辑(MVP 验证过的函数移植过来)
+   - `app/parsers/<code>.py` — HTML 解析(纯函数,从结果页/成交页提取数据,可独立单测)
+   - `app/platforms/adapters/<code>.py` — 真实采集逻辑(浏览器操作,MVP 验证过的函数移植过来;解析调 `parsers`)
    - `app/platforms/<code>.py` — 薄壳适配器,委托给 adapter
 6. **注册两处**:`app/platforms/__init__.py` 导出 + `app/registry.py` 追加。
 7. **不改核心层**:`core/models` / `core/algorithm` / `service` / `runtime` / `api` 一行不改。
@@ -105,7 +106,7 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 | `app/runtime.py` | 浏览器/队列/保活/状态机 | 低 |
 | `app/api.py` | FastAPI 接口 | 低 |
 | `app/core/models.py` | 数据模型(平台无关) | 低 |
-| `app/parsers/ke.py` | 贝壳 HTML 解析 | 跟随贝壳页面变化 |
+| `app/parsers/<code>.py` | 各平台 HTML 解析(纯函数,独立单测) | 跟随各平台页面变化 |
 | `app/platforms/adapters/ke.py` | 贝壳采集 | 跟随贝壳页面变化 |
 | `app/platforms/adapters/ajk.py` | 安居客采集 | 跟随安居客页面变化 |
 | `app/platforms/adapters/lj.py` | 链家采集 | 跟随链家页面变化 |

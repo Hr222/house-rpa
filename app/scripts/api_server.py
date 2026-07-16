@@ -21,6 +21,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="开启 RPA 调试模式，导出关键页面 HTML 到 debug 目录。",
     )
+    parser.add_argument(
+        "--manual-login",
+        action="store_true",
+        help="启用终端回车确认登录：平台未就绪时提示回车，人工完成登录后继续。",
+    )
     return parser
 
 
@@ -30,7 +35,7 @@ def main():
         set_debug_mode(True)
 
     setup_logging()
-    runtime = RPARuntime(enable_console_ready_confirmation=True)
+    runtime = RPARuntime(enable_console_ready_confirmation=args.manual_login)
     app = create_app(runtime=runtime, manage_runtime=True)
     uvicorn.run(
         app,

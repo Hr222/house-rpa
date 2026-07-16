@@ -17,13 +17,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import re
 import time
 from typing import Optional
 
 from app.core import config
 from app.utils.debug_utils import dump_html
-from app.core.models import ListingSnapshot, PlatformResult
+from app.core.models import PlatformResult
+from app.parsers import ajk as parsers
 from app.platforms.ajk_constants import START_URL
 
 log = logging.getLogger(__name__)
@@ -146,8 +146,65 @@ async def _human_click(page, element, label: str) -> bool:
 
 
 # ============================================================
-# 面积自定义输入（安居客是填值+点确定，不是预设档位）
+# 面积筛选（动态读取页面档位，点击对应区间链接）
 # ============================================================
+
+async def _click_area_segment(page, area: Optional[float]) -> bool:
+    """从结果页面积筛选区动态读取档位，点击匹配 area 的那个档位链接。
+
+    档位因城市而异，不能硬编码，必须从 HTML 实时读取。
+    匹配规则：左闭右开（area >= min 且 area < max）。
+
+    安居客档位是 <a> 链接，点击即筛选，不需要填输入框或点确定。
+
+    Args:
+        page: 结果页
+        area: 精确面积。为 None 时跳过（不筛选面积）。
+
+    Returns:
+        True 表示成功点击了某个档位。
+    """
+    if area is None:
+        log.info("未传精确面积，跳过面积档位筛选")
+        return True
+
+    html = await page.get_content()
+    segments = parsers.parse_area_segments(html)
+    if not segments:
+        log.warning("未从页面读到面积档位，跳过面积筛选")
+        return True
+
+    log.info("读到面积档位: %s", [(t, lo, hi) for t, lo, hi in segments])
+
+    # 左闭右开匹配
+    target = None
+    for text, lo, hi in segments:
+        if lo <= area < hi:
+            target = text
+            break
+
+    if target is None:
+        # 兜底：超出最大档位，取末档
+        target = segments[-1][0]
+        log.info("面积 %.1f 超出档位范围，取末档 %s", area, target)
+    else:
+        log.info("面积 %.1f 匹配档位 %s", area, target)
+
+    # 点击对应的档位链接（通过文本定位）
+    try:
+        el = await page.find(target, timeout=4)
+    except Exception:
+        el = None
+    if el is None:
+        log.warning("未找到面积档位按钮: %s", target)
+        return False
+
+    clicked = await _human_click(page, el, f"面积档位 {target}")
+    if clicked:
+        await page
+        await asyncio.sleep(3)
+    return clicked
+
 
 async def _fill_area_inputs(page, area_min, area_max):
     """定位面积筛选区的自定义输入框并填值。
@@ -254,102 +311,6 @@ async def _scroll_to_bottom(page, max_rounds: int = 20, wait: float = 1.8) -> in
 
 
 # ============================================================
-# HTML 解析
-# ============================================================
-
-def _extract_first(pattern, text, cast=float):
-    m = re.search(pattern, text)
-    if not m:
-        return None
-    try:
-        return cast(m.group(1).replace(",", ""))
-    except (ValueError, TypeError):
-        return None
-
-
-def parse_listing_snapshots(html: str) -> list:
-    """提取主结果区房源快照。
-
-    安居客结果页结构：主结果区与推荐区是两个并列的 <section class="list">，
-    中间靠 <h3 class="list-guess-title">分隔。只取边界标志之前的部分。
-
-    单条房源字段：
-      - 户型: property-content-info-attribute（如 3室2厅2卫）
-      - 面积: property-content-info-text 里的 XX.XX㎡
-      - 小区名: property-content-info-comm-name
-      - 总价: property-price-total-num
-      - 单价: property-price-average
-    """
-    cut = html.find("list-guess-title")
-    main_html = html[:cut] if cut > 0 else html
-
-    snapshots = []
-    for block in re.finditer(
-        r'<div[^>]*class="property"[^>]*>(.*?)(?=<div[^>]*class="property"|$)',
-        main_html,
-        re.S,
-    ):
-        chunk = block.group(1)
-
-        # 户型: <p class="...attribute"><span>3</span>室<span>2</span>厅<span>2</span>卫
-        layout = None
-        attr_m = re.search(
-            r'property-content-info-attribute[^>]*>(.*?)</p>', chunk, re.S
-        )
-        if attr_m:
-            nums = re.findall(r'<span[^>]*>(\d+)</span>', attr_m.group(1))
-            if len(nums) >= 2:
-                layout = f"{nums[0]}室{nums[1]}厅"
-
-        area = _extract_first(r'([\d.]+)\s*㎡', chunk)
-
-        name_m = re.search(
-            r'property-content-info-comm-name[^>]*>([^<]+)<', chunk
-        )
-        community_name = name_m.group(1).strip() if name_m else None
-
-        total_price = _extract_first(
-            r'property-price-total-num[^>]*>\s*([\d,]+)', chunk
-        )
-        unit_price = _extract_first(
-            r'property-price-average[^>]*>\s*([\d,]+)\s*元', chunk
-        )
-
-        if unit_price is None and total_price is None:
-            continue
-
-        snapshots.append(
-            ListingSnapshot(
-                house_id="",
-                community_name=community_name,
-                area=area,
-                layout=layout,
-                unit_price=unit_price,
-                total_price=total_price,
-            )
-        )
-    return snapshots
-
-
-def parse_community_avg_price(html: str) -> Optional[float]:
-    """从结果页顶部社区卡片提取挂牌均价。
-
-    安居客结果页顶部社区信息卡：
-      <div class="community-info-detail-price">
-        <p class="community-info-detail-price-money"><em>84307</em>元/㎡</p>
-      </div>
-
-    注意：安居客无成交记录，业务上把挂牌均价当作 deal_prices 的替代，
-    让 decide() 正常按"在售均价 vs 成交均价"对比出最终价。
-    """
-    m = re.search(
-        r'community-info-detail-price-money[^>]*>\s*<em[^>]*>\s*([\d,]+)\s*</em>\s*元\s*/?\s*㎡',
-        html,
-    )
-    return float(m.group(1).replace(",", "")) if m else None
-
-
-# ============================================================
 # 搜索
 # ============================================================
 
@@ -449,10 +410,11 @@ async def collect(
     area_min: float,
     area_max: float,
     request_id: Optional[str] = None,
+    area: Optional[float] = None,
 ) -> PlatformResult:
     """执行一次完整的安居客询价采集。"""
     start = time.time()
-    log.info("收到请求: 小区=%s 面积=%.0f~%.0f㎡", community_name, area_min, area_max)
+    log.info("收到请求: 小区=%s 面积=%.0f~%.0f㎡ area=%s", community_name, area_min, area_max, area)
     try:
         return await _do_collect(
             browser=browser,
@@ -460,6 +422,7 @@ async def collect(
             community_name=community_name,
             area_min=area_min,
             area_max=area_max,
+            area=area,
             request_id=request_id,
             started_at=start,
         )
@@ -483,6 +446,7 @@ async def _do_collect(
     area_max: float,
     request_id: Optional[str],
     started_at: float,
+    area: Optional[float] = None,
 ) -> PlatformResult:
     # 1. 刷新首页保活
     main_page = await reset_to_start_page(main_page)
@@ -511,9 +475,8 @@ async def _do_collect(
             elapsed_seconds=round(time.time() - started_at, 2),
         )
 
-    # 4. 填面积筛选
-    log.info("填写面积筛选: %d-%d", area_min, area_max)
-    area_confirmed = await _fill_area_inputs(main_page, area_min, area_max)
+    # 4. 面积筛选（动态读取页面档位，点击对应区间链接）
+    area_confirmed = await _click_area_segment(main_page, area)
     await _dump(main_page, "ajk_after_area")
 
     area_url = main_page.target.url or ""
@@ -540,7 +503,7 @@ async def _do_collect(
     area_html = await main_page.get_content()
 
     # 6. 解析在售房源
-    snapshots = parse_listing_snapshots(area_html)
+    snapshots = parsers.parse_listing_snapshots(area_html)
     quote_prices = [s.unit_price for s in snapshots if s.unit_price]
     if not quote_prices:
         return PlatformResult(
@@ -552,7 +515,7 @@ async def _do_collect(
         )
 
     # 7. 挂牌均价（安居客无成交记录，挂牌均价顶替 deal_prices）
-    listing_price = parse_community_avg_price(area_html)
+    listing_price = parsers.parse_community_avg_price(area_html)
     # 安居客特殊：无成交记录，把挂牌均价作为 deal_prices 唯一元素，
     # 让 decide() 正常按"在售均价 vs 成交均价"对比出最终价。
     deal_prices = [listing_price] if listing_price is not None else []

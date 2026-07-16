@@ -23,14 +23,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import re
 import time
 from datetime import datetime, timedelta
 from typing import Optional
 
 from app.core import config
 from app.utils.debug_utils import dump_html
-from app.core.models import ListingSnapshot, PlatformResult
+from app.core.models import PlatformResult
+from app.parsers import lj as parsers
 from app.platforms.base import wait_for_manual_unblock, human_linger
 from app.platforms.lj_constants import START_URL
 
@@ -172,7 +172,66 @@ async def _search_community(page, community_name: str) -> str:
 
 
 # ============================================================
-# 面积自定义输入（链家需先"更多选项"→"更多及自定义"→customFilter min-max）
+# 面积筛选（动态读取页面档位，点击对应区间链接）
+# ============================================================
+
+async def _click_area_segment(page, area: Optional[float]) -> bool:
+    """从结果页面积筛选区动态读取档位，点击匹配 area 的那个档位链接。
+
+    档位因城市而异，不能硬编码，必须从 HTML 实时读取。
+    匹配规则：左闭右开（area >= min 且 area < max）。
+
+    链家档位是 <a> 链接，点击即筛选，不需要填输入框或点确定。
+
+    Args:
+        page: 结果页
+        area: 精确面积。为 None 时跳过（不筛选面积）。
+
+    Returns:
+        True 表示成功点击了某个档位。
+    """
+    if area is None:
+        log.info("未传精确面积，跳过面积档位筛选")
+        return True
+
+    html = await page.get_content()
+    segments = parsers.parse_area_segments(html)
+    if not segments:
+        log.warning("未从页面读到面积档位，跳过面积筛选")
+        return True
+
+    log.info("链家读到面积档位: %s", [(t, lo, hi) for t, lo, hi in segments])
+
+    # 左闭右开匹配
+    target = None
+    for text, lo, hi in segments:
+        if lo <= area < hi:
+            target = text
+            break
+
+    if target is None:
+        target = segments[-1][0]
+        log.info("面积 %.1f 超出档位范围，取末档 %s", area, target)
+    else:
+        log.info("链家面积 %.1f 匹配档位 %s", area, target)
+
+    # 点击对应的档位链接（通过文本定位）
+    try:
+        el = await page.find(target, timeout=4)
+    except Exception:
+        el = None
+    if el is None:
+        log.warning("未找到面积档位按钮: %s", target)
+        return False
+
+    clicked = await _human_click(page, el, f"面积档位 {target}")
+    if clicked:
+        await page
+        await asyncio.sleep(3)
+    return clicked
+
+
+# 面积自定义输入（旧逻辑保留，不再调用）
 # ============================================================
 
 async def _fill_area_inputs(page, area_min, area_max):
@@ -294,87 +353,8 @@ async def _fill_area_inputs(page, area_min, area_max):
 
 
 # ============================================================
-# 在售解析（链家和贝壳同代码库，DOM 一致）
-# ============================================================
-
-def _parse_listing_snapshots(html: str) -> list:
-    """从结果页主结果列表提取在售房源快照。
-
-    DOM（和贝壳一致）：
-      <ul class="sellListContent">
-        <li class="clear">
-          <div class="positionInfo">...<a>绿景虹湾</a>...</div>
-          <div class="houseInfo">3室2厅 | 87.57平米 | 东 | ...</div>
-          <div class="unitPrice" data-price="86788"><span>86,788元/平</span></div>
-        </li>
-
-    边界：截断到"猜你喜欢"之前，排除推荐位（和安居客 list-guess-title 同类）。
-    """
-    cut = html.find("猜你喜欢")
-    main_html = html[:cut] if cut > 0 else html
-
-    snapshots = []
-    for block in re.finditer(r'<li class="clear[^"]*"[^>]*>(.*?)(?=<li class="clear|$)', main_html, re.S):
-        chunk = block.group(1)
-        if "goodhouse" in chunk:
-            continue
-
-        # 小区名
-        name_m = re.search(r'<div class="positionInfo">.*?<a[^>]*>([^<]+)</a>', chunk, re.S)
-        community_name = name_m.group(1).strip() if name_m else None
-
-        # 户型+面积
-        info_m = re.search(r'<div class="houseInfo">.*?>(.*?)</div>', chunk, re.S)
-        layout = None
-        area = None
-        if info_m:
-            info_text = re.sub(r'<[^>]+>', '', info_m.group(1))
-            layout_m = re.search(r'(\d+室\d+厅)', info_text)
-            if layout_m:
-                layout = layout_m.group(1)
-            area_m = re.search(r'([\d.]+)\s*平米', info_text)
-            if area_m:
-                area = float(area_m.group(1))
-
-        # 总价(万)
-        total_m = re.search(r'class="totalPrice[^"]*"[^>]*>.*?<span[^>]*>([\d.]+)</span>', chunk, re.S)
-        total_price = float(total_m.group(1)) if total_m else None
-
-        # 单价（优先用 data-price 属性）
-        unit_m = re.search(r'class="unitPrice"[^>]*data-price="([\d]+)"', chunk)
-        if not unit_m:
-            unit_m = re.search(r'class="unitPrice"[^>]*>.*?<span>([\d,]+)\s*元', chunk, re.S)
-        unit_price = float(unit_m.group(1).replace(",", "")) if unit_m else None
-
-        if unit_price is None and total_price is None:
-            continue
-
-        snapshots.append(
-            ListingSnapshot(
-                house_id="",
-                community_name=community_name,
-                area=area,
-                layout=layout,
-                unit_price=unit_price,
-                total_price=total_price,
-            )
-        )
-    return snapshots
-
-
-# ============================================================
 # 在售分页采集（参考贝壳 collect_listing_pages + 风控检测）
 # ============================================================
-
-def _parse_listing_total_pages(html: str) -> int:
-    """从在售结果页分页区解析总页数。
-
-    DOM（和贝壳一致）：
-      page-data="{&quot;totalPage&quot;:3,&quot;curPage&quot;:1}"
-    """
-    m = re.search(r'totalPage&quot;:(\d+)', html or "")
-    return int(m.group(1)) if m else 1
-
 
 async def _click_listing_page_number(page, page_no: int) -> str:
     """点击在售页码，返回加载完成后的 HTML。
@@ -434,7 +414,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
         if page_no > 1:
             all_html_parts[-1] = _cut_main(last_html)
 
-        count = len(_parse_listing_snapshots(_cut_main(last_html)))
+        count = len(parsers.parse_listing_snapshots(_cut_main(last_html)))
         page_counts.append((page_no, count))
         log.info("第 %d 页在售: %d 条", page_no, count)
 
@@ -491,56 +471,8 @@ async def _click_detail_link(browser, page):
 
 
 # ============================================================
-# 成交记录解析 + 分页 + 过滤（严格面积 + 近半年）
+# 成交页分页点击（解析在 parsers/lj.py）
 # ============================================================
-
-def _parse_deal_records(html: str) -> list:
-    """从成交页 ul.listContent 解析成交记录。
-
-    DOM（和贝壳成交页一致）：
-      <ul class="listContent"><li>
-        <div class="title"><a>绿景虹湾 3室1厅 75.14平米</a></div>
-        <div class="dealDate">2026.05.06</div>
-        <div class="totalPrice"><span class="number">558</span>万</div>
-        <div class="unitPrice"><span class="number">74262</span>元/平</div>
-
-    返回 [(面积, 日期, 总价万, 单价), ...]，面积从 title 提取。
-    日期格式统一转为 YYYY-MM-DD（原始是 2026.05.06）。
-    """
-    records = []
-    for m in re.finditer(r'<li[^>]*>(.*?)(?=<li[^>]*>|</ul>)', html, re.S):
-        chunk = m.group(1)
-        if "dealDate" not in chunk:
-            continue
-
-        title_m = re.search(r'<div class="title">.*?>(.*?)</a>', chunk, re.S)
-        area = None
-        if title_m:
-            area_m = re.search(r'([\d.]+)\s*平米', title_m.group(1))
-            if area_m:
-                area = float(area_m.group(1))
-
-        date_m = re.search(r'<div class="dealDate">([\d.]+)</div>', chunk)
-        date_str = date_m.group(1).replace(".", "-") if date_m else None
-
-        total_m = re.search(r'class="totalPrice">.*?class="number">([\d.]+)', chunk, re.S)
-        total_price = float(total_m.group(1)) if total_m else None
-
-        unit_m = re.search(r'class="unitPrice">.*?class="number">([\d,]+)', chunk, re.S)
-        unit_price = float(unit_m.group(1).replace(",", "")) if unit_m else None
-
-        if area is None and unit_price is None:
-            continue
-
-        records.append((area, date_str, total_price, unit_price))
-    return records
-
-
-def _parse_deal_total_pages(html: str) -> int:
-    """从成交页分页区解析总页数。"""
-    m = re.search(r'totalPage&quot;:(\d+)', html or "")
-    return int(m.group(1)) if m else 1
-
 
 async def _click_deal_page_number(page, page_no: int) -> str:
     """点击成交页页码，返回加载完成后的 HTML。"""
@@ -556,25 +488,6 @@ async def _click_deal_page_number(page, page_no: int) -> str:
     await page
     await asyncio.sleep(3)
     return await page.get_content()
-
-
-def _filter_deal_records(records: list, area_min: float, area_max: float, months: int = 6) -> list:
-    """过滤成交记录：严格面积区间 + 近 months 个月。
-
-    链家规则：严格面积区间（不套容差），日期 >= 今天往前 months 个月。
-    注意：贝壳用的是 ±20% 容差（parsers.filter_deal_prices_by_area），
-    链家按业务确认用严格区间，两者口径不同，各自实现，不混用。
-    """
-    cutoff = datetime.now() - timedelta(days=30 * months)
-    cutoff_str = cutoff.strftime("%Y-%m-%d")
-    filtered = []
-    for area, date_str, total, price in records:
-        if area is not None and not (area_min <= area <= area_max):
-            continue
-        if date_str and date_str < cutoff_str:
-            continue
-        filtered.append((area, date_str, total, price))
-    return filtered
 
 
 # ============================================================
@@ -662,10 +575,11 @@ async def collect(
     area_min: float,
     area_max: float,
     request_id: Optional[str] = None,
+    area: Optional[float] = None,
 ) -> PlatformResult:
     """执行一次完整的链家询价采集。"""
     start = time.time()
-    log.info("收到请求: 小区=%s 面积=%.0f~%.0f㎡", community_name, area_min, area_max)
+    log.info("收到请求: 小区=%s 面积=%.0f~%.0f㎡ area=%s", community_name, area_min, area_max, area)
     try:
         return await _do_collect(
             browser=browser,
@@ -673,6 +587,7 @@ async def collect(
             community_name=community_name,
             area_min=area_min,
             area_max=area_max,
+            area=area,
             request_id=request_id,
             started_at=start,
         )
@@ -696,6 +611,7 @@ async def _do_collect(
     area_max: float,
     request_id: Optional[str],
     started_at: float,
+    area: Optional[float] = None,
 ) -> PlatformResult:
     def _elapsed():
         return round(time.time() - started_at, 2)
@@ -723,9 +639,8 @@ async def _do_collect(
             elapsed_seconds=_elapsed(),
         )
 
-    # 4. 填面积筛选
-    log.info("填写面积筛选: %d-%d", area_min, area_max)
-    area_confirmed = await _fill_area_inputs(main_page, area_min, area_max)
+    # 4. 面积筛选（动态读取页面档位，点击对应区间链接）
+    area_confirmed = await _click_area_segment(main_page, area)
     await _dump(main_page, "lj_after_area")
 
     area_url = main_page.target.url or ""
@@ -738,13 +653,13 @@ async def _do_collect(
         )
 
     # 5. 分页采集在售房源
-    total_pages = _parse_listing_total_pages(area_html)
+    total_pages = parsers.parse_listing_total_pages(area_html)
     log.info("在售总页数: %d", total_pages)
     merged_html, page_counts = await _collect_listing_pages(main_page, area_html, total_pages)
     log.info("在售分页完成: 每页 %s", page_counts)
 
     # 6. 解析在售房源
-    snapshots = _parse_listing_snapshots(merged_html)
+    snapshots = parsers.parse_listing_snapshots(merged_html)
     quote_prices = [s.unit_price for s in snapshots if s.unit_price]
     if not quote_prices:
         return PlatformResult(
@@ -785,7 +700,7 @@ async def _do_collect(
 
                     # 翻页抓取成交记录
                     first_deal_html = await deal_tab2.get_content()
-                    total_deal_pages = _parse_deal_total_pages(first_deal_html)
+                    total_deal_pages = parsers.parse_deal_total_pages(first_deal_html)
                     log.info("成交页总页数: %d", total_deal_pages)
 
                     all_deals: list = []
@@ -799,7 +714,7 @@ async def _do_collect(
                         else:
                             page_html = first_deal_html
 
-                        page_deals = _parse_deal_records(page_html)
+                        page_deals = parsers.parse_deal_records(page_html)
                         all_deals.extend(page_deals)
 
                         # 优化：本页已有超半年记录，停止翻页
@@ -810,7 +725,7 @@ async def _do_collect(
                                 log.info("成交第 %d 页已有超出半年的记录，停止翻页", deal_page_no)
                                 break
 
-                    filtered_deals = _filter_deal_records(all_deals, area_min, area_max, months=6)
+                    filtered_deals = parsers.filter_deal_records(all_deals, area_min, area_max, months=6)
                     deal_prices = [d[3] for d in filtered_deals if d[3] is not None]
                     deal_record_dicts = [
                         {"area": d[0], "date": d[1], "price": d[3]}

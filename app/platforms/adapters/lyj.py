@@ -17,13 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from typing import Optional
 
 from app.core import config
 from app.utils.debug_utils import dump_html
-from app.core.models import ListingSnapshot, PlatformResult
+from app.core.models import PlatformResult
+from app.parsers import lyj as parsers
 from app.platforms.lyj_constants import START_URL
 from app.platforms.base import human_linger
 
@@ -135,8 +135,64 @@ async def _search_community(page, community_name: str) -> str:
 
 
 # ============================================================
-# 面积筛选（自定义输入框）
+# 面积筛选（动态读取页面档位，点击对应区间链接）
 # ============================================================
+
+async def _click_area_segment(page, area: Optional[float]) -> bool:
+    """从结果页面积筛选区动态读取档位，点击匹配 area 的那个档位链接。
+
+    档位因城市而异，不能硬编码，必须从 HTML 实时读取。
+    匹配规则：左闭右开（area >= min 且 area < max）。
+
+    乐有家档位是 <a class="xx5"> 链接，点击即筛选，不需要填输入框或点确定。
+
+    Args:
+        page: 结果页
+        area: 精确面积。为 None 时跳过（不筛选面积）。
+
+    Returns:
+        True 表示成功点击了某个档位。
+    """
+    if area is None:
+        log.info("未传精确面积，跳过面积档位筛选")
+        return True
+
+    html = await page.get_content()
+    segments = parsers.parse_area_segments(html)
+    if not segments:
+        log.warning("未从页面读到面积档位，跳过面积筛选")
+        return True
+
+    log.info("乐有家读到面积档位: %s", [(t, lo, hi) for t, lo, hi in segments])
+
+    # 左闭右开匹配
+    target = None
+    for text, lo, hi in segments:
+        if lo <= area < hi:
+            target = text
+            break
+
+    if target is None:
+        target = segments[-1][0]
+        log.info("面积 %.1f 超出档位范围，取末档 %s", area, target)
+    else:
+        log.info("乐有家面积 %.1f 匹配档位 %s", area, target)
+
+    # 点击对应的档位链接（通过文本定位）
+    try:
+        el = await page.find(target, timeout=4)
+    except Exception:
+        el = None
+    if el is None:
+        log.warning("未找到面积档位按钮: %s", target)
+        return False
+
+    clicked = await _human_click(page, el, f"面积档位 {target}")
+    if clicked:
+        await page
+        await asyncio.sleep(3)
+    return clicked
+
 
 async def _fill_area_inputs(page, area_min, area_max):
     """乐有家面积筛选：找到"面积"区 → 点"更多及自定义" → 填值 → 点确定。
@@ -236,109 +292,15 @@ async def _fill_area_inputs(page, area_min, area_max):
 
 
 # ============================================================
-# HTML 解析：房源快照
+# 分页导航（解析在 parsers/lyj.py）
 # ============================================================
-
-def _normalize_text(text: str) -> str:
-    return re.sub(r"<[^>]+>", "", text or "").strip()
-
-
-def _parse_listing_snapshots(html: str) -> list[ListingSnapshot]:
-    """从乐有家搜索结果页提取房源快照。
-
-    每个房源在 <li class="item clearfix"> 内：
-      p.tit a              → 标题
-      p.attr span          → "3室2厅1卫 / 建筑面积73.5㎡"
-      p.attr a[href*=xq/detail] → 小区名链接
-      span.salePrice       → 总价数字
-      p.sub                → "单价44218元/㎡"
-    """
-    cut = html.find("猜你喜欢")
-    source = html[:cut] if cut > 0 else html
-
-    snapshots = []
-    for block in re.finditer(
-        r'<li class="item clearfix"[^>]*>(.*?)</li>', source, re.S
-    ):
-        chunk = block.group(1)
-
-        community_name = None
-        comm_m = re.search(r'href="/xq/detail/\d+[^"]*"[^>]*>(?:<[^>]+>)*\s*([^<]+)', chunk)
-        if comm_m:
-            community_name = _normalize_text(comm_m.group(1))
-
-        layout = None
-        layout_m = re.search(r"(\d+室\d+厅)", chunk)
-        if layout_m:
-            layout = layout_m.group(1)
-
-        area = None
-        area_m = re.search(r"建筑面积\s*([\d.]+)\s*㎡", chunk)
-        if area_m:
-            area = float(area_m.group(1))
-
-        total_price = None
-        tp_m = re.search(r'salePrice[^>]*>\s*([\d,]+)\s*<', chunk)
-        if tp_m:
-            total_price = float(tp_m.group(1).replace(",", ""))
-
-        unit_price = None
-        up_m = re.search(r'<p class="sub">.*?([\d,]+)\s*元\s*/?\s*㎡', chunk)
-        if up_m:
-            unit_price = float(up_m.group(1).replace(",", ""))
-
-        if unit_price is None and total_price is None:
-            continue
-
-        snapshots.append(
-            ListingSnapshot(
-                house_id="",
-                community_name=community_name,
-                area=area,
-                layout=layout,
-                unit_price=unit_price,
-                total_price=total_price,
-            )
-        )
-    return snapshots
-
-
-# ============================================================
-# HTML 解析：小区均价
-# ============================================================
-
-def _parse_community_avg_price(html: str) -> Optional[float]:
-    """从结果页社区信息卡提取小区均价。
-
-    DOM: <em class="label">小区均价</em><em class="txt">54386元/㎡</em>
-
-    乐有家无成交记录，业务上用小区均价顶替 deal_prices。
-    """
-    m = re.search(r"小区均价</em>\s*<em\s[^>]*>\s*([\d,]+)\s*元", html)
-    return float(m.group(1).replace(",", "")) if m else None
-
-
-# ============================================================
-# 分页解析与导航
-# ============================================================
-
-def _parse_total_pages(html: str) -> int:
-    """解析总页数。尾页链接: <a title="N">尾页</a>"""
-    m = re.search(r'<a[^>]*title="(\d+)"[^>]*>尾页</a>', html or "")
-    return int(m.group(1)) if m else 1
-
-
-def _parse_current_page(html: str) -> int:
-    m = re.search(r'<a[^>]*class="on"[^>]*href="[^"]*">(\d+)</a>', html or "")
-    return int(m.group(1)) if m else 1
-
 
 async def _wait_for_results_loaded(page, expected_page: int, timeout: float = 15) -> str:
     deadline = asyncio.get_event_loop().time() + timeout
     last_html = ""
     while asyncio.get_event_loop().time() < deadline:
         last_html = await page.get_content()
-        if _parse_current_page(last_html) == expected_page:
+        if parsers.parse_current_page(last_html) == expected_page:
             await asyncio.sleep(1.2)
             return last_html
         await asyncio.sleep(0.5)
@@ -386,7 +348,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
         last_html = await page.get_content()
         await _dump(page, f"lyj_area_page_{page_no}")
 
-        page_snapshots = _parse_listing_snapshots(last_html)
+        page_snapshots = parsers.parse_listing_snapshots(last_html)
         all_snapshots.extend(page_snapshots)
         log.info("乐有家第 %d/%d 页: %d 条", page_no, total_pages, len(page_snapshots))
 
@@ -459,10 +421,11 @@ async def collect(
     area_min: float,
     area_max: float,
     request_id: Optional[str] = None,
+    area: Optional[float] = None,
 ) -> PlatformResult:
     """执行一次完整的乐有家询价采集。"""
     start = time.time()
-    log.info("乐有家收到请求: 小区=%s 面积=%.0f~%.0f㎡", community_name, area_min, area_max)
+    log.info("乐有家收到请求: 小区=%s 面积=%.0f~%.0f㎡ area=%s", community_name, area_min, area_max, area)
     try:
         return await _do_collect(
             browser=browser,
@@ -470,6 +433,7 @@ async def collect(
             community_name=community_name,
             area_min=area_min,
             area_max=area_max,
+            area=area,
             request_id=request_id,
             started_at=start,
         )
@@ -493,6 +457,7 @@ async def _do_collect(
     area_max: float,
     request_id: Optional[str],
     started_at: float,
+    area: Optional[float] = None,
 ) -> PlatformResult:
     # 1. 刷新首页保活
     main_page = await reset_to_start_page(main_page)
@@ -531,9 +496,8 @@ async def _do_collect(
             deal_source="无数据",
         )
 
-    # 4. 填面积筛选
-    log.info("乐有家填写面积筛选: %d-%d", area_min, area_max)
-    area_confirmed = await _fill_area_inputs(main_page, area_min, area_max)
+    # 4. 面积筛选（动态读取页面档位，点击对应区间链接）
+    area_confirmed = await _click_area_segment(main_page, area)
     await _dump(main_page, "lyj_after_area")
 
     area_url = main_page.target.url or ""
@@ -556,7 +520,7 @@ async def _do_collect(
         )
 
     # 5. 分页采集在售房源
-    total_pages = _parse_total_pages(area_html)
+    total_pages = parsers.parse_total_pages(area_html)
     log.info("乐有家总页数: %d", total_pages)
     listing_snapshots, last_page_html = await _collect_listing_pages(
         main_page, area_html, total_pages
@@ -573,7 +537,7 @@ async def _do_collect(
         )
 
     # 6. 小区均价（乐有家无成交记录，挂牌均价顶替 deal_prices）
-    listing_price = _parse_community_avg_price(area_html)
+    listing_price = parsers.parse_community_avg_price(area_html)
     # 乐有家特殊：无成交记录，把小区均价作为 deal_prices 唯一元素，
     # 让 decide() 正常按"在售均价 vs 成交均价"对比出最终价。
     deal_prices = [listing_price] if listing_price is not None else []

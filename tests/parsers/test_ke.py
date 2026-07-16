@@ -131,7 +131,8 @@ def test_find_detail_link_reads_agent_card_link():
     assert find_detail_link(html) == "https://sz.ke.com/xiaoqu/2411063588287/"
 
 
-def test_filter_deal_prices_by_area_uses_20pct_tolerance():
+def test_filter_deal_prices_by_area_strict_range():
+    """严格面积区间（与链家/房天下统一口径，不再用 ±20% 容差）。"""
     records = [
         DealRecord(area=55.0, unit_price=50000.0),
         DealRecord(area=70.0, unit_price=60000.0),
@@ -140,8 +141,8 @@ def test_filter_deal_prices_by_area_uses_20pct_tolerance():
         DealRecord(area=120.0, unit_price=90000.0),
     ]
 
+    # 严格区间 70~90：只保留 70 和 90（55/108/120 排除）
     assert filter_deal_prices_by_area(records, 70.0, 90.0) == [
         60000.0,
         70000.0,
-        80000.0,
     ]
