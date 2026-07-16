@@ -21,7 +21,11 @@ import time
 from typing import Optional
 
 from app.core import config
-from app.platforms.base import _human_click, click_area_segment
+from app.platforms.base import (
+    _human_click,
+    click_area_segment,
+    short_circuit_result,
+)
 from app.utils.debug_utils import dump_html
 from app.core.models import PlatformResult
 from app.parsers import ajk as parsers
@@ -41,30 +45,28 @@ def _is_captcha_url(url: str) -> bool:
 
 
 def _is_captcha_html(html: str) -> bool:
+    """安居客(58系)验证码拦截页 HTML 特征。
+
+    真实样本：callback.58.com/antibot/verifycode，58 自家 ISDCaptcha SDK。
+    """
     markers = (
-        "请输入验证码",
-        "验证后继续访问",
-        "请完成验证",
-        "滑动验证",
+        "请输入验证码",          # <title> 文案（ws:IP 动态后缀，单靠不稳）
+        'id="ISDCaptcha"',      # 58 验证码 SDK 容器（最稳的结构标识）
+        'class="code_img"',     # 验证码图片容器
     )
-    return any(marker in html for marker in markers)
+    return any(marker in (html or "") for marker in markers)
 
 
-def _is_login_html(html: str) -> bool:
-    markers = (
-        "请输入手机号",
-        "请输入密码",
-        "手机快捷登录",
-        "扫码登录",
-    )
-    return any(marker in html for marker in markers)
+def _is_login_url(url: str) -> bool:
+    url = (url or "").lower()
+    return "login" in url or "passport" in url or "signin" in url
 
 
 def detect_block(url: str, html: str) -> tuple[bool, str]:
     """安居客风控/登录检测。"""
     if _is_captcha_url(url) or _is_captcha_html(html or ""):
         return True, "命中验证码拦截"
-    if _is_login_html(html or ""):
+    if _is_login_url(url):
         return True, "命中登录页"
     return False, ""
 
@@ -280,7 +282,7 @@ async def probe_ready(main_page) -> tuple[bool, str]:
 
     if _is_captcha_url(current_url) or _is_captcha_html(html):
         return False, "命中验证码拦截，等待人工处理"
-    if _is_login_html(html):
+    if _is_login_url(current_url):
         return False, "当前会话未登录或已失效"
 
     try:
@@ -365,20 +367,28 @@ async def _do_collect(
 
     # 3. 判风控/登录
     if _is_captcha_url(keyword_url) or _is_captcha_html(keyword_html):
-        return PlatformResult(
-            name="安居客",
-            status="WAIT_MANUAL_VERIFY",
-            reason="搜索后命中验证码拦截",
-            request_id=request_id,
-            elapsed_seconds=round(time.time() - started_at, 2),
+        return short_circuit_result(
+            "安居客", "WAIT_MANUAL_VERIFY", "搜索后命中验证码拦截",
+            request_id, started_at,
         )
-    if _is_login_html(keyword_html):
-        return PlatformResult(
-            name="安居客",
-            status="LOGIN_EXPIRED",
-            reason="搜索后进入登录页",
-            request_id=request_id,
-            elapsed_seconds=round(time.time() - started_at, 2),
+    if _is_login_url(keyword_url):
+        return short_circuit_result(
+            "安居客", "LOGIN_EXPIRED", "搜索后进入登录页",
+            request_id, started_at,
+        )
+
+    # 3.5 无数据短路 + 泛搜索校验
+    if 'property-content-info-comm-name' not in keyword_html:
+        return short_circuit_result(
+            "安居客", "NO_DATA", "关键词搜索无在售房源",
+            request_id, started_at,
+        )
+
+    keyword_snaps = parsers.parse_listing_snapshots(keyword_html)
+    if not any(community_name in (s.community_name or "") for s in keyword_snaps):
+        return short_circuit_result(
+            "安居客", "NO_DATA", f"关键词搜索未匹配到小区: {community_name}",
+            request_id, started_at,
         )
 
     # 4. 面积筛选（动态读取页面档位，点击对应区间链接）
@@ -388,20 +398,14 @@ async def _do_collect(
     area_url = main_page.target.url or ""
     area_html = await main_page.get_content()
     if _is_captcha_url(area_url) or _is_captcha_html(area_html):
-        return PlatformResult(
-            name="安居客",
-            status="WAIT_MANUAL_VERIFY",
-            reason="面积筛选后命中验证码拦截",
-            request_id=request_id,
-            elapsed_seconds=round(time.time() - started_at, 2),
+        return short_circuit_result(
+            "安居客", "WAIT_MANUAL_VERIFY", "面积筛选后命中验证码拦截",
+            request_id, started_at,
         )
     if area_range is None:
-        return PlatformResult(
-            name="安居客",
-            status="ERROR",
-            reason="面积筛选未能成功提交",
-            request_id=request_id,
-            elapsed_seconds=round(time.time() - started_at, 2),
+        return short_circuit_result(
+            "安居客", "NO_DATA", "该面积区间无在售房源（档位已禁用）",
+            request_id, started_at,
         )
 
     # 5. 滚动到底（安居客无分页，单页全展示）
@@ -412,12 +416,9 @@ async def _do_collect(
     snapshots = parsers.parse_listing_snapshots(area_html)
     quote_prices = [s.unit_price for s in snapshots if s.unit_price]
     if not quote_prices:
-        return PlatformResult(
-            name="安居客",
-            status="NO_DATA",
-            reason="面积结果页未抓到在售单价",
-            request_id=request_id,
-            elapsed_seconds=round(time.time() - started_at, 2),
+        return short_circuit_result(
+            "安居客", "NO_DATA", "面积结果页未抓到在售单价",
+            request_id, started_at,
         )
 
     # 7. 挂牌均价（安居客无成交记录，挂牌均价顶替 deal_prices）

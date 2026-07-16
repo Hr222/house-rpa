@@ -67,7 +67,8 @@ class InquiryResult:
     """询价最终结果。"""
     success: bool
     final_price: Optional[float] = None    # 最终建议单价(元/㎡)
-    branch: str = "FAILED"                  # TAKE_LOWER / DEAL_ONLY / QUOTE_DISCOUNT / FAILED
+    branch: str = "FAILED"                  # TAKE_LOWER / DEAL_ONLY / QUOTE_DISCOUNT / NO_DATA / FAILED
+    note: Optional[str] = None              # 失败/无数据时的说明
     quote_avg: Optional[float] = None
     deal_avg: Optional[float] = None
     platform: Optional[PlatformResult] = None

@@ -25,7 +25,12 @@ from app.utils.debug_utils import dump_html
 from app.core.models import PlatformResult
 from app.parsers import lyj as parsers
 from app.platforms.lyj_constants import START_URL
-from app.platforms.base import human_linger, _human_click, click_area_segment
+from app.platforms.base import (
+    human_linger,
+    _human_click,
+    click_area_segment,
+    short_circuit_result,
+)
 
 log = logging.getLogger(__name__)
 
@@ -50,21 +55,16 @@ def _is_captcha_html(html: str) -> bool:
     return any(marker in html for marker in markers)
 
 
-def _is_login_html(html: str) -> bool:
-    markers = (
-        "请输入手机号",
-        "请输入密码",
-        "手机快捷登录",
-        "扫码登录",
-    )
-    return any(marker in html for marker in markers)
+def _is_login_url(url: str) -> bool:
+    url = (url or "").lower()
+    return "login" in url or "passport" in url or "signin" in url
 
 
 def detect_block(url: str, html: str) -> tuple[bool, str]:
     """乐有家风控/登录检测。"""
     if _is_captcha_url(url) or _is_captcha_html(html or ""):
         return True, "命中验证码拦截"
-    if _is_login_html(html or ""):
+    if _is_login_url(url):
         return True, "命中登录页"
     return False, ""
 
@@ -291,7 +291,7 @@ async def probe_ready(main_page) -> tuple[bool, str]:
 
     if _is_captcha_url(current_url) or _is_captcha_html(html):
         return False, "命中验证码拦截，等待人工处理"
-    if _is_login_html(html):
+    if _is_login_url(current_url):
         return False, "当前会话未登录或已失效"
 
     # 已登录的首页一定会有筛选区
@@ -376,30 +376,28 @@ async def _do_collect(
 
     # 3. 判风控/登录/无数据
     if _is_captcha_url(keyword_url) or _is_captcha_html(keyword_html):
-        return PlatformResult(
-            name="乐有家",
-            status="WAIT_MANUAL_VERIFY",
-            reason="搜索后命中验证码拦截",
-            request_id=request_id,
-            elapsed_seconds=round(time.time() - started_at, 2),
+        return short_circuit_result(
+            "乐有家", "WAIT_MANUAL_VERIFY", "搜索后命中验证码拦截",
+            request_id, started_at,
         )
-    if _is_login_html(keyword_html):
-        return PlatformResult(
-            name="乐有家",
-            status="LOGIN_EXPIRED",
-            reason="搜索后进入登录页",
-            request_id=request_id,
-            elapsed_seconds=round(time.time() - started_at, 2),
+    if _is_login_url(keyword_url):
+        return short_circuit_result(
+            "乐有家", "LOGIN_EXPIRED", "搜索后进入登录页",
+            request_id, started_at,
         )
     if "很抱歉，没有找到" in keyword_html:
-        log.info("乐有家无匹配小区: %s，记作在售0/成交0", community_name)
-        return PlatformResult(
-            name="乐有家",
-            status="SUCCESS",
-            reason=f"乐有家无{community_name}在售记录和成交记录",
-            request_id=request_id,
-            elapsed_seconds=round(time.time() - started_at, 2),
-            deal_source="无数据",
+        log.info("乐有家无匹配小区: %s，返回 NO_DATA", community_name)
+        return short_circuit_result(
+            "乐有家", "NO_DATA", f"乐有家无{community_name}在售记录和成交记录",
+            request_id, started_at,
+        )
+    # 校验搜索结果是否真的属于目标小区（解析 listing 的社区名，不用 raw HTML 切片）
+    keyword_snaps = parsers.parse_listing_snapshots(keyword_html)
+    if not any(community_name in (s.community_name or "") for s in keyword_snaps):
+        log.info("乐有家未匹配到小区: %s，返回 NO_DATA", community_name)
+        return short_circuit_result(
+            "乐有家", "NO_DATA", f"关键词搜索未匹配到小区: {community_name}",
+            request_id, started_at,
         )
 
     # 4. 面积筛选（动态读取页面档位，点击对应区间链接）
@@ -409,24 +407,18 @@ async def _do_collect(
     area_url = main_page.target.url or ""
     area_html = await main_page.get_content()
     if _is_captcha_url(area_url) or _is_captcha_html(area_html):
-        return PlatformResult(
-            name="乐有家",
-            status="WAIT_MANUAL_VERIFY",
-            reason="面积筛选后命中验证码拦截",
-            request_id=request_id,
-            elapsed_seconds=round(time.time() - started_at, 2),
+        return short_circuit_result(
+            "乐有家", "WAIT_MANUAL_VERIFY", "面积筛选后命中验证码拦截",
+            request_id, started_at,
         )
 
     area_min, area_max = area_range if area_range else (area * 0.8, area * 1.2)
     log.info("[4] 面积筛选区间: %.0f~%.0f (来自档位匹配)", area_min, area_max)
 
     if area_range is None:
-        return PlatformResult(
-            name="乐有家",
-            status="ERROR",
-            reason="面积筛选未能成功提交",
-            request_id=request_id,
-            elapsed_seconds=round(time.time() - started_at, 2),
+        return short_circuit_result(
+            "乐有家", "NO_DATA", "该面积区间无在售房源（档位已禁用）",
+            request_id, started_at,
         )
 
     # 5. 分页采集在售房源
@@ -438,12 +430,9 @@ async def _do_collect(
 
     quote_prices = [s.unit_price for s in listing_snapshots if s.unit_price]
     if not quote_prices:
-        return PlatformResult(
-            name="乐有家",
-            status="NO_DATA",
-            reason="面积结果页未抓到在售单价",
-            request_id=request_id,
-            elapsed_seconds=round(time.time() - started_at, 2),
+        return short_circuit_result(
+            "乐有家", "NO_DATA", "面积结果页未抓到在售单价",
+            request_id, started_at,
         )
 
     # 6. 小区均价（乐有家无成交记录，挂牌均价顶替 deal_prices）

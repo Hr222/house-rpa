@@ -47,7 +47,7 @@ class FangPlatformAdapter(PlatformAdapter):
         """房天下特有：验证码 + 搜索框。登录检测由基类负责。"""
         if fang_adapter._is_captcha_html(html):
             return False, "命中验证码拦截"
-        if fang_adapter._is_login_html(html):
+        if fang_adapter._is_login_url(page.target.url or ""):
             return False, "当前会话未登录或已失效"
         try:
             await page.select("body", timeout=10)

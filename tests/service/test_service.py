@@ -42,7 +42,7 @@ def test_build_inquiry_result_returns_failed_when_all_error():
 
     assert result.success is False
     assert result.final_price is None
-    assert result.branch == "FAILED"
+    assert result.branch == "NO_DATA"
 
 
 def test_build_inquiry_result_rounds_prices_to_2_decimals():
