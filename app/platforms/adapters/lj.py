@@ -38,6 +38,7 @@ from app.platforms.base import (
     _human_click,
     click_area_segment,
     short_circuit_result,
+    community_name_match,
 )
 from app.platforms.lj_constants import START_URL
 
@@ -568,7 +569,7 @@ async def _do_collect(
     keyword_snaps = parsers.parse_listing_snapshots(keyword_html)
     search_ok = (
         "sellListContent" in keyword_html
-        and any(community_name in (s.community_name or "") for s in keyword_snaps)
+        and any(community_name_match(community_name, s.community_name or "") for s in keyword_snaps)
     )
     if not search_ok:
         return short_circuit_result(
