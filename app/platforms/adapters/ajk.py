@@ -21,6 +21,7 @@ import time
 from typing import Optional
 
 from app.core import config
+from app.platforms.base import _human_click, click_area_segment
 from app.utils.debug_utils import dump_html
 from app.core.models import PlatformResult
 from app.parsers import ajk as parsers
@@ -115,95 +116,6 @@ async def _get_search_input(page):
         if elements:
             return selector, elements[0]
     return None, None
-
-
-async def _human_click(page, element, label: str) -> bool:
-    if not element:
-        return False
-    try:
-        await element.scroll_into_view()
-    except Exception:
-        pass
-    try:
-        await element.mouse_move()
-    except Exception:
-        pass
-    await asyncio.sleep(0.3)
-    last_error = None
-    for clicker in ("js", "mouse"):
-        try:
-            if clicker == "js":
-                await element.click()
-            else:
-                await element.mouse_click()
-            await page
-            await asyncio.sleep(0.8)
-            return True
-        except Exception as exc:
-            last_error = exc
-    log.warning("%s click failed: %s", label, last_error)
-    return False
-
-
-# ============================================================
-# 面积筛选（动态读取页面档位，点击对应区间链接）
-# ============================================================
-
-async def _click_area_segment(page, area: Optional[float]) -> bool:
-    """从结果页面积筛选区动态读取档位，点击匹配 area 的那个档位链接。
-
-    档位因城市而异，不能硬编码，必须从 HTML 实时读取。
-    匹配规则：左闭右开（area >= min 且 area < max）。
-
-    安居客档位是 <a> 链接，点击即筛选，不需要填输入框或点确定。
-
-    Args:
-        page: 结果页
-        area: 精确面积。为 None 时跳过（不筛选面积）。
-
-    Returns:
-        True 表示成功点击了某个档位。
-    """
-    if area is None:
-        log.info("未传精确面积，跳过面积档位筛选")
-        return True
-
-    html = await page.get_content()
-    segments = parsers.parse_area_segments(html)
-    if not segments:
-        log.warning("未从页面读到面积档位，跳过面积筛选")
-        return True
-
-    log.info("读到面积档位: %s", [(t, lo, hi) for t, lo, hi in segments])
-
-    # 左闭右开匹配
-    target = None
-    for text, lo, hi in segments:
-        if lo <= area < hi:
-            target = text
-            break
-
-    if target is None:
-        # 兜底：超出最大档位，取末档
-        target = segments[-1][0]
-        log.info("面积 %.1f 超出档位范围，取末档 %s", area, target)
-    else:
-        log.info("面积 %.1f 匹配档位 %s", area, target)
-
-    # 点击对应的档位链接（通过文本定位）
-    try:
-        el = await page.find(target, timeout=4)
-    except Exception:
-        el = None
-    if el is None:
-        log.warning("未找到面积档位按钮: %s", target)
-        return False
-
-    clicked = await _human_click(page, el, f"面积档位 {target}")
-    if clicked:
-        await page
-        await asyncio.sleep(3)
-    return clicked
 
 
 async def _fill_area_inputs(page, area_min, area_max):
@@ -407,21 +319,17 @@ async def collect(
     browser,
     main_page,
     community_name: str,
-    area_min: float,
-    area_max: float,
+    area: float,
     request_id: Optional[str] = None,
-    area: Optional[float] = None,
 ) -> PlatformResult:
     """执行一次完整的安居客询价采集。"""
     start = time.time()
-    log.info("收到请求: 小区=%s 面积=%.0f~%.0f㎡ area=%s", community_name, area_min, area_max, area)
+    log.info("收到请求: 小区=%s 面积=%.1f㎡", community_name, area)
     try:
         return await _do_collect(
             browser=browser,
             main_page=main_page,
             community_name=community_name,
-            area_min=area_min,
-            area_max=area_max,
             area=area,
             request_id=request_id,
             started_at=start,
@@ -442,11 +350,9 @@ async def _do_collect(
     browser,
     main_page,
     community_name: str,
-    area_min: float,
-    area_max: float,
     request_id: Optional[str],
     started_at: float,
-    area: Optional[float] = None,
+    area: float,
 ) -> PlatformResult:
     # 1. 刷新首页保活
     main_page = await reset_to_start_page(main_page)
@@ -476,7 +382,7 @@ async def _do_collect(
         )
 
     # 4. 面积筛选（动态读取页面档位，点击对应区间链接）
-    area_confirmed = await _click_area_segment(main_page, area)
+    area_range = await click_area_segment(main_page, area, parsers.parse_area_segments, "ajk")
     await _dump(main_page, "ajk_after_area")
 
     area_url = main_page.target.url or ""
@@ -489,7 +395,7 @@ async def _do_collect(
             request_id=request_id,
             elapsed_seconds=round(time.time() - started_at, 2),
         )
-    if not area_confirmed:
+    if area_range is None:
         return PlatformResult(
             name="安居客",
             status="ERROR",

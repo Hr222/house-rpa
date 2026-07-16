@@ -16,8 +16,7 @@ def print_mvp_result(
     *,
     platform: str,
     community_name: str,
-    area_min: float,
-    area_max: float,
+    area: float,
     trace: dict,
     listings: dict,
     deals: dict,
@@ -41,7 +40,7 @@ def print_mvp_result(
     lines.append(f"{platform} MVP 测试结果")
     lines.append("=" * 60)
     lines.append(f"小区: {community_name}")
-    lines.append(f"面积区间: {area_min:.0f} - {area_max:.0f} ㎡")
+    lines.append(f"面积: {area:.1f} ㎡")
     lines.append("")
 
     # ---- 流程跟踪 ----

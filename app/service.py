@@ -80,10 +80,9 @@ class RPAInquiryService:
         platform_codes: Optional[list[str]] = None,
     ) -> InquiryResult:
         log.info(
-            "查询小区: %s, 筛选面积: %s 至 %s",
+            "查询小区: %s, 面积: %.1f㎡",
             request.community_name,
-            request.area_min,
-            request.area_max,
+            request.area,
         )
         if platform_codes is None:
             adapters = self.adapters

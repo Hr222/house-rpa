@@ -31,11 +31,11 @@ def _make_runtime_no_browsers():
     return rt
 
 
-def _write_task_file(persist_dir, task_id, community="绿景虹湾", amin=70, amax=90):
+def _write_task_file(persist_dir, task_id, community="绿景虹湾", area=89.5):
     """写一个残留任务 JSON（模拟崩溃前入队但未完成）。"""
     (persist_dir / f"{task_id}.json").write_text(
         json.dumps(
-            {"community_name": community, "area_min": amin, "area_max": amax, "city": "深圳"},
+            {"community_name": community, "area": area, "city": "深圳"},
             ensure_ascii=False,
         ),
         encoding="utf-8",

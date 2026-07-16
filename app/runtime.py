@@ -554,8 +554,7 @@ class RPARuntime:
             task_id = task_data.pop("task_id")
             request = InquiryRequest(
                 community_name=task_data["community_name"],
-                area_min=task_data["area_min"],
-                area_max=task_data["area_max"],
+                area=task_data["area"],
                 city=task_data.get("city", "深圳"),
                 request_id=task_id,
             )

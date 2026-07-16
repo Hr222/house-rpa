@@ -62,8 +62,7 @@ class FakeRuntime:
             "error": None,
             "request": {
                 "communityName": request.community_name,
-                "areaMin": request.area_min,
-                "areaMax": request.area_max,
+                "area": request.area,
                 "city": request.city,
                 "requestId": request.request_id or "task-1",
             },
@@ -115,7 +114,7 @@ def test_create_inquiry_returns_503_when_not_ready():
     with TestClient(app) as client:
         response = client.post(
             "/inquiries",
-            json={"communityName": "绿景虹湾", "areaMin": 70, "areaMax": 90},
+            json={"communityName": "绿景虹湾", "area": 89.5},
         )
 
     assert response.status_code == 503
@@ -130,7 +129,7 @@ def test_confirm_ready_then_create_and_query_inquiry():
         confirm = client.post("/admin/platforms/ke/confirm-ready")
         create = client.post(
             "/inquiries",
-            json={"communityName": "绿景虹湾", "areaMin": 70, "areaMax": 90},
+            json={"communityName": "绿景虹湾", "area": 89.5},
         )
         task = client.get(f"/inquiries/{create.json()['data']['taskId']}")
 
@@ -150,7 +149,7 @@ def test_get_inquiry_rate_limited_after_first_call():
     app = create_app(runtime=FakeRuntime(), manage_runtime=False)
     with TestClient(app) as client:
         client.post("/admin/platforms/ke/confirm-ready")  # 先置就绪
-        client.post("/inquiries", json={"communityName": "x", "areaMin": 70, "areaMax": 90})
+        client.post("/inquiries", json={"communityName": "x", "area": 89.5})
         first = client.get("/inquiries/task-1")
         second = client.get("/inquiries/task-1")
 

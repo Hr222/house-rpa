@@ -14,7 +14,7 @@ from app.core import config
 from app.parsers import ke as parsers
 from app.utils.debug_utils import dump_html
 from app.core.models import ListingSnapshot, PlatformResult
-from app.platforms.base import wait_for_manual_unblock, human_linger
+from app.platforms.base import wait_for_manual_unblock, human_linger, _human_click, click_area_segment
 from app.platforms.ke_constants import AREA_SEGMENTS, START_URL
 
 log = logging.getLogger(__name__)
@@ -128,39 +128,6 @@ async def _pick_first(page, selectors: list[str], timeout: float = 1.5):
                 return el
         return elements[0]
     return None
-
-
-async def _human_click(page, element, label: str) -> bool:
-    if not element:
-        return False
-
-    try:
-        await element.scroll_into_view()
-    except Exception:
-        pass
-
-    await _delay(0.2, 0.5)
-    last_error = None
-    # 优先 JS click（精确点击目标元素，避免坐标偏移被悬浮客服/广告拦截）
-    for clicker in ("js", "mouse"):
-        try:
-            if clicker == "js":
-                await element.click()
-            else:
-                try:
-                    await element.mouse_move()
-                    await _delay(0.1, 0.3)
-                except Exception:
-                    pass
-                await element.mouse_click()
-            await page
-            await _delay(0.5, 1.0)
-            return True
-        except Exception as exc:
-            last_error = exc
-
-    log.warning("%s click failed: %s", label, last_error)
-    return False
 
 
 async def _click_by_candidates(
@@ -379,62 +346,6 @@ async def _click_detail_link(browser, page, expected_url: Optional[str]):
     return True, None
 
 
-async def _click_area_segment(page, area: Optional[float]) -> bool:
-    """从结果页面积筛选区动态读取档位，点击匹配 area 的那个档位链接。
-
-    档位因城市而异，不能硬编码，必须从 HTML 实时读取。
-    匹配规则：左闭右开（area >= min 且 area < max）。
-
-    贝壳档位是 <a> 链接（如 .../a3/），点击即筛选，不需要填输入框或点确定。
-
-    Args:
-        page: 结果页
-        area: 精确面积。为 None 时用 area_min/area_max 旧行为（兼容）。
-
-    Returns:
-        True 表示成功点击了某个档位。
-    """
-    if area is None:
-        log.info("未传精确面积，跳过面积档位筛选")
-        return True
-
-    html = await page.get_content()
-    segments = parsers.parse_area_segments(html)
-    if not segments:
-        log.warning("未从页面读到面积档位，跳过面积筛选")
-        return True
-
-    log.info("贝壳读到面积档位: %s", [(t, lo, hi) for t, lo, hi in segments])
-
-    # 左闭右开匹配
-    target = None
-    for text, lo, hi in segments:
-        if lo <= area < hi:
-            target = text
-            break
-
-    if target is None:
-        target = segments[-1][0]
-        log.info("面积 %.1f 超出档位范围，取末档 %s", area, target)
-    else:
-        log.info("贝壳面积 %.1f 匹配档位 %s", area, target)
-
-    # 点击对应的档位链接（通过文本定位）
-    try:
-        el = await page.find(target, timeout=4)
-    except Exception:
-        el = None
-    if el is None:
-        log.warning("未找到面积档位按钮: %s", target)
-        return False
-
-    clicked = await _human_click(page, el, f"面积档位 {target}")
-    if clicked:
-        await page
-        await asyncio.sleep(3)
-    return clicked
-
-
 async def _apply_area_filter(page, area_min, area_max):
     """贝壳面积筛选：智能展开 → 面积区"更多及自定义" → 填值 → 确定。
 
@@ -585,20 +496,16 @@ async def collect(
     browser,
     main_page,
     community_name: str,
-    area_min: float,
-    area_max: float,
+    area: float,
     request_id: Optional[str] = None,
-    area: Optional[float] = None,
 ) -> PlatformResult:
     start = time.time()
-    log.info("[4] 收到请求: 小区=%s 面积=%.0f~%.0f㎡ area=%s", community_name, area_min, area_max, area)
+    log.info("[4] 收到请求: 小区=%s 面积=%.1f㎡", community_name, area)
     try:
         return await _do_collect(
             browser=browser,
             main_page=main_page,
             community_name=community_name,
-            area_min=area_min,
-            area_max=area_max,
             area=area,
             request_id=request_id,
             started_at=start,
@@ -619,11 +526,9 @@ async def _do_collect(
     browser,
     main_page,
     community_name: str,
-    area_min: float,
-    area_max: float,
     request_id: Optional[str],
     started_at: float,
-    area: Optional[float] = None,
+    area: float,
 ) -> PlatformResult:
     log.info("[5] 刷新页面（保活插口）")
     main_page = await _reset_to_start_page(main_page)
@@ -653,8 +558,10 @@ async def _do_collect(
             elapsed_seconds=round(time.time() - started_at, 2),
         )
 
-    # 4. 面积筛选（动态读取页面档位，点击对应区间链接）
-    await _click_area_segment(main_page, area)
+    # 4. 面积筛选（动态读取页面档位，点击对应区间链接；返回区间用于成交筛选）
+    area_range = await click_area_segment(main_page, area, parsers.parse_area_segments, "ke")
+    area_min, area_max = area_range if area_range else (area * 0.8, area * 1.2)
+    log.info("[4] 面积筛选区间: %.0f~%.0f (来自档位匹配)", area_min, area_max)
     await _dump(main_page, "ke_after_area")
 
     all_listing_prices: list[float] = []

@@ -35,8 +35,7 @@ START_URL = "https://shenzhen.anjuke.com/sale/"
 
 # 固定测试场景：与贝壳脚本一致
 COMMUNITY_NAME = "绿景虹湾"
-AREA_MIN = 70
-AREA_MAX = 90
+AREA = 80.0
 
 
 # ============================================================
@@ -444,8 +443,7 @@ def print_summary(
     print_mvp_result(
         platform="安居客",
         community_name=COMMUNITY_NAME,
-        area_min=AREA_MIN,
-        area_max=AREA_MAX,
+        area=AREA,
         trace={
             "home_blocked": open_blocked,
             "search_url": result_url,
@@ -601,8 +599,8 @@ async def main(manual_login: bool = False, debug: bool = False):
 
         # ---- 第3步：面积自定义筛选 70-90 ----
         if not result_blocked:
-            log.info("[3] 填写面积筛选: %d-%d", AREA_MIN, AREA_MAX)
-            area_confirmed = await fill_area_inputs(page, AREA_MIN, AREA_MAX)
+            log.info("[3] 填写面积筛选: %.1f", AREA)
+            area_confirmed = await fill_area_inputs(page, AREA, AREA)
             area_file = await dump_html(page, "ajk_after_area")
 
             area_url = page.target.url or ""
@@ -661,7 +659,7 @@ async def main(manual_login: bool = False, debug: bool = False):
             conclusion = "面积筛选未能成功提交，需查看 HTML 确认输入框与确定按钮。"
         elif main_listing_prices:
             conclusion = (
-                f"采集成功：{AREA_MIN}-{AREA_MAX}㎡ 主结果区在售 {len(main_listing_prices)} 条，"
+                f"采集成功：{AREA}㎡ 主结果区在售 {len(main_listing_prices)} 条，"
                 f"在售均价 {listing_avg:.2f} 元/㎡，挂牌均价 {listing_price} 元/㎡（顶替成交），"
                 f"最终价 {final_price} 元/㎡（{branch}）。"
             )

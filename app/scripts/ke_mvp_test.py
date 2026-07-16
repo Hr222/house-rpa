@@ -7,7 +7,7 @@
 用法：
   python -m app.scripts.ke_mvp_test
   python -m app.scripts.ke_mvp_test --debug
-  python -m app.scripts.ke_mvp_test --community "绿景虹湾" --min 70 --max 90
+  python -m app.scripts.ke_mvp_test --community "绿景虹湾" --area 89.5
 """
 
 from __future__ import annotations
@@ -44,8 +44,7 @@ log = logging.getLogger("ke-mvp-test")
 # ---- 测试参数 ----
 
 DEFAULT_COMMUNITY = "绿景虹湾"
-DEFAULT_AREA_MIN = 70.0
-DEFAULT_AREA_MAX = 90.0
+DEFAULT_AREA = 80.0
 PAGE_LINGER_SECONDS = config.PAGE_LINGER_SECONDS
 
 
@@ -366,8 +365,7 @@ async def _wait_for_manual_close():
 async def run_ke_collect(
     browser,
     community_name: str,
-    area_min: float,
-    area_max: float,
+    area: float,
     manual_login: bool = False,
 ) -> dict:
     """执行一次完整的贝壳询价采集，返回汇总 dict。"""
@@ -419,8 +417,8 @@ async def run_ke_collect(
         raise RuntimeError("关键词结果页未找到小区详情链接")
 
     # ---- 4. 面积筛选（更多及自定义）----
-    log.info("[3] 面积筛选: %d-%d", area_min, area_max)
-    filtered_html = await _apply_area_filter(page, area_min, area_max)
+    log.info("[3] 面积筛选: %.1f", area)
+    filtered_html = await _apply_area_filter(page, area, area)
     await _dump(page, "ke_after_area")
 
     filtered_url = page.target.url or ""
@@ -477,7 +475,7 @@ async def run_ke_collect(
 
         community_avg_price = parsers.parse_community_avg_price(detail_html)
         deal_records = parsers.parse_deal_records(detail_html)
-        deal_prices = parsers.filter_deal_prices_by_area(deal_records, area_min, area_max)
+        deal_prices = parsers.filter_deal_prices_by_area(deal_records, area, area)
         log.info("[8] 小区均价=%s 成交记录=%d条(筛选后)", community_avg_price, len(deal_prices))
     else:
         log.warning("未能打开小区详情页，跳过成交记录采集")
@@ -496,8 +494,7 @@ async def run_ke_collect(
 
     return {
         "community_name": community_name,
-        "area_min": area_min,
-        "area_max": area_max,
+        "area": area,
         "listing_snapshots": all_snapshots,
         "quote_prices": all_listing_prices,
         "quote_avg": round_price(quote_avg),
@@ -531,8 +528,7 @@ def _print_mvp(result_data: dict):
     print_mvp_result(
         platform="贝壳",
         community_name=result_data["community_name"],
-        area_min=result_data["area_min"],
-        area_max=result_data["area_max"],
+        area=result_data["area"],
         trace={
             "home_blocked": False,
             "search_url": result_data["trace"]["search_url"],
@@ -564,8 +560,7 @@ def _print_mvp(result_data: dict):
 
 async def main(
     community_name: str = DEFAULT_COMMUNITY,
-    area_min: float = DEFAULT_AREA_MIN,
-    area_max: float = DEFAULT_AREA_MAX,
+    area: float = DEFAULT_AREA,
     manual_login: bool = False,
     debug: bool = False,
 ):
@@ -583,15 +578,14 @@ async def main(
         print(
             f"\n贝壳 MVP 测试"
             f"\n小区: {community_name}"
-            f"\n面积: {area_min:.0f} - {area_max:.0f} ㎡"
+            f"\n面积: {area:.1f} ㎡"
             f"\n"
         )
 
         result = await run_ke_collect(
             browser,
             community_name=community_name,
-            area_min=area_min,
-            area_max=area_max,
+            area=area,
             manual_login=manual_login,
         )
         _print_mvp(result)
@@ -621,23 +615,16 @@ def cli():
         help=f"小区名称，默认 {DEFAULT_COMMUNITY}",
     )
     parser.add_argument(
-        "--min",
+        "--area",
         type=float,
-        default=DEFAULT_AREA_MIN,
-        help=f"面积下限，默认 {DEFAULT_AREA_MIN}",
-    )
-    parser.add_argument(
-        "--max",
-        type=float,
-        default=DEFAULT_AREA_MAX,
-        help=f"面积上限，默认 {DEFAULT_AREA_MAX}",
+        default=DEFAULT_AREA,
+        help=f"面积(㎡)，默认 {DEFAULT_AREA}",
     )
     args = parser.parse_args()
     uc.loop().run_until_complete(
         main(
             community_name=args.community,
-            area_min=args.min,
-            area_max=args.max,
+            area=args.area,
             manual_login=args.manual_login,
             debug=args.debug,
         )
