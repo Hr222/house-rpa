@@ -33,7 +33,9 @@ def build_inquiry_result(platform_results: list[PlatformResult]) -> InquiryResul
         all_deal_prices.extend(r.deal_prices)
 
     if not all_quote_avgs:
-        return InquiryResult(success=False, branch="FAILED", platform_results=platform_results)
+        reasons = [f"{r.name}: {r.reason}" for r in platform_results if r.reason]
+        note = "; ".join(reasons) if reasons else "所有平台均无数据"
+        return InquiryResult(success=False, branch="NO_DATA", note=note, platform_results=platform_results)
 
     quote_avg = sum(all_quote_avgs) / len(all_quote_avgs)
     deal_avg = mean(all_deal_prices) if all_deal_prices else None

@@ -7,6 +7,7 @@ import asyncio
 import logging
 import random
 import re
+import time
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -149,6 +150,113 @@ async def wait_for_manual_unblock():
     await asyncio.to_thread(input, prompt)
 
 
+# 跨平台验证码页共性的可见话术（剥离 script/style 后的正文）
+_GENERIC_CAPTCHA_WORDS = (
+    "人机验证", "验证码", "验证后继续", "完成验证",
+    "滑动验证", "访问过于频繁", "验证码校验", "请输入验证",
+)
+
+# 正常业务页必定含有的特征（只要命中一个就不是纯验证码页）
+# 覆盖五平台的房源/价格/小区标识
+_GENERIC_BUSINESS_WORDS = (
+    "元/㎡", "元/平米", "元 ㎡", "sellListContent",
+    "在售", "小区均价", "挂牌", "property-content-info-comm-name",
+)
+
+
+def is_generic_captcha_page(html: str) -> bool:
+    """通用风控兜底：判断 HTML 是否为验证码拦截页（跨平台共性）。
+
+    判据：正文含验证码话术 且 不含任何业务特征词。
+    验证码页没有房源内容，正常页没有验证码话术，两者天然互斥。
+    仅在各平台精确 detect_block 都未命中时作为最后一道网调用，
+    防止某平台 marker 被删空后整体漏判。
+    """
+    if not html:
+        return False
+    # 剥离 script/style 噪音（验证码页 dump 常带 darkreader 注入的大段 CSS）
+    clean = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.S)
+    clean = re.sub(r"<script[^>]*>.*?</script>", "", clean, flags=re.S)
+    has_captcha = any(w in clean for w in _GENERIC_CAPTCHA_WORDS)
+    has_business = any(w in html for w in _GENERIC_BUSINESS_WORDS)
+    return has_captcha and not has_business
+
+
+def short_circuit_result(
+    name: str,
+    status: str,
+    reason: str,
+    request_id: Optional[str],
+    started_at: float,
+    detail_url: Optional[str] = None,
+) -> PlatformResult:
+    """构造三类状态短路返回（NO_DATA / WAIT_MANUAL_VERIFY / LOGIN_EXPIRED 等）。
+
+    统一计算 elapsed_seconds，消除各平台 round(time.time()-started_at, 2)
+    与 lj 的 _elapsed() 两套写法。各 adapter 的短路返回改调本函数，
+    避免 5-6 行模板重复 30+ 次。
+
+    Args:
+        name: 平台中文名（如 "贝壳"）。
+        status: NO_DATA / WAIT_MANUAL_VERIFY / LOGIN_EXPIRED 等。
+        reason: 短路原因（透传给调用方/日志）。
+        request_id: 询价请求 id。
+        started_at: 采集开始时间戳（time.time()）。
+        detail_url: 小区详情 URL（仅部分平台/场景有，默认 None）。
+    """
+    return PlatformResult(
+        name=name,
+        status=status,
+        reason=reason,
+        request_id=request_id,
+        elapsed_seconds=round(time.time() - started_at, 2),
+        detail_url=detail_url,
+    )
+
+
+async def wait_and_reload_after_block(tab, detect_func, label: str = "页面") -> str:
+    """详情/成交页被风控时的统一处理：检测 → 等人回车 → 重取，最多 2 次。
+
+    各 adapter 在打开详情/成交 tab 后调用本函数，替代各自手写的
+    「detect_block → wait_for_manual_unblock → await tab → sleep → get_content」。
+
+    检测顺序：先用各平台精确 detect_func，再叠通用兜底 is_generic_captcha_page。
+    这样即使某平台 marker 被删空，通用兜底仍能识别验证码页。
+
+    Args:
+        tab: 详情/成交标签页（nodriver Tab）。
+        detect_func: 平台的 detect_block(url, html) -> (bool, str)。
+        label: 日志里的页面名称（如 "详情页" / "成交页"）。
+
+    Returns:
+        重取后的 html。若 2 次人工后仍被风控，返回最后一次的 html，
+        交给调用方走降级（放弃成交，用在售×折扣）。
+    """
+    def _check(url: str, html: str) -> tuple[bool, str]:
+        # 先用各平台精确检测，未命中再叠通用兜底
+        blocked, reason = detect_func(url, html)
+        if not blocked and is_generic_captcha_page(html):
+            blocked, reason = True, "命中验证码拦截(通用兜底)"
+        return blocked, reason
+
+    await tab
+    html = await tab.get_content()
+    for attempt in (1, 2):
+        blocked, reason = _check(tab.target.url or "", html)
+        if not blocked:
+            return html
+        log.warning("%s被拦截(%s)，等待人工处理（第 %d 次）", label, reason, attempt)
+        await wait_for_manual_unblock()
+        await tab
+        await asyncio.sleep(3)
+        html = await tab.get_content()
+    # 2 次仍未解除，返回当前 html，调用方自行判断是否降级
+    blocked, reason = _check(tab.target.url or "", html)
+    if blocked:
+        log.warning("%s经 2 次人工仍未解除风控(%s)，将走降级", label, reason)
+    return html
+
+
 async def _human_click(page, element, label: str) -> bool:
     """真人节奏点击元素（所有平台共用）。
 
@@ -240,6 +348,17 @@ async def click_area_segment(
     if el is None:
         log.warning("[%s] 未找到面积档位按钮: %s", platform_code, target)
         return None
+
+    # 检查档位是否禁用（乐有家: class=disabled; 房天下: style=color:#999 / href=javascript:void(0)）
+    try:
+        el_class = (await el.get_attribute("class")) or ""
+        el_style = (await el.get_attribute("style")) or ""
+        el_href = (await el.get_attribute("href")) or ""
+        if "disabled" in el_class or "color:#999" in el_style or "javascript:void(0)" in el_href:
+            log.info("[%s] 面积档位 %s 已禁用（该区间无房源），返回空", platform_code, target)
+            return None
+    except Exception:
+        pass
 
     clicked = await _human_click(page, el, f"面积档位 {target}")
     if clicked:

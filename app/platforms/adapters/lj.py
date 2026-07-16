@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -31,7 +32,13 @@ from app.core import config
 from app.utils.debug_utils import dump_html
 from app.core.models import PlatformResult
 from app.parsers import lj as parsers
-from app.platforms.base import wait_for_manual_unblock, human_linger, _human_click, click_area_segment
+from app.platforms.base import (
+    wait_and_reload_after_block,
+    human_linger,
+    _human_click,
+    click_area_segment,
+    short_circuit_result,
+)
 from app.platforms.lj_constants import START_URL
 
 log = logging.getLogger(__name__)
@@ -41,36 +48,53 @@ log = logging.getLogger(__name__)
 # 风控 / 登录判定（链家自己的标记词）
 # ============================================================
 
+# 验证码 HTML 特征（基于真实 dump：hip.lianjia.com/captcha 页面）
+# hip 安全中心 + 极验 geetest SDK，链家与贝壳共用同一套安全系统
 _CAPTCHA_MARKERS = (
-    "请输入验证码",
-    "验证后继续访问",
-    "请完成验证",
-    "滑动验证",
-    "人机验证",
-    "贝壳信息安全中心",
+    "<title>CAPTCHA</title>",       # 页面 title
+    "贝壳信息安全中心",              # 页脚（链家验证码页用贝壳安全中心署名，共用铁证）
+    "captcha.lianjia.com",          # window.captchaEndpoint JS 变量
+    "hip-static",                    # favicon ljcdn.com/hip-static
+    'alt="CAPTCHA"',                 # <img class="bg" alt="CAPTCHA">
 )
 
-_CAPTCHA_URL_MARKERS = ("captcha", "verifycode", "antibot", "antispam")
-
-_LOGIN_MARKERS = (
-    "请输入手机号",
-    "请输入密码",
-    "手机快捷登录",
-    "扫码登录",
+# 验证码 URL 特征（真实样本：https://hip.lianjia.com/captcha?location=...）
+_CAPTCHA_URL_MARKERS = (
+    "hip.lianjia.com/captcha",      # 最精确（真实样本域名）
+    "/captcha",                      # 兜底
 )
+
+_LOGIN_URL_MARKERS = ("login", "passport", "signin")
+
+# 登录失效检测：链家/贝壳共用 ljConf，未登录时后端注入的 ucid 为空字符串
+# 真实样本：未登录 ucid:'' / 已登录 ucid:'2000000547667569'
+# 用"紧跟 cdn"锚定 ljConf 上下文，排除页面里其它无关的 ucid:''（SDK 配置项）
+_LJ_NOT_LOGIN_PATTERN = re.compile(r"ucid\s*:\s*''\s*,?\s*cdn", re.S)
+
+
+def _is_login_expired_html(html: str) -> bool:
+    """链家登录失效（软失效）：ljConf 内 ucid 为空。
+
+    链家页面常驻登录弹窗 DOM，不能用"请输入手机号"等词判断（已登录页也有）。
+    ucid 是后端注入的用户 id，未登录为空字符串、已登录为数字，最可靠。
+    "紧跟 cdn" 锚定 ljConf，避免误匹配页面里其它无关的 ucid:''。
+    """
+    return bool(_LJ_NOT_LOGIN_PATTERN.search(html or ""))
 
 
 def detect_block(url: str, html: str) -> tuple[bool, str]:
     """链家风控/登录检测。
 
     链家和贝壳共用安全系统（贝壳信息安全中心），标记词高度相似。
+    登录检测覆盖两种失效形态：硬失效(URL含login/passport) + 软失效(ucid为空)。
     """
     url_lower = (url or "").lower()
     if any(marker in url_lower for marker in _CAPTCHA_URL_MARKERS):
         return True, "命中验证码拦截"
     if any(marker in (html or "") for marker in _CAPTCHA_MARKERS):
         return True, "命中验证码拦截"
-    if any(marker in (html or "") for marker in _LOGIN_MARKERS):
+    if (any(marker in url_lower for marker in _LOGIN_URL_MARKERS)
+            or _is_login_expired_html(html)):
         return True, "命中登录页"
     return False, ""
 
@@ -110,11 +134,19 @@ async def _search_community(page, community_name: str) -> str:
         <button type="submit" class="searchButton" ...>
       </form>
     """
-    try:
-        inp = await page.select("#searchInput", timeout=3)
-    except Exception:
-        inp = None
-    if inp is None:
+    for attempt in (1, 2):
+        try:
+            inp = await page.select("#searchInput", timeout=3)
+        except Exception:
+            inp = None
+        if inp is not None:
+            break
+        if attempt == 1:
+            log.warning("未找到搜索框 #searchInput，回首页重试")
+            refreshed = await reset_to_start_page(page)
+            await refreshed
+            await asyncio.sleep(3)
+            continue
         raise RuntimeError("未找到搜索框 #searchInput")
 
     if not await _human_click(page, inp, "search input"):
@@ -309,14 +341,8 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
             await human_linger(page, page_no)
             last_html = await _click_listing_page_number(page, page_no)
 
-            # 翻页后用通用风控检测
-            current_url = page.target.url or ""
-            blocked, reason = detect_block(current_url, last_html)
-            if blocked:
-                log.warning("第 %d 页翻页后被拦截(%s)，等待人工处理", page_no, reason)
-                await wait_for_manual_unblock()
-                # 人工处理后重新翻到当前页
-                last_html = await _click_listing_page_number(page, page_no)
+            # 翻页后风控兜底（检测→等人回车→重取，最多2次；不重新点页码避免再触发验证码）
+            last_html = await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页")
 
             all_html_parts.append(_cut_main(last_html))
         else:
@@ -532,17 +558,23 @@ async def _do_collect(
     keyword_url = main_page.target.url or ""
 
     # 3. 判搜索成功（正向检测，避免标记词误判）
+    # 3.5 无数据短路：m-noresult（链家和贝壳共用）或 sellListContent 缺失
+    if "m-noresult" in keyword_html:
+        return short_circuit_result(
+            "链家", "NO_DATA", "关键词搜索无在售房源",
+            request_id, started_at,
+        )
+    # 校验搜索结果是否真的属于目标小区（解析 listing 的社区名，不用 raw HTML 切片）
+    keyword_snaps = parsers.parse_listing_snapshots(keyword_html)
     search_ok = (
         "sellListContent" in keyword_html
-        and community_name in keyword_html
+        and any(community_name in (s.community_name or "") for s in keyword_snaps)
     )
     if not search_ok:
-        return PlatformResult(
-            name="链家",
-            status="WAIT_MANUAL_VERIFY" if "验证" in keyword_html else "NO_DATA",
-            reason="搜索未返回有效房源" if "sellListContent" not in keyword_html else f"未匹配到: {community_name}",
-            request_id=request_id,
-            elapsed_seconds=_elapsed(),
+        return short_circuit_result(
+            "链家", "NO_DATA",
+            "搜索未返回有效房源" if "sellListContent" not in keyword_html else f"未匹配到: {community_name}",
+            request_id, started_at,
         )
 
     # 4. 面积筛选（动态读取页面档位，点击对应区间链接）
@@ -556,10 +588,9 @@ async def _do_collect(
     log.info("[4] 面积筛选区间: %.0f~%.0f (来自档位匹配)", area_min, area_max)
 
     if area_range is None:
-        return PlatformResult(
-            name="链家", status="ERROR",
-            reason="面积筛选未能成功提交",
-            request_id=request_id, elapsed_seconds=_elapsed(),
+        return short_circuit_result(
+            "链家", "NO_DATA", "该面积区间无在售房源（档位已禁用）",
+            request_id, started_at,
         )
 
     # 5. 分页采集在售房源
@@ -572,10 +603,9 @@ async def _do_collect(
     snapshots = parsers.parse_listing_snapshots(merged_html)
     quote_prices = [s.unit_price for s in snapshots if s.unit_price]
     if not quote_prices:
-        return PlatformResult(
-            name="链家", status="NO_DATA",
-            reason="面积结果页未抓到在售单价",
-            request_id=request_id, elapsed_seconds=_elapsed(),
+        return short_circuit_result(
+            "链家", "NO_DATA", "面积结果页未抓到在售单价",
+            request_id, started_at,
         )
 
     # 7. 点开小区详情（新标签）
@@ -585,10 +615,11 @@ async def _do_collect(
     # 8. 详情页抓小区均价 + 点"查看全部成交记录"
     deal_prices = []
     deal_record_dicts = []
+    deal_clicked = False
     deal_tab2 = None  # 成交记录标签页引用
     if detail_clicked and detail_tab is not None:
-        await detail_tab
-        await asyncio.sleep(3)
+        # 详情页风控兜底（检测→等人回车→重取，最多 2 次）
+        detail_html = await wait_and_reload_after_block(detail_tab, detect_block, "详情页")
         await _dump(detail_tab, "lj_detail")
 
         # 点"查看全部成交记录"→成交列表页
@@ -604,12 +635,11 @@ async def _do_collect(
                 deal_tab2 = await _wait_for_new_tab(browser, old_tab_ids, "/chengjiao/")
                 if deal_tab2 is not None:
                     deal_clicked = True
-                    await deal_tab2
-                    await asyncio.sleep(3)
+                    # 成交页风控兜底（最多 2 次人工）
+                    first_deal_html = await wait_and_reload_after_block(deal_tab2, detect_block, "成交页")
                     await _dump(deal_tab2, "lj_deal")
 
                     # 翻页抓取成交记录
-                    first_deal_html = await deal_tab2.get_content()
                     total_deal_pages = parsers.parse_deal_total_pages(first_deal_html)
                     log.info("成交页总页数: %d", total_deal_pages)
 

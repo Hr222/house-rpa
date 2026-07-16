@@ -14,7 +14,13 @@ from app.core import config
 from app.parsers import ke as parsers
 from app.utils.debug_utils import dump_html
 from app.core.models import ListingSnapshot, PlatformResult
-from app.platforms.base import wait_for_manual_unblock, human_linger, _human_click, click_area_segment
+from app.platforms.base import (
+    wait_and_reload_after_block,
+    human_linger,
+    _human_click,
+    click_area_segment,
+    short_circuit_result,
+)
 from app.platforms.ke_constants import AREA_SEGMENTS, START_URL
 
 log = logging.getLogger(__name__)
@@ -51,22 +57,49 @@ def _is_login_html(html: str) -> bool:
     markers = (
         'meta name="ke-passport" content="LOGIN"',
         'id="login"',
-        "请输入手机号",
-        "请输入密码",
-        "手机快捷登录",
-        "请完成人机验证",
     )
     return any(marker in html for marker in markers)
+
+
+# 登录失效检测：贝壳/链家共用 ljConf，未登录时后端注入的 ucid 为空字符串
+# 真实样本：未登录 ucid:'' / 已登录 ucid:'2000000547667569'
+# 用"紧跟 cdn"锚定 ljConf 上下文，排除页面里其它无关的 ucid:''（SDK 配置项）
+_KE_NOT_LOGIN_PATTERN = re.compile(r"ucid\s*:\s*''\s*,?\s*cdn", re.S)
+
+
+def _is_login_expired_html(html: str) -> bool:
+    """贝壳登录失效（软失效）：ljConf 内 ucid 为空。
+
+    贝壳与链家共用 ljConf 前端框架，登录态判据一致。
+    软失效指登录掉了但 URL 没变（弹窗形式），URL/HTML 硬检测抓不到。
+    "紧跟 cdn" 锚定 ljConf，避免误匹配页面里其它无关的 ucid:''。
+    """
+    return bool(_KE_NOT_LOGIN_PATTERN.search(html or ""))
+
+
+def _is_captcha_url(url: str) -> bool:
+    """贝壳验证码拦截页 URL 特征（贝壳/链家共用 hip 安全系统）。
+
+    真实样本：https://hip.lianjia.com/captcha?location=...
+    贝壳对应 hip.ke.com（同一套安全系统），/captcha 作兜底。
+    """
+    url = (url or "").lower()
+    return "hip.ke.com/captcha" in url or "/captcha" in url
 
 
 def _is_manual_verify_html(html: str) -> bool:
+    """贝壳验证码拦截页 HTML 特征（基于真实 dump 样本）。
+
+    hip 安全中心 + 极验 geetest SDK，贝壳/链家共用同一套页面。
+    """
     markers = (
-        "请完成人机验证",
-        "验证后继续访问",
-        "安全验证",
-        "点击按钮开始验证",
+        "<title>CAPTCHA</title>",       # 页面 title
+        "贝壳信息安全中心",              # 页脚版权（贝壳链家共用安全系统铁证）
+        "captcha.lianjia.com",          # window.captchaEndpoint JS 变量
+        "hip-static",                    # favicon 路径 ljcdn.com/hip-static
+        'alt="CAPTCHA"',                 # <img class="bg" alt="CAPTCHA">
     )
-    return any(marker in html for marker in markers)
+    return any(marker in (html or "") for marker in markers)
 
 
 def detect_block(url: str, html: str) -> tuple[bool, str]:
@@ -76,10 +109,12 @@ def detect_block(url: str, html: str) -> tuple[bool, str]:
     - 人机验证 → (True, "命中验证码拦截")
     - 登录失效 → (True, "命中登录页")
     - 正常     → (False, "")
+    登录检测覆盖三种形态：硬失效(URL) + 登录页HTML(ke-passport/id=login) + 软失效(ucid为空)。
     """
-    if _is_manual_verify_html(html or ""):
+    if _is_captcha_url(url or "") or _is_manual_verify_html(html or ""):
         return True, "命中验证码拦截"
-    if _is_login_url(url or "") or _is_login_html(html or ""):
+    if (_is_login_url(url or "") or _is_login_html(html or "")
+            or _is_login_expired_html(html or "")):
         return True, "命中登录页"
     return False, ""
 
@@ -282,14 +317,8 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
         if page_no > 1:
             last_html = await _click_page_number(page, page_no)
 
-            # 翻页后风控检测（和链家同安全系统，被拦暂停等人工）
-            current_url = page.target.url or ""
-            blocked, reason = detect_block(current_url, last_html)
-            if blocked:
-                log.warning("第 %d 页翻页后被拦截(%s)，等待人工处理", page_no, reason)
-                await wait_for_manual_unblock()
-                # 人工处理后重新翻到当前页
-                last_html = await _click_page_number(page, page_no)
+            # 翻页后风控兜底（检测→等人回车→重取，最多2次；不重新点页码避免再触发验证码）
+            last_html = await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页")
 
         await human_linger(page, page_no)
         last_html = await page.get_content()
@@ -540,27 +569,40 @@ async def _do_collect(
 
     if _is_login_url(keyword_url) or _is_login_html(keyword_html):
         status = "WAIT_MANUAL_VERIFY" if _is_manual_verify_html(keyword_html) else "LOGIN_EXPIRED"
-        return PlatformResult(
-            name="贝壳",
-            status=status,
-            reason="搜索后进入登录或验证页面",
-            request_id=request_id,
-            detail_url=detail_url,
-            elapsed_seconds=round(time.time() - started_at, 2),
+        return short_circuit_result(
+            "贝壳", status, "搜索后进入登录或验证页面",
+            request_id, started_at, detail_url=detail_url,
         )
 
     if not detail_url:
-        return PlatformResult(
-            name="贝壳",
-            status="NO_DATA",
-            reason="关键词结果页未找到小区详情链接",
-            request_id=request_id,
-            elapsed_seconds=round(time.time() - started_at, 2),
+        return short_circuit_result(
+            "贝壳", "NO_DATA", "关键词结果页未找到小区详情链接",
+            request_id, started_at,
+        )
+
+    # 无数据短路：贝壳"暂无房源"页面（仍有小区详情链接，需靠 m-noresult 识别）
+    if "m-noresult" in keyword_html:
+        return short_circuit_result(
+            "贝壳", "NO_DATA", "小区暂无在售房源",
+            request_id, started_at, detail_url=detail_url,
+        )
+
+    # 校验搜索结果是否真的属于目标小区（解析 listing 的社区名，不用 raw HTML 切片）
+    keyword_snaps = parsers.parse_listing_snapshots(keyword_html)
+    if not any(community_name in (s.community_name or "") for s in keyword_snaps):
+        return short_circuit_result(
+            "贝壳", "NO_DATA", f"关键词搜索未匹配到小区: {community_name}",
+            request_id, started_at, detail_url=detail_url,
         )
 
     # 4. 面积筛选（动态读取页面档位，点击对应区间链接；返回区间用于成交筛选）
     area_range = await click_area_segment(main_page, area, parsers.parse_area_segments, "ke")
-    area_min, area_max = area_range if area_range else (area * 0.8, area * 1.2)
+    if area_range is None:
+        return short_circuit_result(
+            "贝壳", "NO_DATA", "该面积区间无在售房源（档位已禁用）",
+            request_id, started_at, detail_url=detail_url,
+        )
+    area_min, area_max = area_range
     log.info("[4] 面积筛选区间: %.0f~%.0f (来自档位匹配)", area_min, area_max)
     await _dump(main_page, "ke_after_area")
 
@@ -571,13 +613,9 @@ async def _do_collect(
     filtered_url = main_page.target.url or ""
     if _is_login_url(filtered_url) or _is_login_html(filtered_html):
         status = "WAIT_MANUAL_VERIFY" if _is_manual_verify_html(filtered_html) else "LOGIN_EXPIRED"
-        return PlatformResult(
-            name="贝壳",
-            status=status,
-            reason="面积筛选后进入登录或验证页面",
-            request_id=request_id,
-            detail_url=detail_url,
-            elapsed_seconds=round(time.time() - started_at, 2),
+        return short_circuit_result(
+            "贝壳", status, "面积筛选后进入登录或验证页面",
+            request_id, started_at, detail_url=detail_url,
         )
 
     total_pages = _parse_total_pages(filtered_html)
@@ -590,13 +628,9 @@ async def _do_collect(
     all_listing_snapshots.update(listing_snapshots)
 
     if not all_listing_prices:
-        return PlatformResult(
-            name="贝壳",
-            status="NO_DATA",
-            reason="面积结果页未抓到在售单价",
-            request_id=request_id,
-            detail_url=detail_url,
-            elapsed_seconds=round(time.time() - started_at, 2),
+        return short_circuit_result(
+            "贝壳", "NO_DATA", "面积结果页未抓到在售单价",
+            request_id, started_at, detail_url=detail_url,
         )
 
     detail_url = parsers.find_detail_link(last_page_html) or detail_url
@@ -605,18 +639,25 @@ async def _do_collect(
 
     detail_clicked, detail_tab = await _click_detail_link(browser, main_page, detail_url)
     if not detail_clicked or detail_tab is None:
+        # 详情 tab 未打开：不整单失败，降级为仅用在售均价（走 QUOTE_DISCOUNT），
+        # 避免浪费已采到的在售数据
+        log.warning("[10] 未能打开小区详情页，降级为仅用在售均价")
         return PlatformResult(
             name="贝壳",
-            status="ERROR",
-            reason="未能成功打开小区详情页",
+            status="SUCCESS",
+            community_avg_price=None,
+            quote_prices=all_listing_prices,
+            deal_prices=[],
+            deal_records=[],
+            deal_source="无成交(详情页未取得)",
             request_id=request_id,
             detail_url=detail_url,
             elapsed_seconds=round(time.time() - started_at, 2),
+            listing_snapshots=list(all_listing_snapshots.values()),
         )
 
-    await detail_tab
-    await asyncio.sleep(3)
-    detail_html = await detail_tab.get_content()
+    # 详情页风控兜底（检测→等人回车→重取，最多 2 次）
+    detail_html = await wait_and_reload_after_block(detail_tab, detect_block, "详情页")
     await _dump(detail_tab, "ke_detail")
 
     community_avg_price = parsers.parse_community_avg_price(detail_html)
@@ -627,6 +668,25 @@ async def _do_collect(
         area_max,
     )
     log.info("[11] 小区均价=%s 成交单价=%d条", community_avg_price, len(filtered_deal_prices))
+
+    # 详情页经 2 次人工仍未取得任何成交/均价：同样降级，不整单失败
+    if community_avg_price is None and not filtered_deal_prices:
+        log.warning("[11] 详情页未抓到均价和成交，降级为仅用在售均价")
+        if detail_tab is not main_page:
+            asyncio.ensure_future(_close_tab_later(detail_tab))
+        return PlatformResult(
+            name="贝壳",
+            status="SUCCESS",
+            community_avg_price=None,
+            quote_prices=all_listing_prices,
+            deal_prices=[],
+            deal_records=[],
+            deal_source="无成交(详情页未取得)",
+            request_id=request_id,
+            detail_url=detail_url,
+            elapsed_seconds=round(time.time() - started_at, 2),
+            listing_snapshots=list(all_listing_snapshots.values()),
+        )
 
     if detail_tab is not main_page:
         asyncio.ensure_future(_close_tab_later(detail_tab))

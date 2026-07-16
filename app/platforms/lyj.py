@@ -47,7 +47,7 @@ class LyjPlatformAdapter(PlatformAdapter):
         """乐有家特有：验证码 + 筛选区。登录检测由基类负责。"""
         if lyj_adapter._is_captcha_html(html):
             return False, "命中验证码拦截"
-        if lyj_adapter._is_login_html(html):
+        if lyj_adapter._is_login_url(page.target.url or ""):
             return False, "当前会话未登录或已失效"
         try:
             await page.select("div.selected-index", timeout=3)

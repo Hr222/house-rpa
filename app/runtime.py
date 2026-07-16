@@ -278,6 +278,10 @@ class RPARuntime:
         if ready:
             state.status = "READY"
             state.last_ready_at = time.time()
+            # 平台恢复就绪时立即刷新全局状态，不等下一次 keepalive
+            if all(s.status == "READY" for s in self.platform_states.values()):
+                self.status = "READY"
+                self.message = "所有平台已就绪"
         else:
             state.status = "WAIT_LOGIN"
         self._refresh_service_status()
@@ -577,6 +581,8 @@ class RPARuntime:
             payload["finalPrice"] = record.result.final_price
             payload["branchCode"] = record.result.branch
             payload["branch"] = BRANCH_TEXT.get(record.result.branch, record.result.branch)
+            if record.result.note:
+                payload["note"] = record.result.note
         elif record.status == "FAILED":
             payload["error"] = record.error
         return payload
