@@ -25,6 +25,7 @@ from app.platforms.base import (
     _human_click,
     click_area_segment,
     short_circuit_result,
+    community_name_match,
 )
 from app.utils.debug_utils import dump_html
 from app.core.models import PlatformResult
@@ -385,7 +386,7 @@ async def _do_collect(
         )
 
     keyword_snaps = parsers.parse_listing_snapshots(keyword_html)
-    if not any(community_name in (s.community_name or "") for s in keyword_snaps):
+    if not any(community_name_match(community_name, s.community_name or "") for s in keyword_snaps):
         return short_circuit_result(
             "安居客", "NO_DATA", f"关键词搜索未匹配到小区: {community_name}",
             request_id, started_at,

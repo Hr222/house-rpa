@@ -214,6 +214,52 @@ def short_circuit_result(
     )
 
 
+# 小区名分期后缀（中英文括号及内容，如 (一期)/(二期)/（一期））
+_PHASE_SUFFIX_PATTERN = re.compile(r"\([^)]*\)|（[^）]*）")
+
+
+def _strip_phase_suffix(name: str) -> str:
+    """去掉小区名里的分期括号后缀，如 '星河荣御花苑(一期)' → '星河荣御花苑'。"""
+    if not name:
+        return ""
+    return _PHASE_SUFFIX_PATTERN.sub("", name).strip()
+
+
+def community_name_match(request_name: str, page_name: str) -> bool:
+    """请求小区名与页面小区名是否匹配（容忍分期括号 + 命名差异）。
+
+    房产数据常见噪音：业务系统 "星河荣御花苑(一期)" vs 平台 "星河荣御一期"，
+    两边各有增删，单纯子串匹配会漏判导致误报 NO_DATA。策略：
+    1. 去掉分期括号 (一期)/(二期)/（一期）；
+    2. 双向子串（保留原 in 容差，如 "万科" 匹配 "万科城"）；
+    3. 最长公共子串 ≥ 3 字（处理两边各有增删的命名差异，
+       如 "星河荣御花苑" vs "星河荣御一期" 公共子串 "星河荣御" 4 字）。
+
+    不去通名（花苑/花园/苑等）——风险大，"汇雅苑" 去 "苑" 会与 "汇雅轩" 误匹配。
+    """
+    nr = _strip_phase_suffix(request_name)
+    np_ = _strip_phase_suffix(page_name)
+    if not nr or not np_:
+        return False
+    # 双向子串（精确 + 容差）
+    if nr in np_ or np_ in nr:
+        return True
+    # 最长公共子串（DP）
+    m, n = len(nr), len(np_)
+    longest = 0
+    # 滚动数组优化空间
+    prev = [0] * (n + 1)
+    for i in range(1, m + 1):
+        cur = [0] * (n + 1)
+        for j in range(1, n + 1):
+            if nr[i - 1] == np_[j - 1]:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > longest:
+                    longest = cur[j]
+        prev = cur
+    return longest >= 3
+
+
 async def wait_and_reload_after_block(tab, detect_func, label: str = "页面") -> str:
     """详情/成交页被风控时的统一处理：检测 → 等人回车 → 重取，最多 2 次。
 

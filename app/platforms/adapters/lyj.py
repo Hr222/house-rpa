@@ -30,6 +30,7 @@ from app.platforms.base import (
     _human_click,
     click_area_segment,
     short_circuit_result,
+    community_name_match,
 )
 
 log = logging.getLogger(__name__)
@@ -393,7 +394,7 @@ async def _do_collect(
         )
     # 校验搜索结果是否真的属于目标小区（解析 listing 的社区名，不用 raw HTML 切片）
     keyword_snaps = parsers.parse_listing_snapshots(keyword_html)
-    if not any(community_name in (s.community_name or "") for s in keyword_snaps):
+    if not any(community_name_match(community_name, s.community_name or "") for s in keyword_snaps):
         log.info("乐有家未匹配到小区: %s，返回 NO_DATA", community_name)
         return short_circuit_result(
             "乐有家", "NO_DATA", f"关键词搜索未匹配到小区: {community_name}",
