@@ -42,8 +42,7 @@ START_URL = "https://shenzhen.leyoujia.com/esf/"
 
 # 固定测试场景
 COMMUNITY_NAME = "春华四季园"
-AREA_MIN = 70
-AREA_MAX = 90
+AREA = 80.0
 
 PAGE_LINGER_SECONDS = config.PAGE_LINGER_SECONDS
 
@@ -521,8 +520,7 @@ def print_summary(
     print_mvp_result(
         platform="乐有家",
         community_name=COMMUNITY_NAME,
-        area_min=AREA_MIN,
-        area_max=AREA_MAX,
+        area=AREA,
         trace={
             "home_blocked": open_blocked,
             "search_url": result_url,
@@ -688,9 +686,9 @@ async def main(manual_login: bool = False, debug: bool = False):
 
         # ---- 第3步：面积自定义筛选 ----
         if not open_blocked and not search_blocked and not search_no_data:
-            log.info("[3] 填写面积筛选: %d-%d", AREA_MIN, AREA_MAX)
+            log.info("[3] 填写面积筛选: %.1f", AREA)
             try:
-                area_confirmed = await fill_area_inputs(page, AREA_MIN, AREA_MAX)
+                area_confirmed = await fill_area_inputs(page, AREA, AREA)
             except Exception as exc:
                 log.warning("[3] 面积筛选异常: %s", exc)
                 area_confirmed = False
@@ -766,7 +764,7 @@ async def main(manual_login: bool = False, debug: bool = False):
             snap_count = len(listing_snapshots)
             quote_count = len([s for s in listing_snapshots if s.unit_price])
             conclusion = (
-                f"采集成功：{COMMUNITY_NAME} {AREA_MIN}-{AREA_MAX}㎡ 共 {snap_count} 条，"
+                f"采集成功：{COMMUNITY_NAME} {AREA}㎡ 共 {snap_count} 条，"
                 f"在售均价 {format_price(listing_avg)} 元/㎡，"
                 f"小区均价 {format_price(listing_price)} 元/㎡（顶替成交），"
                 f"最终价 {format_price(final_price)} 元/㎡（{branch}）"

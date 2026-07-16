@@ -36,8 +36,7 @@ START_URL = "https://sz.lianjia.com/ershoufang/"
 
 # 固定测试场景：与贝壳/安居客/房天下脚本一致
 COMMUNITY_NAME = "绿景虹湾"
-AREA_MIN = 70
-AREA_MAX = 90
+AREA = 80.0
 
 
 # ============================================================
@@ -690,8 +689,7 @@ def print_summary(
     print_mvp_result(
         platform="链家",
         community_name=COMMUNITY_NAME,
-        area_min=AREA_MIN,
-        area_max=AREA_MAX,
+        area=AREA,
         trace={
             "home_blocked": open_blocked,
             "search_url": search_url,
@@ -912,8 +910,8 @@ async def main(manual_login: bool = False, debug: bool = False, search_only: boo
 
         # ---- 第3步：面积筛选 ----
         if not search_blocked:
-            log.info("[3] 填写面积筛选: %d-%d", AREA_MIN, AREA_MAX)
-            area_confirmed, segment_code = await apply_area_filter(page, AREA_MIN, AREA_MAX)
+            log.info("[3] 填写面积筛选: %.1f", AREA)
+            area_confirmed, segment_code = await apply_area_filter(page, AREA, AREA)
             area_file = await dump_html(page, "lj_after_area")
             area_url = page.target.url or ""
             area_html = await page.get_content()
@@ -1000,17 +998,17 @@ async def main(manual_login: bool = False, debug: bool = False, search_only: boo
                                             break
 
                                 # 过滤：严格面积 + 近半年
-                                filtered_deals = filter_deal_records(all_deals, AREA_MIN, AREA_MAX, months=6)
+                                filtered_deals = filter_deal_records(all_deals, AREA, AREA, months=6)
                                 deal_prices = [d[3] for d in filtered_deals if d[3] is not None]
                                 deal_avg = sum(deal_prices) / len(deal_prices) if deal_prices else None
                                 log.info(
-                                    "[6] 成交记录: 总 %d 条, %d-%d㎡且近半年 %d 条, 成交均价 %s",
-                                    len(all_deals), AREA_MIN, AREA_MAX, len(filtered_deals),
+                                    "[6] 成交记录: 总 %d 条, %.1f㎡且近半年 %d 条, 成交均价 %s",
+                                    len(all_deals), AREA, len(filtered_deals),
                                     f"{deal_avg:.2f}" if deal_avg else "None",
                                 )
                                 print()
                                 print("-" * 60)
-                                print(f"成交记录（{AREA_MIN}-{AREA_MAX}㎡，近半年）共 {len(filtered_deals)} 条：")
+                                print(f"成交记录（{AREA}㎡，近半年）共 {len(filtered_deals)} 条：")
                                 for area, date_str, total, price in filtered_deals:
                                     print(f"  {area}㎡ {date_str} {total}万 {price}元/平")
                                 if deal_avg:
@@ -1055,7 +1053,7 @@ async def main(manual_login: bool = False, debug: bool = False, search_only: boo
         elif search_blocked:
             conclusion = f"搜索后被拦：{search_block_reason}。"
         elif area_confirmed:
-            conclusion = f"搜索+面积筛选成功：{COMMUNITY_NAME} {AREA_MIN}-{AREA_MAX}㎡ 档位 {segment_code}，在售 {area_prices_count} 条。"
+            conclusion = f"搜索+面积筛选成功：{COMMUNITY_NAME} {AREA}㎡ 档位 {segment_code}，在售 {area_prices_count} 条。"
         else:
             conclusion = "面积筛选未能成功，需查看 HTML。"
 

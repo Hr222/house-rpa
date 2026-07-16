@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 from abc import ABC, abstractmethod
+from typing import Optional
 
 from app.core.models import InquiryRequest, PlatformResult, PlatformSession
 
@@ -145,3 +147,104 @@ async def wait_for_manual_unblock():
         "回到终端按回车继续...\n"
     )
     await asyncio.to_thread(input, prompt)
+
+
+async def _human_click(page, element, label: str) -> bool:
+    """真人节奏点击元素（所有平台共用）。
+
+    优先 JS click（精确点击目标元素，避免坐标偏移被悬浮客服/广告拦截），
+    失败则降级为 mouse_click。随机间隔模拟真人操作。
+    """
+    if not element:
+        return False
+
+    try:
+        await element.scroll_into_view()
+    except Exception:
+        pass
+
+    await asyncio.sleep(random.uniform(0.2, 0.5))
+    last_error = None
+    for clicker in ("js", "mouse"):
+        try:
+            if clicker == "js":
+                await element.click()
+            else:
+                try:
+                    await element.mouse_move()
+                    await asyncio.sleep(random.uniform(0.1, 0.3))
+                except Exception:
+                    pass
+                await element.mouse_click()
+            await page
+            await asyncio.sleep(random.uniform(0.5, 1.0))
+            return True
+        except Exception as exc:
+            last_error = exc
+
+    log.warning("%s click failed: %s", label, last_error)
+    return False
+
+
+async def click_area_segment(
+    page, area: float, parse_func, platform_code: str
+) -> Optional[tuple[float, float]]:
+    """从结果页面积筛选区动态读取档位，点击匹配 area 的档位链接（所有平台共用）。
+
+    档位因城市而异，不能硬编码，必须从 HTML 实时读取。
+    匹配规则：左闭右开（area >= min 且 area < max）。
+    各平台档位都是 <a> 链接，点击即筛选，不需要填输入框或点确定。
+
+    Args:
+        page: 结果页
+        area: 精确面积（必填）。
+        parse_func: 平台 parser 的 parse_area_segments 函数
+        platform_code: 平台代码，用于日志
+
+    Returns:
+        匹配到的面积区间 (min, max)，可用于后续成交记录筛选。
+        返回 None 表示未能读取到档位（页面结构变化等异常）。
+    """
+    html = await page.get_content()
+    segments = parse_func(html)
+    if not segments:
+        log.warning("[%s] 未从页面读到面积档位，跳过面积筛选", platform_code)
+        return None
+
+    log.info("[%s] 读到面积档位: %s", platform_code,
+             [(t, lo, hi) for t, lo, hi in segments])
+
+    # 左闭右开匹配
+    target = None
+    matched_lo = matched_hi = 0.0
+    for text, lo, hi in segments:
+        if lo <= area < hi:
+            target = text
+            matched_lo, matched_hi = lo, hi
+            break
+
+    if target is None:
+        target = segments[-1][0]
+        matched_lo, matched_hi = segments[-1][1], segments[-1][2]
+        log.info("[%s] 面积 %.1f 超出档位范围，取末档 %s (%.0f~%.0f)",
+                 platform_code, area, target, matched_lo, matched_hi)
+    else:
+        log.info("[%s] 面积 %.1f 匹配档位 %s (%.0f~%.0f)",
+                 platform_code, area, target, matched_lo, matched_hi)
+
+    # 点击对应的档位链接（通过文本定位）
+    try:
+        el = await page.find(target, timeout=4)
+    except Exception:
+        el = None
+    if el is None:
+        log.warning("[%s] 未找到面积档位按钮: %s", platform_code, target)
+        return None
+
+    clicked = await _human_click(page, el, f"面积档位 {target}")
+    if clicked:
+        await page
+        await asyncio.sleep(3)
+    else:
+        log.warning("[%s] 面积档位点击失败: %s", platform_code, target)
+    return (matched_lo, matched_hi)
