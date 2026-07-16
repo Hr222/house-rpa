@@ -293,13 +293,84 @@ def filter_deal_prices_by_area(
     records: List[DealRecord],
     area_min: float,
     area_max: float,
-    tolerance: float = 0.20,
 ) -> List[float]:
-    """按请求面积上下浮动 tolerance 过滤成交单价。"""
-    lower = area_min * (1 - tolerance)
-    upper = area_max * (1 + tolerance)
+    """按请求面积严格区间过滤成交单价（与链家/房天下统一口径）。"""
     return [
         record.unit_price
         for record in records
-        if record.area is not None and lower <= record.area <= upper
+        if record.area is not None and area_min <= record.area <= area_max
     ]
+
+
+def parse_area_segments(html: str) -> List[tuple]:
+    """从结果页面积筛选区动态读取面积档位。
+
+    贝壳面积筛选区 DOM：
+      <dl class="hide hasmore">
+        <dt title="深圳建筑面积在售二手房">建筑面积</dt>
+        <dd>
+          <a href=".../a1/"><span class="checkbox"></span><span class="name">50㎡以下</span></a>
+          <a href=".../a3/"><span class="checkbox"></span><span class="name">70-90㎡</span></a>
+          <a href=".../a8/"><span class="checkbox"></span><span class="name">200㎡以上</span></a>
+          <span class="customFilter" data-role="area">...</span>  ← 自定义输入框，面积区结束标志
+
+    档位因城市而异（深圳 8 档、佛山 7 档，数值不同），必须从 HTML 动态读取。
+
+    Returns:
+        [(text, min, max), ...]，按页面顺序。
+        - "50㎡以下"  → (0, 50)
+        - "70-90㎡"   → (70, 90)
+        - "200㎡以上" → (200, inf)
+        自定义输入框跳过。
+    """
+    # 贝壳面积区以 data-role="area" 的 customFilter 结束
+    end_marker = re.search(r'data-role=["\']area["\']', html)
+    if not end_marker:
+        return []
+    end = end_marker.start()
+    # 从结束标志往前找"建筑面积"标题，确定面积区起点
+    title_match = re.search(r'建筑面积', html[:end])
+    if not title_match:
+        return []
+    start = title_match.end()
+    chunk = html[start:end]
+
+    segments = []
+    # 匹配 <a><span class="name">XX㎡</span></a>
+    for m in re.finditer(
+        r'<a[^>]*>.*?<span[^>]*class="[^"]*name[^"]*"[^>]*>([^<]*㎡[^<]*)</span>',
+        chunk, re.S,
+    ):
+        text = m.group(1).strip()
+        parsed = _parse_segment_text(text)
+        if parsed is not None:
+            segments.append((text, parsed[0], parsed[1]))
+    return segments
+
+
+def _parse_segment_text(text: str):
+    """解析单个面积档位文本 → (min, max)。
+
+    贝壳用"㎡"单位：
+    - "50㎡以下"  → (0, 50)
+    - "70-90㎡"   → (70, 90)
+    - "200㎡以上" → (200, inf)
+    """
+    text = text.strip()
+
+    # XX㎡以下
+    m = re.match(r'(\d+)\s*㎡?\s*以下', text)
+    if m:
+        return (0.0, float(m.group(1)))
+
+    # XX-YY㎡
+    m = re.match(r'(\d+)\s*[-~]\s*(\d+)\s*㎡?', text)
+    if m:
+        return (float(m.group(1)), float(m.group(2)))
+
+    # XX㎡以上
+    m = re.match(r'(\d+)\s*㎡?\s*以上', text)
+    if m:
+        return (float(m.group(1)), float('inf'))
+
+    return None

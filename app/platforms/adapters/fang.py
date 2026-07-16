@@ -22,12 +22,12 @@ import logging
 import random
 import re
 import time
-from datetime import datetime, timedelta
 from typing import Optional
 
 from app.core import config
 from app.utils.debug_utils import dump_html
-from app.core.models import ListingSnapshot, PlatformResult
+from app.core.models import PlatformResult
+from app.parsers import fang as parsers
 from app.platforms.fang_constants import START_URL
 from app.platforms.base import human_linger
 
@@ -171,8 +171,65 @@ async def _human_click(page, element, label: str) -> bool:
 
 
 # ============================================================
-# 面积自定义输入（房天下也是填值+点确定）
+# 面积筛选（动态读取页面档位，点击对应区间链接）
 # ============================================================
+
+async def _click_area_segment(page, area: Optional[float]) -> bool:
+    """从结果页面积筛选区动态读取档位，点击匹配 area 的那个档位链接。
+
+    档位因城市而异，不能硬编码，必须从 HTML 实时读取。
+    匹配规则：左闭右开（area >= min 且 area < max）。
+
+    房天下档位是 <a> 链接，点击即筛选，不需要填输入框或点确定。
+
+    Args:
+        page: 结果页
+        area: 精确面积。为 None 时跳过（不筛选面积）。
+
+    Returns:
+        True 表示成功点击了某个档位。
+    """
+    if area is None:
+        log.info("未传精确面积，跳过面积档位筛选")
+        return True
+
+    html = await page.get_content()
+    segments = parsers.parse_area_segments(html)
+    if not segments:
+        log.warning("未从页面读到面积档位，跳过面积筛选")
+        return True
+
+    log.info("读到面积档位: %s", [(t, lo, hi) for t, lo, hi in segments])
+
+    # 左闭右开匹配
+    target = None
+    for text, lo, hi in segments:
+        if lo <= area < hi:
+            target = text
+            break
+
+    if target is None:
+        # 兜底：超出最大档位，取末档
+        target = segments[-1][0]
+        log.info("面积 %.1f 超出档位范围，取末档 %s", area, target)
+    else:
+        log.info("面积 %.1f 匹配档位 %s", area, target)
+
+    # 点击对应的档位链接（通过文本定位）
+    try:
+        el = await page.find(target, timeout=4)
+    except Exception:
+        el = None
+    if el is None:
+        log.warning("未找到面积档位按钮: %s", target)
+        return False
+
+    clicked = await _human_click(page, el, f"面积档位 {target}")
+    if clicked:
+        await page
+        await asyncio.sleep(3)
+    return clicked
+
 
 async def _fill_area_inputs(page, area_min, area_max):
     """定位面积筛选输入框并填值，返回是否点击确定成功。
@@ -237,26 +294,8 @@ async def _fill_area_inputs(page, area_min, area_max):
 
 
 # ============================================================
-# 分页采集（房天下有分页，参考贝壳分页写法）
+# 分页采集（房天下有分页，参考贝壳分页写法；解析在 parsers/fang.py）
 # ============================================================
-
-def _parse_total_pages(html: str) -> int:
-    """从房天下分页区解析总页数。
-
-    DOM: <span class="last">共2页</span>
-    """
-    m = re.search(r'共(\d+)页', html or "")
-    return int(m.group(1)) if m else 1
-
-
-def _parse_current_page(html: str) -> Optional[int]:
-    """从房天下分页区解析当前页码。
-
-    DOM: <span class="on">1</span>（当前页带 class=on）
-    """
-    m = re.search(r'<span class="on">(\d+)</span>', html or "")
-    return int(m.group(1)) if m else None
-
 
 async def _wait_for_results_loaded(page, expected_page: Optional[int] = None, timeout: float = 15) -> str:
     """等待结果页加载完成。"""
@@ -264,7 +303,7 @@ async def _wait_for_results_loaded(page, expected_page: Optional[int] = None, ti
     last_html = ""
     while asyncio.get_event_loop().time() < deadline:
         last_html = await page.get_content()
-        if expected_page is None or _parse_current_page(last_html) == expected_page:
+        if expected_page is None or parsers.parse_current_page(last_html) == expected_page:
             await asyncio.sleep(1.2)
             return last_html
         await asyncio.sleep(0.5)
@@ -454,8 +493,8 @@ async def _navigate_and_parse_deals(detail_tab, main_page, area_min: float, area
 
         await _dump(detail_tab, "fang_deal")
         deal_html = await detail_tab.get_content()
-        all_deals = _parse_deal_records(deal_html)
-        filtered_deals = _filter_deal_records(all_deals, area_min, area_max, months=6)
+        all_deals = parsers.parse_deal_records(deal_html)
+        filtered_deals = parsers.filter_deal_records(all_deals, area_min, area_max, months=6)
         deal_prices = [d[3] for d in filtered_deals]
         deal_record_dicts = [
             {"area": d[0], "date": d[1], "price": d[3]}
@@ -474,124 +513,6 @@ async def _navigate_and_parse_deals(detail_tab, main_page, area_min: float, area
         except Exception as exc:
             log.warning("切回主页面失败: %s", exc)
     return deal_prices, deal_record_dicts
-
-
-# ============================================================
-# HTML 解析
-# ============================================================
-
-def _parse_listing_snapshots(html: str) -> list:
-    """从主结果区提取在售房源快照。
-
-    DOM:
-      <dl class="clearfix ...">
-        <dd><h4><a><span class="tit_shop">小区名 房源标题...</span></a></h4>
-            <p class="tel_shop">3室2厅 | 88.35㎡ | ...</p></dd>
-        <dd class="price_right"><span class="red"><b>530</b>万</span><span>59988元/㎡</span></dd>
-      </dl>
-
-    边界：截断到"您可能感兴趣的新房"(InterestedNewHouse)之前，排除新房推荐位。
-    注意：房天下的 tit_shop 是房源标题（含小区名），不像安居客有独立小区名字段。
-    """
-    cut = html.find("InterestedNewHouse")
-    main_html = html[:cut] if cut > 0 else html
-
-    snapshots = []
-    for block in re.finditer(r'<dl class="clearfix[^"]*"[^>]*>(.*?)</dl>', main_html, re.S):
-        chunk = block.group(1)
-
-        # 小区名：tit_shop 取第一个词（房天下 tit_shop 是房源标题，含小区名）
-        name_m = re.search(r'tit_shop[^>]*>(.*?)</span>', chunk, re.S)
-        community_name = None
-        if name_m:
-            clean = re.sub(r'<[^>]+>', '', name_m.group(1)).strip()
-            community_name = clean.split()[0] if clean else None
-
-        # 户型+面积：tel_shop 里 "3室2厅 | 88.35㎡ | ..."
-        tel_m = re.search(r'tel_shop[^>]*>(.*?)</p>', chunk, re.S)
-        layout = None
-        area = None
-        if tel_m:
-            tel_text = re.sub(r'<[^>]+>', '', tel_m.group(1))
-            layout_m = re.search(r'(\d+室\d+厅)', tel_text)
-            if layout_m:
-                layout = layout_m.group(1)
-            area_m = re.search(r'([\d.]+)\s*㎡', tel_text)
-            if area_m:
-                area = float(area_m.group(1))
-
-        # 总价(万)
-        total_m = re.search(r'<b>([\d,]+)</b>\s*万', chunk)
-        total_price = float(total_m.group(1).replace(",", "")) if total_m else None
-
-        # 单价
-        price_m = re.search(r'<span>([\d,]+)\s*元/㎡</span>', chunk)
-        unit_price = float(price_m.group(1).replace(",", "")) if price_m else None
-
-        if unit_price is None and total_price is None:
-            continue
-
-        snapshots.append(
-            ListingSnapshot(
-                house_id="",
-                community_name=community_name,
-                area=area,
-                layout=layout,
-                unit_price=unit_price,
-                total_price=total_price,
-            )
-        )
-    return snapshots
-
-
-def _parse_deal_records(html: str) -> list:
-    """从成交页表格解析成交记录。
-
-    DOM:
-      <table class="table_hx"><tbody>
-        <tr><th>房源面积</th><th>成交时间</th><th>成交总价</th><th>成交均价</th><th>信息来源</th></tr>
-        <tr><td><p>75.14㎡</p></td><td><p>2026-05-06</p></td><td><p>558万</p></td><td><p>74262元/㎡</p></td>...</tr>
-
-    返回 [(面积, 日期, 总价万, 单价), ...] 原始列表，不过滤。
-    """
-    rows = re.findall(
-        r'<td><p>([\d.]+)\s*㎡</p></td>\s*'
-        r'<td><p>(\d{4}-\d{2}-\d{2})</p></td>\s*'
-        r'<td><p>([\d]+)万</p></td>\s*'
-        r'<td><p>([\d,]+)\s*元/㎡</p></td>',
-        html,
-    )
-    records = []
-    for area_str, date_str, total_str, price_str in rows:
-        try:
-            records.append((
-                float(area_str),
-                date_str,
-                int(total_str),
-                float(price_str.replace(",", "")),
-            ))
-        except ValueError:
-            continue
-    return records
-
-
-def _filter_deal_records(records: list, area_min: float, area_max: float, months: int = 6) -> list:
-    """过滤成交记录：严格面积区间 + 近 months 个月。
-
-    房天下规则：严格面积区间 area_min~area_max（不套容差），日期 >= 今天往前 months 个月。
-    注意：贝壳用的是 ±20% 容差（parsers.filter_deal_prices_by_area），
-    房天下按业务确认用严格区间，两者口径不同，各自实现，不混用。
-    """
-    cutoff = datetime.now() - timedelta(days=30 * months)
-    cutoff_str = cutoff.strftime("%Y-%m-%d")
-    filtered = []
-    for area, date_str, total, price in records:
-        if not (area_min <= area <= area_max):
-            continue
-        if date_str < cutoff_str:
-            continue
-        filtered.append((area, date_str, total, price))
-    return filtered
 
 
 # ============================================================
@@ -718,10 +639,11 @@ async def collect(
     area_min: float,
     area_max: float,
     request_id: Optional[str] = None,
+    area: Optional[float] = None,
 ) -> PlatformResult:
     """执行一次完整的房天下询价采集。"""
     start = time.time()
-    log.info("收到请求: 小区=%s 面积=%.0f~%.0f㎡", community_name, area_min, area_max)
+    log.info("收到请求: 小区=%s 面积=%.0f~%.0f㎡ area=%s", community_name, area_min, area_max, area)
     try:
         return await _do_collect(
             browser=browser,
@@ -729,6 +651,7 @@ async def collect(
             community_name=community_name,
             area_min=area_min,
             area_max=area_max,
+            area=area,
             request_id=request_id,
             started_at=start,
         )
@@ -752,6 +675,7 @@ async def _do_collect(
     area_max: float,
     request_id: Optional[str],
     started_at: float,
+    area: Optional[float] = None,
 ) -> PlatformResult:
     # 1. 刷新首页保活
     main_page = await reset_to_start_page(main_page)
@@ -780,9 +704,8 @@ async def _do_collect(
             elapsed_seconds=round(time.time() - started_at, 2),
         )
 
-    # 4. 填面积筛选
-    log.info("填写面积筛选: %d-%d", area_min, area_max)
-    area_confirmed = await _fill_area_inputs(main_page, area_min, area_max)
+    # 4. 面积筛选（动态读取页面档位，点击对应区间链接）
+    area_confirmed = await _click_area_segment(main_page, area)
     await _dump(main_page, "fang_after_area")
 
     area_url = main_page.target.url or ""
@@ -813,7 +736,7 @@ async def _do_collect(
         log.warning("未能打开小区详情页")
 
     # 6. 并行：分页采集在售房源 + 导航成交页
-    total_pages = _parse_total_pages(area_html)
+    total_pages = parsers.parse_total_pages(area_html)
     log.info("总页数: %d", total_pages)
 
     # 启动成交页导航任务（后台并行，解析完自动关成交 tab 切回主页）
@@ -831,7 +754,7 @@ async def _do_collect(
     log.info("分页采集完成: 每页 %s", page_counts)
 
     # 7. 解析在售房源
-    snapshots = _parse_listing_snapshots(merged_html)
+    snapshots = parsers.parse_listing_snapshots(merged_html)
     quote_prices = [s.unit_price for s in snapshots if s.unit_price]
     if not quote_prices:
         return PlatformResult(

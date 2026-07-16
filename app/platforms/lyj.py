@@ -36,6 +36,7 @@ class LyjPlatformAdapter(PlatformAdapter):
             community_name=request.community_name,
             area_min=request.area_min,
             area_max=request.area_max,
+            area=request.area,
             request_id=request.request_id,
         )
         try:

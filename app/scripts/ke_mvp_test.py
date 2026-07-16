@@ -368,7 +368,7 @@ async def run_ke_collect(
     community_name: str,
     area_min: float,
     area_max: float,
-    manual_login: bool = True,
+    manual_login: bool = False,
 ) -> dict:
     """执行一次完整的贝壳询价采集，返回汇总 dict。"""
     started_at = time.time()
@@ -566,7 +566,7 @@ async def main(
     community_name: str = DEFAULT_COMMUNITY,
     area_min: float = DEFAULT_AREA_MIN,
     area_max: float = DEFAULT_AREA_MAX,
-    manual_login: bool = True,
+    manual_login: bool = False,
     debug: bool = False,
 ):
     if debug:

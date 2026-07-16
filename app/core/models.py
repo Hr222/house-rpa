@@ -6,12 +6,18 @@ from typing import List, Optional
 
 @dataclass(slots=True)
 class InquiryRequest:
-    """后端 → RPA 的请求。"""
+    """后端 → RPA 的请求。
+
+    面积传参有两种方式：
+    - area: 精确面积（如 89.5）。各平台按自身档位规则自动匹配在售筛选范围。
+    - area_min / area_max: 直接指定范围（兼容旧调用方，成交筛选仍用此字段）。
+    """
     community_name: str
-    area_min: float
-    area_max: float
+    area_min: float = 0
+    area_max: float = 0
     city: str = "深圳"
     request_id: Optional[str] = None
+    area: Optional[float] = None
 
 
 @dataclass

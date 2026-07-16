@@ -162,11 +162,16 @@ jeethink-rpa/
 │  │     ├─ fang.py         # 房天下真实采集逻辑
 │  │     └─ lyj.py          # 乐有家真实采集逻辑
 │  ├─ parsers/
-│  │  └─ ke.py              # 贝壳 HTML 解析器
+│  │  ├─ ke.py              # 贝壳 HTML 解析器
+│  │  ├─ ajk.py             # 安居客 HTML 解析器
+│  │  ├─ lj.py              # 链家 HTML 解析器
+│  │  ├─ fang.py            # 房天下 HTML 解析器
+│  │  └─ lyj.py             # 乐有家 HTML 解析器
 │  ├─ utils/
 │  │  ├─ logging_utils.py   # 日志配置（按日切分）
 │  │  ├─ debug_utils.py     # 调试 HTML 导出
 │  │  ├─ task_store.py      # 任务持久化（崩溃恢复兜底）
+│  │  ├─ callback.py        # 结果回调推送（主动通知客户端）
 │  │  └─ window_control.py  # Windows 浏览器置前控制
 │  ├─ scripts/
 │  │  ├─ api_server.py      # 服务启动入口
@@ -234,15 +239,15 @@ FastAPI 入口。接口清单：
 - 打开各平台常驻页面。
 - 维护平台状态（`PlatformRuntimeState`）。
 - 管理任务队列（`asyncio.Queue`，串行消费）。
-- 定时保活循环（默认 300s）。
-- 崩溃恢复：启动时从 `persist/` 恢复未完成任务。
+- 定时保活循环（默认 120s）。
+- 崩溃恢复：全部平台首次就绪后，从 `persist/` 恢复未完成任务（只一次）。
 - 需要人工处理时尝试将浏览器置前。
 
 ### `app/service.py`
 
 平台调度与结果汇总层。
 
-- `build_inquiry_result()` — 从多平台结果中选第一个 `SUCCESS`，调用 `decide()` 算最终价。
+- `build_inquiry_result()` — 把所有 `SUCCESS` 平台的在售均价、成交单价跨平台累加平均后，调用 `decide()` 算最终价。
 - `RPAInquiryService` — 管理各平台 session，执行 `run_inquiry()`。
 
 ### `app/platforms/base.py`
@@ -262,16 +267,15 @@ FastAPI 入口。接口清单：
 - 薄壳适配器（`platforms/<code>.py`）：实现 `PlatformAdapter` 接口，委托给 adapter。
 - 采集逻辑（`platforms/adapters/<code>.py`）：搜索、筛选、分页、解析、风控检测等真实逻辑。
 
-### `app/parsers/ke.py`
+### `app/parsers/<code>.py`
 
-贝壳 HTML 解析器（BeautifulSoup + 正则兜底）：
+每个平台一个独立 HTML 解析器，与 adapter 的浏览器操作分离。adapter 通过 `from app.parsers import <code> as parsers` 调用。
 
-- `parse_listing_records()` — 在售房源 ID + 单价
-- `parse_listing_snapshots()` — 房源摘要
-- `find_detail_link()` — 小区详情链接
-- `parse_community_avg_price()` — 小区均价
-- `parse_deal_records()` — 成交记录
-- `filter_deal_prices_by_area()` — 按面积 ±20% 筛选
+- `parsers/ke.py` — 贝壳（BeautifulSoup + 正则兜底）：在售记录/摘要、详情链接、小区均价、成交记录、面积 ±20% 筛选
+- `parsers/ajk.py` — 安居客：在售快照、挂牌均价（顶替成交）
+- `parsers/lj.py` — 链家：在售快照、成交记录、严格面积区间+近半年筛选
+- `parsers/fang.py` — 房天下：在售快照、成交表格、严格面积区间+近半年筛选
+- `parsers/lyj.py` — 乐有家：在售快照、小区均价（顶替成交）
 
 ### `app/utils/`
 
@@ -335,20 +339,24 @@ pip install -r requirements.txt
 python -m app.scripts.api_server
 ```
 
-调试模式：
+常用参数（所有脚本统一）：
+
+- `--debug` — 开启调试模式，导出关键页面 HTML 到 `debug/` 目录
+- `--manual-login` — 启用终端回车确认登录：平台未就绪时提示回车，人工完成登录后继续
 
 ```bash
-python -m app.scripts.api_server --debug
+# 调试 + 人工登录确认
+python -m app.scripts.api_server --debug --manual-login
 ```
 
 ### 单平台 MVP 测试
 
 ```bash
-python -m app.scripts.ke_mvp_test       # 贝壳
-python -m app.scripts.ajk_mvp_test      # 安居客
-python -m app.scripts.lj_mvp_test       # 链家
-python -m app.scripts.fang_mvp_test     # 房天下
-python -m app.scripts.lyj_mvp_test      # 乐有家
+python -m app.scripts.ke_mvp_test --debug --manual-login       # 贝壳
+python -m app.scripts.ajk_mvp_test --debug --manual-login      # 安居客
+python -m app.scripts.lj_mvp_test --debug --manual-login       # 链家
+python -m app.scripts.fang_mvp_test --debug --manual-login     # 房天下
+python -m app.scripts.lyj_mvp_test --debug --manual-login      # 乐有家
 ```
 
 ### 接单测试
@@ -513,7 +521,9 @@ python test_inquiry.py
 
 - 每个询价任务入队时写一个 `persist/{taskId}.json`，内容为 `InquiryRequest` 的序列化。
 - 任务执行完成（成功或失败）后立即删除对应文件。
-- 进程崩溃重启时，`RPARuntime.start()` 会遍历 `persist/*.json`，恢复所有残留任务重新入队。
+- 进程崩溃重启后，当**全部平台首次确认就绪**时（`_refresh_service_status` 检测到 all READY），
+  自动遍历 `persist/*.json` 恢复所有残留任务重新入队（`_restored` 标志保证只恢复一次）。
+  恢复先于服务置 READY，保证残留任务排在就绪后接的新单之前（先来后到）。
 
 ### 算法参数持久化
 
@@ -524,7 +534,7 @@ python test_inquiry.py
 ### 持久化文件结构
 
 ```
-app/core/persist/
+persist/                  # 项目根目录下
 ├── runtime.json          # 算法参数（常驻）
 └── {taskId}.json         # 任务数据（入队写，完成删）
 ```
@@ -565,6 +575,6 @@ app/core/persist/
 - 命中平台人机验证时，仍需要人工介入。
 - 任务串行执行；每个平台分配独立浏览器实例，采集时多平台并行（`asyncio.gather`）。
 - 服务层把所有 `SUCCESS` 平台的在售均价、成交单价**跨平台累加平均**后，再走 `decide()` 算最终价（不再是取第一个 `SUCCESS` 平台）。
-- 仅贝壳有独立 HTML 解析器（`parsers/ke.py`），其他平台解析逻辑在各自 adapter 内。
+- 各平台均有独立 HTML 解析器（`parsers/<code>.py`），与 adapter 的浏览器操作分离。
 
 这些约束是有意为之，优先保证稳定可用，而不是过早做复杂并发或多浏览器编排。

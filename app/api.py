@@ -17,8 +17,9 @@ from app.runtime import RPARuntime
 
 class InquiryCreatePayload(BaseModel):
     community_name: str = Field(..., min_length=1, alias="communityName")
-    area_min: float = Field(..., gt=0, alias="areaMin")
-    area_max: float = Field(..., gt=0, alias="areaMax")
+    area: Optional[float] = Field(default=None, gt=0, alias="area")
+    area_min: Optional[float] = Field(default=None, gt=0, alias="areaMin")
+    area_max: Optional[float] = Field(default=None, gt=0, alias="areaMax")
     city: str = "深圳"
     request_id: Optional[str] = Field(default=None, alias="requestId")
 
@@ -85,12 +86,19 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
     @app.post("/inquiries", status_code=202)
     async def create_inquiry(payload: InquiryCreatePayload):
         current_runtime: RPARuntime = app.state.runtime
+        # 至少传一种面积参数：精确面积 area 或 范围 areaMin+areaMax
+        if payload.area is None and (payload.area_min is None or payload.area_max is None):
+            raise HTTPException(
+                status_code=400,
+                detail="请传 area（精确面积）或 areaMin+areaMax（面积范围）",
+            )
         request = InquiryRequest(
             community_name=payload.community_name,
-            area_min=payload.area_min,
-            area_max=payload.area_max,
+            area_min=payload.area_min or 0,
+            area_max=payload.area_max or 0,
             city=payload.city,
             request_id=payload.request_id,
+            area=payload.area,
         )
         try:
             task = await current_runtime.enqueue_inquiry(request)

@@ -138,6 +138,7 @@ class RPARuntime:
         self.status = "BOOTING"
         self.message = "启动中"
         self._last_get_at: dict[str, float] = {}  # GET 限流：taskId -> 上次查询时间戳
+        self._restored: bool = False  # 崩溃恢复标志：全部就绪后只恢复一次残留任务
 
     async def start(self):
         if self.service is not None:
@@ -309,6 +310,11 @@ class RPARuntime:
         if all(item.status == "READY" for item in states):
             if self.status != "READY":
                 self._tile_after_login()
+                # 首次全部就绪：恢复崩溃前未完成的任务（只执行一次）。
+                # 恢复先于 self.status 置 READY，保证残留任务排在就绪后接的新单之前。
+                if not self._restored:
+                    self._restore_pending_tasks()
+                    self._restored = True
             self.status = "READY"
             self.message = "所有平台已就绪"
             return
@@ -354,6 +360,13 @@ class RPARuntime:
                 result = await self.service.run_inquiry(record.request)
                 record.result = result
                 record.status = "COMPLETED"
+                # ★ 采集完成瞬间立刻打印 request + 纯采集耗时（不含详情窗口后台关闭等待）
+                elapsed = time.time() - record.started_at
+                log.info(
+                    "[采集完成] request=%s 耗时=%.1f秒 (此刻详情窗口仍在后台静默关闭中)",
+                    _camelize_dict(asdict(record.request)),
+                    elapsed,
+                )
                 self._apply_platform_results(result)
             except Exception as exc:
                 log.exception("task failed: %s", task_id)

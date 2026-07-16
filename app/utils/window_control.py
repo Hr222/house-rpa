@@ -147,7 +147,14 @@ def enumerate_browser_windows() -> list[WindowInfo]:
 def tile_browser_windows(pids: list[int] | None = None, margin: int = 0):
     """将多个浏览器窗口平铺填满屏幕。
 
-    5 个窗口：上排 3 个 + 下排 2 个。
+    5 个窗口：2 列 × 3 行网格，右下角空出留给终端。
+      ┌──────┬──────┐
+      │ 窗口0│ 窗口3│  ← 左上、右上
+      ├──────┼──────┤
+      │ 窗口1│ 窗口4│  ← 左中、右中
+      ├──────┼──────┤
+      │ 窗口2│ 终端 │  ← 左下、右下(空)
+      └──────┴──────┘
 
     Args:
         pids: 浏览器进程 PID 列表（保留兼容，未使用；改为自动枚举）
@@ -159,13 +166,32 @@ def tile_browser_windows(pids: list[int] | None = None, margin: int = 0):
     windows = enumerate_browser_windows()
     n = len(windows)
     if n == 0:
-        log.warning("未发现 Edge 窗口")
+        log.warning("未发现 Chrome 窗口")
         return
 
     if n == 5:
-        layout = [(0, 0, 3), (1, 0, 2)]
-        rows = 2
-    elif n <= 3:
+        # 2列×3行，右下角空出给终端
+        cols = 2
+        rows = 3
+        col_w = screen_w // cols
+        row_h = (screen_h - margin) // rows
+        # 格子顺序：左上→左中→左下→右上→右中（跳过右下）
+        positions = [
+            (0, 0), (0, 1), (0, 2),  # 左列：上、中、下
+            (1, 0), (1, 1),          # 右列：上、中（右下空）
+        ]
+        for idx, (col, row) in enumerate(positions):
+            if idx >= n:
+                break
+            win = windows[idx]
+            x = col * col_w
+            y = row * row_h
+            user32.SetWindowPos(win.hwnd, HWND_TOP, x, y, col_w, row_h, SWP_NOZORDER)
+            log.info("窗口平铺 [%d] %s → (%d,%d %dx%d)", idx, win.title[:40], x, y, col_w, row_h)
+        return
+
+    # 其余数量走通用行式布局
+    if n <= 3:
         layout = [(0, 0, n)]
         rows = 1
     else:
