@@ -656,8 +656,10 @@ async def _do_collect(
 
     # 2. 搜索小区
     keyword_html = await _search_community(main_page, community_name)
-    await _dump(main_page, "lj_keyword_result")
+    # 搜索后风控兜底（搜索是最易触发风控的环节，带关键词请求）
+    keyword_html = await wait_and_reload_after_block(main_page, detect_block, "搜索后")
     keyword_url = main_page.target.url or ""
+    await _dump(main_page, "lj_keyword_result")
 
     # 3. 判搜索成功（正向检测，避免标记词误判）
     # 3.5 无数据短路：m-noresult（链家和贝壳共用）或 sellListContent 缺失

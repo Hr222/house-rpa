@@ -665,6 +665,10 @@ async def _do_collect(
     await _dump(main_page, "ke_refresh")
 
     keyword_html, keyword_url, detail_url = await _search_community(main_page, community_name)
+    # 搜索后风控兜底（搜索是最易触发风控的环节，带关键词请求）
+    keyword_html = await wait_and_reload_after_block(main_page, detect_block, "搜索后")
+    keyword_url = main_page.target.url or ""
+    detail_url = parsers.find_detail_link(keyword_html) or detail_url
     await _dump(main_page, "ke_keyword_result")
 
     if _is_login_url(keyword_url) or _is_login_html(keyword_html):
@@ -710,6 +714,8 @@ async def _do_collect(
     all_listing_snapshots: dict[str, ListingSnapshot] = {}
 
     filtered_html = await _wait_for_results_loaded(main_page, expected_page=1)
+    # 面积筛选后风控兜底（对齐 lj，面积筛选点击也可能触发风控）
+    filtered_html = await wait_and_reload_after_block(main_page, detect_block, "面积筛选后")
     filtered_url = main_page.target.url or ""
     if _is_login_url(filtered_url) or _is_login_html(filtered_html):
         status = "WAIT_MANUAL_VERIFY" if _is_manual_verify_html(filtered_html) else "LOGIN_EXPIRED"
