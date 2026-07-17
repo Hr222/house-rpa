@@ -133,9 +133,10 @@ class RPAInquiryService:
             if platform_result.listing_snapshots:
                 for item in platform_result.listing_snapshots:
                     log.info(
-                        "%s: {小区名称: %s, 面积: %s平米, 几房几厅: %s, 售价: %s元/平, 总价: %s万}",
+                        "%s: {小区名称: %s, 标题: %s, 面积: %s平米, 几房几厅: %s, 售价: %s元/平, 总价: %s万}",
                         platform_result.name,
                         item.community_name or "",
+                        item.title or "",
                         item.area if item.area is not None else "",
                         item.layout or "",
                         item.unit_price if item.unit_price is not None else "",

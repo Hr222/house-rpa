@@ -23,6 +23,7 @@ from app.platforms.base import (
     safe_select_and_click,
     short_circuit_result,
     community_name_match,
+    check_page_community_match_rate,
     check_empty_listing_page,
 )
 from app.platforms.city_map import get_start_url
@@ -402,6 +403,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
     all_snapshots: dict[str, ListingSnapshot] = {}
     last_html = first_page_html
     consecutive_empty = 0
+    consecutive_no_match = 0
 
     # 注意：用 while 而非 for range。风控后重新锁定小区会把浏览器带回第 1 页，
     # 必须把 page_no 重置成 1 才能从第 1 页重新翻起；for range 的循环变量赋值会被
@@ -448,6 +450,18 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
             all_records[house_id] = price
         for snapshot in page_snapshots:
             all_snapshots[snapshot.house_id] = snapshot
+
+        # 翻页兜底：连续 2 页无匹配小区 → 关键词搜索是宽匹配，停止翻页
+        if community_name and page_snapshots:
+            match_rate = check_page_community_match_rate(page_snapshots, community_name)
+            if match_rate == 0:
+                consecutive_no_match += 1
+                log.warning("第 %d 页无匹配小区 %s (连续 %d 页)", page_no, community_name, consecutive_no_match)
+                if consecutive_no_match >= 2:
+                    log.warning("连续 %d 页无匹配小区，停止翻页", consecutive_no_match)
+                    break
+            else:
+                consecutive_no_match = 0
 
         # 空页检测：首页空→error+停止，连续空页≥2→warning+停止
         should_stop, consecutive_empty = check_empty_listing_page(

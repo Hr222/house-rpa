@@ -37,6 +37,12 @@ def parse_listing_snapshots(html: str) -> list:
         name_m = re.search(r'<div class="positionInfo">.*?<a[^>]*>([^<]+)</a>', chunk, re.S)
         community_name = name_m.group(1).strip() if name_m else None
 
+        # 营销标题
+        title = None
+        tit_m = re.search(r'<div class="title">.*?<a[^>]*>(.*?)</a>', chunk, re.S)
+        if tit_m:
+            title = re.sub(r'<[^>]+>', '', tit_m.group(1)).strip() or None
+
         # 户型+面积
         info_m = re.search(r'<div class="houseInfo">.*?>(.*?)</div>', chunk, re.S)
         layout = None
@@ -67,6 +73,7 @@ def parse_listing_snapshots(html: str) -> list:
             ListingSnapshot(
                 house_id="",
                 community_name=community_name,
+                title=title,
                 area=area,
                 layout=layout,
                 unit_price=unit_price,

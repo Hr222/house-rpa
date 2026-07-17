@@ -62,6 +62,12 @@ def parse_listing_snapshots(html: str) -> list:
         )
         community_name = name_m.group(1).strip() if name_m else None
 
+        # 营销标题：h3 的 title 属性（文本内有 <i> 高亮，title 属性是纯文本）
+        title = None
+        title_m = re.search(r'<h3[^>]*title="([^"]+)"', chunk)
+        if title_m:
+            title = title_m.group(1).strip()
+
         total_price = _extract_first(
             r'property-price-total-num[^>]*>\s*([\d,]+)', chunk
         )
@@ -76,6 +82,7 @@ def parse_listing_snapshots(html: str) -> list:
             ListingSnapshot(
                 house_id="",
                 community_name=community_name,
+                title=title,
                 area=area,
                 layout=layout,
                 unit_price=unit_price,

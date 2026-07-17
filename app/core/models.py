@@ -29,6 +29,7 @@ class ListingSnapshot:
     """在售房源摘要。"""
     house_id: str
     community_name: Optional[str] = None
+    title: Optional[str] = None          # 营销标题（区别于小区名）
     area: Optional[float] = None
     layout: Optional[str] = None
     unit_price: Optional[float] = None

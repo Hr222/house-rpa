@@ -26,11 +26,12 @@ def test_parse_current_page():
 
 
 def test_parse_listing_snapshots_extracts_fields():
-    """正常房源：小区名/户型/面积/总价/单价。"""
+    """正常房源：小区名(add_shop)/标题(tit_shop)/户型/面积/总价/单价。"""
     html = """
     <dl class="clearfix">
       <dd><h4><a><span class="tit_shop">绿景虹湾 精装三房</span></a></h4>
-          <p class="tel_shop">3室2厅 | 88.35㎡ | 南北</p></dd>
+          <p class="tel_shop">3室2厅 | 88.35㎡ | 南北</p>
+          <p class="add_shop"><a href="//sz.fang.com/house-xm2810892392/" title="绿景虹湾"> 绿景虹湾 </a><span>梅林 北环大道6098号</span></p></dd>
       <dd class="price_right"><span class="red"><b>530</b>万</span><span>59988元/㎡</span></dd>
     </dl>
     """
@@ -38,7 +39,8 @@ def test_parse_listing_snapshots_extracts_fields():
 
     assert len(snapshots) == 1
     s = snapshots[0]
-    assert s.community_name == "绿景虹湾"  # tit_shop 取第一个词
+    assert s.community_name == "绿景虹湾"  # add_shop a 提取
+    assert s.title == "绿景虹湾 精装三房"     # tit_shop 提取
     assert s.layout == "3室2厅"
     assert s.area == 88.35
     assert s.total_price == 530.0

@@ -32,6 +32,8 @@ from app.platforms.base import (
     click_area_segment,
     short_circuit_result,
     community_name_match,
+    filter_snapshots_by_community,
+    check_page_community_match_rate,
     wait_and_reload_after_block,
     check_empty_listing_page,
 )
@@ -253,11 +255,12 @@ async def _click_page_number(page, page_no: int) -> str:
 
 
 
-async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
+async def _collect_listing_pages(page, first_page_html: str, total_pages: int, community_name: str = ""):
     """逐页采集在售房源快照。"""
     all_snapshots: list[ListingSnapshot] = []
     last_html = first_page_html
     consecutive_empty = 0
+    consecutive_no_match = 0
 
     for page_no in range(1, total_pages + 1):
         if page_no > 1:
@@ -270,6 +273,18 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
         page_snapshots = parsers.parse_listing_snapshots(last_html)
         all_snapshots.extend(page_snapshots)
         log.info("乐有家第 %d/%d 页: %d 条", page_no, total_pages, len(page_snapshots))
+
+        # 翻页兜底：连续 2 页无匹配小区 → 关键词搜索是宽匹配，停止翻页
+        if community_name and page_snapshots:
+            match_rate = check_page_community_match_rate(page_snapshots, community_name)
+            if match_rate == 0:
+                consecutive_no_match += 1
+                log.warning("第 %d 页无匹配小区 %s (连续 %d 页)", page_no, community_name, consecutive_no_match)
+                if consecutive_no_match >= 2:
+                    log.warning("连续 %d 页无匹配小区，停止翻页", consecutive_no_match)
+                    break
+            else:
+                consecutive_no_match = 0
 
         # 空页检测：首页空→error+停止，连续空页≥2→warning+停止
         should_stop, consecutive_empty = check_empty_listing_page(
@@ -444,8 +459,18 @@ async def _do_collect(
     total_pages = parsers.parse_total_pages(area_html)
     log.info("乐有家总页数: %d", total_pages)
     listing_snapshots, last_page_html = await _collect_listing_pages(
-        main_page, area_html, total_pages
+        main_page, area_html, total_pages, community_name
     )
+
+    # 按小区名过滤（lyj 搜索 URL 虽然带小区参数，仍可能有宽匹配混入）
+    filtered = filter_snapshots_by_community(listing_snapshots, community_name)
+    log.info("在售房源过滤: 总 %d 条 → 匹配小区 %s %d 条", len(listing_snapshots), community_name, len(filtered))
+    if not filtered:
+        return short_circuit_result(
+            "乐有家", "NO_DATA", f"面积筛选后未匹配到小区: {community_name}",
+            request_id, started_at,
+        )
+    listing_snapshots = filtered
 
     quote_prices = [s.unit_price for s in listing_snapshots if s.unit_price]
     if not quote_prices:

@@ -60,7 +60,7 @@ def parse_listing_snapshots(html: str) -> list:
       </dl>
 
     边界：截断到"您可能感兴趣的新房"(InterestedNewHouse)之前，排除新房推荐位。
-    注意：房天下的 tit_shop 是房源标题（含小区名），不像安居客有独立小区名字段。
+    注意：tit_shop 是营销标题（非小区名），真正的小区名在 p.add_shop a 里。
     """
     cut = html.find("InterestedNewHouse")
     main_html = html[:cut] if cut > 0 else html
@@ -69,12 +69,17 @@ def parse_listing_snapshots(html: str) -> list:
     for block in re.finditer(r'<dl class="clearfix[^"]*"[^>]*>(.*?)</dl>', main_html, re.S):
         chunk = block.group(1)
 
-        # 小区名：tit_shop 取第一个词（房天下 tit_shop 是房源标题，含小区名）
-        name_m = re.search(r'tit_shop[^>]*>(.*?)</span>', chunk, re.S)
+        # 营销标题：tit_shop
+        title = None
+        title_m = re.search(r'tit_shop[^>]*>(.*?)</span>', chunk, re.S)
+        if title_m:
+            title = re.sub(r'<[^>]+>', '', title_m.group(1)).strip() or None
+
+        # 小区名：add_shop 里的 <a> 链接（title 属性或文本）
         community_name = None
-        if name_m:
-            clean = re.sub(r'<[^>]+>', '', name_m.group(1)).strip()
-            community_name = clean.split()[0] if clean else None
+        add_m = re.search(r'add_shop[^>]*>.*?<a[^>]*>(.*?)</a>', chunk, re.S)
+        if add_m:
+            community_name = re.sub(r'<[^>]+>', '', add_m.group(1)).strip() or None
 
         # 户型+面积：tel_shop 里 "3室2厅 | 88.35㎡ | ..."
         tel_m = re.search(r'tel_shop[^>]*>(.*?)</p>', chunk, re.S)
@@ -104,6 +109,7 @@ def parse_listing_snapshots(html: str) -> list:
             ListingSnapshot(
                 house_id="",
                 community_name=community_name,
+                title=title,
                 area=area,
                 layout=layout,
                 unit_price=unit_price,

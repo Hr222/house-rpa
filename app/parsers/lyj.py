@@ -35,9 +35,15 @@ def parse_listing_snapshots(html: str) -> list:
         chunk = block.group(1)
 
         community_name = None
-        comm_m = re.search(r'href="/xq/detail/\d+[^"]*"[^>]*>(?:<[^>]+>)*\s*([^<]+)', chunk)
+        comm_m = re.search(r'href="[^"]*xq/detail/\d+[^"]*"[^>]*>(?:<[^>]+>)*\s*([^<]+)', chunk)
         if comm_m:
             community_name = _normalize_text(comm_m.group(1))
+
+        # 营销标题：p.tit a
+        title = None
+        tit_m = re.search(r'<p class="tit">\s*<a[^>]*>(.*?)</a>', chunk, re.S)
+        if tit_m:
+            title = _normalize_text(tit_m.group(1)) or None
 
         layout = None
         layout_m = re.search(r"(\d+室\d+厅)", chunk)
@@ -66,6 +72,7 @@ def parse_listing_snapshots(html: str) -> list:
             ListingSnapshot(
                 house_id="",
                 community_name=community_name,
+                title=title,
                 area=area,
                 layout=layout,
                 unit_price=unit_price,
