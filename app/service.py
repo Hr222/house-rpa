@@ -93,7 +93,8 @@ class RPAInquiryService:
         platform_codes: Optional[list[str]] = None,
     ) -> InquiryResult:
         log.info(
-            "查询小区: %s, 面积: %.1f㎡",
+            "查询城市: %s, 小区: %s, 面积: %.1f㎡",
+            request.city,
             request.community_name,
             request.area,
         )

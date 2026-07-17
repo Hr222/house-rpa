@@ -442,6 +442,67 @@ async def safe_select_and_click(
     return element
 
 
+# 连续空页阈值：达到此值则提前停止翻页，避免无效翻页浪费时间
+MAX_CONSECUTIVE_EMPTY_PAGES = 2
+
+
+def check_empty_listing_page(
+    page_no: int,
+    page_count: int,
+    consecutive_empty: int,
+    total_pages: int,
+    platform: str = "",
+) -> tuple[bool, int]:
+    """翻页采集时的空页检测（所有翻页平台共用）。
+
+    解决"total_pages 是旧计数但实际无房源"导致程序静默翻 N 页空数据
+    且无任何 warning/error 的问题。
+
+    判定逻辑：
+    - 有数据 → 重置计数器为 0，不停止。
+    - 首页空且 total_pages > 0 → log.error + 立即停止。
+      （total_pages 来自翻页器的旧计数，实际列表区为空 <!-- 无搜索结果 -->，
+       翻下去全是空的，对应贝壳"福鑫苑"场景。）
+    - 非首页空 → log.warning，计数器 +1。
+    - 连续空页 >= MAX_CONSECUTIVE_EMPTY_PAGES → log.warning + 停止。
+
+    Args:
+        page_no: 当前页码（从 1 开始）。
+        page_count: 当前页解析到的房源条数。
+        consecutive_empty: 进入本页前已连续出现的空页数。
+        total_pages: 翻页器显示的总页数。
+        platform: 平台代码，用于日志标识。
+
+    Returns:
+        (should_stop, updated_consecutive_empty)。
+    """
+    if page_count > 0:
+        return False, 0
+
+    # --- 空页 ---
+    if page_no == 1 and total_pages > 0:
+        log.error(
+            "[%s] 第 1 页 0 条房源但 total_pages=%d，"
+            "total_pages 可能是旧计数，实际无结果，停止翻页",
+            platform, total_pages,
+        )
+        return True, 1
+
+    consecutive_empty += 1
+    log.warning(
+        "[%s] 第 %d 页 0 条房源（连续空页 %d/%d）",
+        platform, page_no, consecutive_empty, MAX_CONSECUTIVE_EMPTY_PAGES,
+    )
+    if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES:
+        log.warning(
+            "[%s] 连续 %d 页空数据，停止翻页避免浪费时间",
+            platform, consecutive_empty,
+        )
+        return True, consecutive_empty
+
+    return False, consecutive_empty
+
+
 async def click_area_segment(
     page, area: float, parse_func, platform_code: str
 ) -> Optional[tuple[float, float]]:

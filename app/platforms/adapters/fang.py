@@ -37,6 +37,7 @@ from app.platforms.base import (
     click_area_segment,
     short_circuit_result,
     community_name_match,
+    check_empty_listing_page,
 )
 
 log = logging.getLogger(__name__)
@@ -273,6 +274,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, d
     page_counts: list[tuple[int, int]] = []
     page_files: list[Optional] = []
     last_html = first_page_html
+    consecutive_empty = 0
 
     for page_no in range(1, total_pages + 1):
         if page_no > 1:
@@ -294,6 +296,12 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, d
 
         count = last_html.count("元/㎡")
         page_counts.append((page_no, count))
+
+        # 空页检测：首页空→error+停止，连续空页≥2→warning+停止
+        should_stop, consecutive_empty = check_empty_listing_page(
+            page_no, count, consecutive_empty, total_pages, platform="fang")
+        if should_stop:
+            break
 
     merged_html = "\n".join(all_html_parts)
     return merged_html, page_counts, page_files, last_html

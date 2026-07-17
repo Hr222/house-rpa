@@ -19,6 +19,9 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 - 分层:`api → runtime → service → platform adapter → parser/algorithm`。
 - 平台适配器统一继承 `app/platforms/base.py:PlatformAdapter`。
 - 最终取值走 `app/core/algorithm.py:decide()`,**纯函数,所有平台共用**。
+- 多城市支持:`app/platforms/city_map.py` 维护 5 平台 × 广东 21 城 URL 前缀映射,
+  各 adapter `collect()` / `reset_to_start_page()` 接收 `city` 参数,
+  薄壳在采集前调 `check_city_support()` + `ensure_city_navigated()` 确保城市正确。
 
 ## 3. ★ 业务流程不可擅改(最高约束)
 
@@ -82,6 +85,13 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 - 与安居客同理:**无成交记录**,业务上用**小区均价顶替 `deal_prices`**。
 - 搜索走 URL 参数(`/esf/?c={小区名}`),不走输入框回车。
 
+### 多城市支持(已落地)
+- API 入参 `city` 为**必填**(城市, 小区, 面积三要素)。
+- `app/platforms/city_map.py` 维护显式映射表(各平台 URL 前缀命名规则不统一,不能规则推导)。
+- 各平台城市覆盖数:**ajk 21/21、fang 21/21、ke 12/21、lj 10/21、lyj 9/21**。
+- 平台不支持城市时:跳过询价只做保活刷新,返回 `NO_DATA`;全部平台都不支持时 note="不支持该城市"。
+- 城市切换:薄壳 `collect()` 中先 `ensure_city_navigated()` 检查域名,不同城才导航,避免错误城市搜索。
+
 ## 6. 编码风格
 
 - 每个文件头部 `# -*- coding: utf-8 -*-` + 简短 docstring。
@@ -107,6 +117,8 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 | `app/api.py` | FastAPI 接口 | 低 |
 | `app/core/models.py` | 数据模型(平台无关) | 低 |
 | `app/parsers/<code>.py` | 各平台 HTML 解析(纯函数,独立单测) | 跟随各平台页面变化 |
+| `app/platforms/base.py` | 平台适配器基类+通用函数(风控/点击/面积筛选/城市检查/城市导航/空页检测) | 低,通用能力沉淀 |
+| `app/platforms/city_map.py` | 跨平台城市映射表(5平台×广东21城URL前缀) | 新城市/新平台接入时 |
 | `app/platforms/adapters/ke.py` | 贝壳采集 | 跟随贝壳页面变化 |
 | `app/platforms/adapters/ajk.py` | 安居客采集 | 跟随安居客页面变化 |
 | `app/platforms/adapters/lj.py` | 链家采集 | 跟随链家页面变化 |
