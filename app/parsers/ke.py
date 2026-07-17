@@ -214,16 +214,30 @@ def parse_listing_prices(html: str) -> List[float]:
 
 
 def find_detail_link(html: str) -> Optional[str]:
-    """提取搜索结果页里的小区详情链接。"""
+    """提取搜索结果页里的小区详情链接。
+
+    三层匹配策略（不依赖 class/href 属性顺序，不依赖特定城市子域名）：
+    1. BeautifulSoup CSS 选择器 a.agentCardResblockLink（最可靠）
+    2. 正则匹配整个 <a> 标签再单独提取 href（兜底无 bs4 场景）
+    3. 通过"查看小区详情"文本匹配，支持任意城市子域名（\\w+.ke.com）
+    """
+    if _HAS_BS4:
+        soup = BeautifulSoup(html, "html.parser")
+        el = soup.select_one("a.agentCardResblockLink")
+        if el and el.get("href"):
+            return el["href"]
+
     m = re.search(
-        r'<a[^>]*class="[^"]*agentCardResblockLink[^"]*"[^>]*href="([^"]+)"',
+        r'<a[^>]*class="[^"]*agentCardResblockLink[^"]*"[^>]*>',
         html or "",
     )
     if m:
-        return m.group(1)
+        href_m = re.search(r'href="([^"]+)"', m.group(0))
+        if href_m:
+            return href_m.group(1)
 
     m = re.search(
-        r'<a[^>]*href="(https?://sz\.ke\.com/xiaoqu/\d+/)"[^>]*>查看小区详情',
+        r'<a[^>]*href="(https?://[\w.]+\.ke\.com/xiaoqu/\d+/)"[^>]*>查看小区详情',
         html or "",
     )
     return m.group(1) if m else None

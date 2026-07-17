@@ -30,6 +30,25 @@ def parse_current_page(html: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+def find_deal_link(html: str) -> Optional[str]:
+    """从详情页 HTML 中提取成交页链接。
+
+    DOM:
+      <a href="//xxx.fang.com/loupan/123456/chengjiao/">成交记录</a>
+
+    Returns:
+        完整成交页 URL（补全 https: 前缀），未找到返回 None。
+    """
+    m = re.search(
+        r'href=["\'](//[^"\']+?/loupan/\d+/chengjiao/[^"\']*)["\']',
+        html or "",
+    )
+    if not m:
+        return None
+    raw = m.group(1)
+    return f"https:{raw}" if raw.startswith("//") else raw
+
+
 def parse_listing_snapshots(html: str) -> list:
     """从主结果区提取在售房源快照。
 

@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import re
 import time
 from typing import Optional
 
@@ -407,12 +406,8 @@ async def _navigate_and_parse_deals(detail_tab, main_page, area_min: float, area
         await detail_tab
         await _dump(detail_tab, "fang_detail")
         detail_html = await detail_tab.get_content()
-        deal_match = re.search(
-            r'href=["\'](//[^"\']+?/loupan/\d+/chengjiao/[^"\']*)["\']',
-            detail_html,
-        )
-        if deal_match:
-            deal_url = f"https:{deal_match.group(1)}" if deal_match.group(1).startswith("//") else deal_match.group(1)
+        deal_url = parsers.find_deal_link(detail_html)
+        if deal_url:
             log.info("导航到成交页: %s", deal_url)
             await detail_tab.get(deal_url)
             await detail_tab

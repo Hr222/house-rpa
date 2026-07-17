@@ -25,7 +25,6 @@ from app.platforms.base import (
     community_name_match,
     check_empty_listing_page,
 )
-from app.platforms.ke_constants import AREA_SEGMENTS, START_URL
 from app.platforms.city_map import get_start_url
 
 log = logging.getLogger(__name__)
