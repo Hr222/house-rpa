@@ -309,6 +309,49 @@ def community_name_match(request_name: str, page_name: str) -> bool:
     return longest >= 3
 
 
+def filter_snapshots_by_community(snapshots: list, community_name: str) -> list:
+    """按小区名过滤在售房源快照，剔除宽匹配搜索混入的无关小区数据。
+
+    lj/fang 等平台关键词搜索是宽匹配，翻页后会混入大量非目标小区的房源。
+    本函数在解析完 merged_html 后统一过滤，只保留 community_name_match 的快照。
+
+    Args:
+        snapshots: parse_listing_snapshots 返回的 ListingSnapshot 列表。
+        community_name: 请求的目标小区名。
+
+    Returns:
+        过滤后的 ListingSnapshot 列表（保持原顺序）。
+    """
+    return [
+        s for s in snapshots
+        if community_name_match(community_name, s.community_name or "")
+    ]
+
+
+def check_page_community_match_rate(
+    snapshots: list, community_name: str
+) -> float:
+    """计算本页快照中匹配目标小区的比例（翻页兜底机制用）。
+
+    复用 community_name_match 判断每条快照是否匹配目标小区。
+    翻页时连续 N 页匹配率为 0 → 关键词搜索是宽匹配，停止翻页避免白跑。
+
+    Args:
+        snapshots: parse_listing_snapshots 返回的 ListingSnapshot 列表。
+        community_name: 请求的目标小区名。
+
+    Returns:
+        匹配率 0.0~1.0。snapshots 为空返回 0.0。
+    """
+    if not snapshots:
+        return 0.0
+    matched = sum(
+        1 for s in snapshots
+        if community_name_match(community_name, s.community_name or "")
+    )
+    return matched / len(snapshots)
+
+
 async def wait_and_reload_after_block(tab, detect_func, label: str = "页面") -> str:
     """详情/成交页被风控时的统一处理：检测 → 等人回车 → 重取，最多 2 次。
 

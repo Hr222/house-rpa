@@ -155,6 +155,12 @@ def parse_listing_snapshots(html: str) -> List[ListingSnapshot]:
             if community_el:
                 community_name = _normalize_text(community_el.get_text(" ", strip=True))
 
+            # 营销标题
+            title = None
+            title_el = li.select_one(".title a")
+            if title_el:
+                title = _normalize_text(title_el.get_text(" ", strip=True))
+
             house_info_text = ""
             house_info_el = li.select_one(".houseInfo")
             if house_info_el:
@@ -170,6 +176,7 @@ def parse_listing_snapshots(html: str) -> List[ListingSnapshot]:
                 ListingSnapshot(
                     house_id=house_id,
                     community_name=community_name,
+                    title=title,
                     area=_extract_area(house_info_text),
                     layout=_extract_layout(house_info_text),
                     unit_price=unit_price,

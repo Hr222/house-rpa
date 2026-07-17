@@ -41,6 +41,8 @@ from app.platforms.base import (
     safe_select_and_click,
     short_circuit_result,
     community_name_match,
+    filter_snapshots_by_community,
+    check_page_community_match_rate,
     check_empty_listing_page,
 )
 from app.platforms.lj_constants import START_URL
@@ -426,6 +428,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
     page_counts: list[tuple[int, int]] = []
     last_html = first_page_html
     consecutive_empty = 0
+    consecutive_no_match = 0
 
     # 注意：用 while 而非 for range。风控后重新锁定小区会把浏览器带回第 1 页，
     # 必须把 page_no 重置成 1 才能从第 1 页重新翻起；for range 的循环变量赋值会被
@@ -472,9 +475,22 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
         if page_no > 1:
             all_html_parts[-1] = _cut_main(last_html)
 
-        count = len(parsers.parse_listing_snapshots(_cut_main(last_html)))
+        page_snaps = parsers.parse_listing_snapshots(_cut_main(last_html))
+        count = len(page_snaps)
         page_counts.append((page_no, count))
         log.info("第 %d 页在售: %d 条", page_no, count)
+
+        # 翻页兜底：连续 2 页无匹配小区 → 关键词搜索是宽匹配，停止翻页
+        if community_name and page_snaps:
+            match_rate = check_page_community_match_rate(page_snaps, community_name)
+            if match_rate == 0:
+                consecutive_no_match += 1
+                log.warning("第 %d 页无匹配小区 %s (连续 %d 页)", page_no, community_name, consecutive_no_match)
+                if consecutive_no_match >= 2:
+                    log.warning("连续 %d 页无匹配小区，停止翻页", consecutive_no_match)
+                    break
+            else:
+                consecutive_no_match = 0
 
         # 空页检测：首页空→error+停止，连续空页≥2→warning+停止
         should_stop, consecutive_empty = check_empty_listing_page(
@@ -742,8 +758,16 @@ async def _do_collect(
     merged_html, page_counts = await _collect_listing_pages(main_page, area_html, total_pages, community_name)
     log.info("在售分页完成: 每页 %s", page_counts)
 
-    # 6. 解析在售房源
+    # 6. 解析在售房源 + 按小区名过滤（lj 关键词搜索是宽匹配，翻页后会混入无关小区）
     snapshots = parsers.parse_listing_snapshots(merged_html)
+    filtered = filter_snapshots_by_community(snapshots, community_name)
+    log.info("在售房源过滤: 总 %d 条 → 匹配小区 %s %d 条", len(snapshots), community_name, len(filtered))
+    if not filtered:
+        return short_circuit_result(
+            "链家", "NO_DATA", f"面积筛选后未匹配到小区: {community_name}",
+            request_id, started_at,
+        )
+    snapshots = filtered
     quote_prices = [s.unit_price for s in snapshots if s.unit_price]
     if not quote_prices:
         return short_circuit_result(

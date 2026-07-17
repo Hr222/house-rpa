@@ -49,6 +49,11 @@ CALLBACK_URL = os.getenv("RPA_CALLBACK_URL") or None
 # 客户端主要靠回调拿结果，GET 只是偶发兜底，故设下限。
 GET_INQUIRY_MIN_INTERVAL = float(os.getenv("RPA_GET_MIN_INTERVAL", "10"))
 
+# ===== 钉钉机器人通知 =====
+# 群机器人 webhook 地址（完整 URL），未配置则不发送通知。
+# 安全设置建议用"自定义关键词"（关键词设为"风控"或"RPA"），无需加签。
+DINGTALK_WEBHOOK_URL = os.getenv("DINGTALK_WEBHOOK_URL") or None
+
 # ===== 风控规避 =====
 DETAIL_TAB_LINGER_SECONDS = 15
 REQUEST_TIMEOUT = 30
