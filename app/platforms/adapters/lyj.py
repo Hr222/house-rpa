@@ -33,6 +33,7 @@ from app.platforms.base import (
     short_circuit_result,
     community_name_match,
     wait_and_reload_after_block,
+    check_empty_listing_page,
 )
 
 log = logging.getLogger(__name__)
@@ -255,6 +256,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
     """逐页采集在售房源快照。"""
     all_snapshots: list[ListingSnapshot] = []
     last_html = first_page_html
+    consecutive_empty = 0
 
     for page_no in range(1, total_pages + 1):
         if page_no > 1:
@@ -267,6 +269,12 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
         page_snapshots = parsers.parse_listing_snapshots(last_html)
         all_snapshots.extend(page_snapshots)
         log.info("乐有家第 %d/%d 页: %d 条", page_no, total_pages, len(page_snapshots))
+
+        # 空页检测：首页空→error+停止，连续空页≥2→warning+停止
+        should_stop, consecutive_empty = check_empty_listing_page(
+            page_no, len(page_snapshots), consecutive_empty, total_pages, platform="lyj")
+        if should_stop:
+            break
 
     return all_snapshots, last_html
 

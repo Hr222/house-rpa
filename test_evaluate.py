@@ -21,23 +21,51 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # ─── 配置 ──────────────────────────────────────────────
 BASE_URL = "http://127.0.0.1:8000"
-INPUT_FILE = "C:/Users/Administrator/Desktop/房产评估汇总表.xlsx"
+INPUT_FILE = "C:/Users/Administrator/Desktop/房产评估汇总表_生成.xlsx"
 OUTPUT_DIR = Path(__file__).parent / "results"
 POLL_INTERVAL = 6       # 轮询间隔秒数（>5 避免连续 429）
 MAX_WAIT = 600          # 单任务最长等待秒数（10 分钟，fang 最多翻 10 页约 70s）
-CITY = "深圳"            # 询价城市（评估表无城市列，统一用一个城市）
+DEFAULT_CITY = "广州"    # Excel 无 city 列时的默认城市
 
 # ─── 读取评估表 ─────────────────────────────────────────
 wb_in = openpyxl.load_workbook(INPUT_FILE)
 ws_in = wb_in.active
 
-# 表头: 面积㎡ | 评估单价 | 房产评估总值 | 小区名称
+# 读取表头，建立列名→列号映射
+col_map = {}
+for c in range(1, ws_in.max_column + 1):
+    h = ws_in.cell(row=1, column=c).value
+    if h:
+        col_map[str(h).strip()] = c
+
+city_col = col_map.get("city")
+area_col = col_map.get("面积㎡", 1)
+price_col = col_map.get("评估单价", 2)
+community_col = col_map.get("小区名称", 4)
+last_data_col = max(col_map.values()) if col_map else 4
+out_start_col = last_data_col + 1  # 对比列起始位置
+
+if city_col:
+    print(f"[city] 检测到 city 列（第 {city_col} 列），将逐行读取城市")
+else:
+    print(f"[city] 未检测到 city 列，使用默认城市: {DEFAULT_CITY}")
+
+# 表头列名: city? | 面积㎡ | 评估单价 | 房产评估总值 | 小区名称 | ...
 data = []
-for row in ws_in.iter_rows(min_row=2, values_only=True):
-    area, eval_price, _, community, *_ = row
+for row_idx in range(2, ws_in.max_row + 1):
+    community = ws_in.cell(row=row_idx, column=community_col).value
+    area = ws_in.cell(row=row_idx, column=area_col).value
+    eval_price = ws_in.cell(row=row_idx, column=price_col).value
     if not community or not area or not eval_price:
         continue
+    city = None
+    if city_col:
+        city = ws_in.cell(row=row_idx, column=city_col).value
+        city = str(city).strip() if city else ""
+    if not city:
+        city = DEFAULT_CITY
     data.append({
+        "city": city,
         "community": str(community).strip(),
         "area": float(area),
         "eval_price": float(eval_price),
@@ -59,14 +87,15 @@ for i, item in enumerate(data):
     community = item["community"]
     area = item["area"]
     eval_price = item["eval_price"]
+    city = item["city"]
 
-    print(f"\n[{i+1}/{len(data)}] {community} 面积={area}㎡ 评估单价={eval_price}")
+    print(f"\n[{i+1}/{len(data)}] {city} {community} 面积={area}㎡ 评估单价={eval_price}")
 
     # 创建询价任务（503 时等待后重试）
     for retry in range(6):
         r = requests.post(
             f"{BASE_URL}/inquiries",
-            json={"city": CITY, "communityName": community, "area": area},
+            json={"city": city, "communityName": community, "area": area},
         )
         if r.status_code == 202:
             break
@@ -195,7 +224,7 @@ green_font = Font(color="008000")
 
 add_headers = ["询价单价", "差距比例%", "是否采用售均价"]
 for j, h in enumerate(add_headers):
-    cell = ws.cell(row=1, column=5 + j, value=h)
+    cell = ws.cell(row=1, column=out_start_col + j, value=h)
     cell.font = header_font
     cell.fill = header_fill
     cell.alignment = Alignment(horizontal="center")
@@ -205,16 +234,16 @@ for j, h in enumerate(add_headers):
 for i, r in enumerate(results):
     row = i + 2
 
-    # E: 询价单价
-    cell = ws.cell(row=row, column=5, value=r["询价单价"])
+    # 询价单价
+    cell = ws.cell(row=row, column=out_start_col, value=r["询价单价"])
     cell.border = thin_border
     cell.alignment = Alignment(horizontal="center")
     if r["询价单价"]:
         cell.number_format = '#,##0.00'
 
-    # F: 差距比例%
+    # 差距比例%
     diff = r["差距%"]
-    cell = ws.cell(row=row, column=6, value=diff if diff is not None else "N/A")
+    cell = ws.cell(row=row, column=out_start_col + 1, value=diff if diff is not None else "N/A")
     cell.border = thin_border
     cell.alignment = Alignment(horizontal="center")
     if diff is not None:
@@ -224,18 +253,21 @@ for i, r in enumerate(results):
         elif abs(diff) <= 5:
             cell.font = green_font
 
-    # G: 是否采用售均价
-    cell = ws.cell(row=row, column=7, value=r["分支"])
+    # 是否采用售均价
+    cell = ws.cell(row=row, column=out_start_col + 2, value=r["分支"])
     cell.border = thin_border
     cell.alignment = Alignment(horizontal="center")
 
 # 列宽
-for col_letter, width in [("E", 14), ("F", 14), ("G", 28)]:
+from openpyxl.utils import get_column_letter
+for j, width in enumerate([14, 14, 28]):
+    col_letter = get_column_letter(out_start_col + j)
     ws.column_dimensions[col_letter].width = width
 
 # 汇总行
 summary_row = len(results) + 3
-ws.cell(row=summary_row, column=4, value="汇总").font = Font(bold=True)
+summary_col = community_col
+ws.cell(row=summary_row, column=summary_col, value="汇总").font = Font(bold=True)
 
 valid_diffs = [r["差距%"] for r in results if r["差距%"] is not None]
 if valid_diffs:
@@ -243,11 +275,11 @@ if valid_diffs:
     max_diff = max(valid_diffs)
     min_diff = min(valid_diffs)
     within_10 = sum(1 for d in valid_diffs if abs(d) <= 10)
-    ws.cell(row=summary_row, column=5, value=f"有效: {len(valid_diffs)}/{len(results)} 条")
-    ws.cell(row=summary_row + 1, column=5, value=f"平均偏差: {avg_diff:.2f}%")
-    ws.cell(row=summary_row + 2, column=5, value=f"最大偏差: {max_diff:.2f}%")
-    ws.cell(row=summary_row + 3, column=5, value=f"最小偏差: {min_diff:.2f}%")
-    ws.cell(row=summary_row + 4, column=5, value=f"偏差≤10%: {within_10}/{len(valid_diffs)} 条")
+    ws.cell(row=summary_row, column=out_start_col, value=f"有效: {len(valid_diffs)}/{len(results)} 条")
+    ws.cell(row=summary_row + 1, column=out_start_col, value=f"平均偏差: {avg_diff:.2f}%")
+    ws.cell(row=summary_row + 2, column=out_start_col, value=f"最大偏差: {max_diff:.2f}%")
+    ws.cell(row=summary_row + 3, column=out_start_col, value=f"最小偏差: {min_diff:.2f}%")
+    ws.cell(row=summary_row + 4, column=out_start_col, value=f"偏差≤10%: {within_10}/{len(valid_diffs)} 条")
 
 wb_in.save(out_path)
 print(f"\n✅ 结果已保存: {out_path}")

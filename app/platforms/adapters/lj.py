@@ -41,6 +41,7 @@ from app.platforms.base import (
     safe_select_and_click,
     short_circuit_result,
     community_name_match,
+    check_empty_listing_page,
 )
 from app.platforms.lj_constants import START_URL
 from app.platforms.city_map import get_start_url
@@ -424,6 +425,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
     all_html_parts: list[str] = [_cut_main(first_page_html)]
     page_counts: list[tuple[int, int]] = []
     last_html = first_page_html
+    consecutive_empty = 0
 
     # 注意：用 while 而非 for range。风控后重新锁定小区会把浏览器带回第 1 页，
     # 必须把 page_no 重置成 1 才能从第 1 页重新翻起；for range 的循环变量赋值会被
@@ -473,6 +475,12 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
         count = len(parsers.parse_listing_snapshots(_cut_main(last_html)))
         page_counts.append((page_no, count))
         log.info("第 %d 页在售: %d 条", page_no, count)
+
+        # 空页检测：首页空→error+停止，连续空页≥2→warning+停止
+        should_stop, consecutive_empty = check_empty_listing_page(
+            page_no, count, consecutive_empty, total_pages, platform="lj")
+        if should_stop:
+            break
 
         page_no += 1
 
