@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import re
@@ -310,7 +311,86 @@ async def _click_page_number(page, page_no: int) -> str:
     return await _wait_for_results_loaded(page, expected_page=page_no)
 
 
-async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
+async def _recover_community_filter(page, community_name: str) -> bool:
+    """风控恢复后重新锁定小区：点击结果页顶部小区筛选 dl 里的目标小区项。
+
+    贝壳/链家搜索结果页顶部有小区筛选 dl（<dt title="...小区在售二手房">），
+    风控跳转可能把 URL 的小区限定（rs小区名）冲掉，继续翻页会采到别的小区。
+    本函数在 dl 里找 .name 匹配目标小区的 a 标签并点击，重新锁定小区。
+
+    Returns: True 表示成功点击并重新锁定；False 表示 dl 不在或没匹配项（调用方应停止翻页保数据正确）。
+    """
+    # 用 JS 收集小区筛选 dl 内所有候选 {name, href}，Python 侧匹配后按 href 点击对应 a
+    js = """
+    (() => {
+        const dt = document.querySelector('dt[title*="小区在售二手房"]');
+        if (!dt) return JSON.stringify({ok: false, reason: 'NO_DL'});
+        const dl = dt.closest('dl');
+        if (!dl) return JSON.stringify({ok: false, reason: 'NO_DL'});
+        const items = [];
+        dl.querySelectorAll('a').forEach(a => {
+            const nameSpan = a.querySelector('.name');
+            if (nameSpan) items.push({name: nameSpan.textContent.trim(), href: a.getAttribute('href') || ''});
+        });
+        return JSON.stringify({ok: true, items: items});
+    })()
+    """
+    try:
+        raw = await page.evaluate(js, return_by_value=True)
+    except Exception as exc:
+        log.warning("重新锁定小区时读筛选区失败: %s", exc)
+        return False
+
+    try:
+        data = json.loads(raw) if raw else {}
+    except Exception:
+        data = {}
+    if not data.get("ok"):
+        log.info("小区筛选 dl 不存在或为空，无法重新锁定")
+        return False
+
+    items = data.get("items") or []
+    # 用 community_name_match 找匹配目标小区的项
+    target = None
+    for it in items:
+        if community_name_match(community_name, it.get("name", "")):
+            target = it
+            break
+    if target is None:
+        log.info("小区筛选 dl 候选 %s 与目标 %r 不匹配，不点击", items, community_name)
+        return False
+
+    # 按目标 href 定位 a 并点击（href 形如 /ershoufang/c{id}rs{小区}/）
+    href = target.get("href", "")
+    el = None
+    # 优先用小区 id 段（c{数字}rs）定位，唯一且不受 URL 编码影响
+    cid_match = re.search(r"/c(\d+)rs", href)
+    locator = f"/c{cid_match.group(1)}rs" if cid_match else href[-40:]
+    if locator:
+        try:
+            el = await page.select(f'a[href*="{locator}"]', timeout=3)
+        except Exception:
+            el = None
+    if el is None:
+        # 兜底：用文本找 a
+        try:
+            el = await page.find(target.get("name", ""), timeout=3)
+        except Exception:
+            el = None
+    if el is None:
+        log.warning("匹配到筛选项 %r 但定位不到可点击元素", target)
+        return False
+
+    clicked = await _human_click(page, el, f"重新锁定小区 {target.get('name')}")
+    if clicked:
+        await page
+        await asyncio.sleep(3)
+        log.info("已点击重新锁定小区: %s", target.get("name"))
+        return True
+    return False
+
+
+async def _collect_listing_pages(page, first_page_html: str, total_pages: int, community_name: str = ""):
     all_records: dict[str, float] = {}
     all_snapshots: dict[str, ListingSnapshot] = {}
     last_html = first_page_html
@@ -321,6 +401,21 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
 
             # 翻页后风控兜底（检测→等人回车→重取，最多2次；不重新点页码避免再触发验证码）
             last_html = await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页")
+
+            # 风控恢复后验证小区限定是否还在（风控跳转可能冲掉查询条件）
+            if community_name:
+                page_snaps = parsers.parse_listing_snapshots(last_html)
+                if page_snaps and not any(
+                    community_name_match(community_name, s.community_name or "")
+                    for s in page_snaps
+                ):
+                    # 限定丢失，尝试点小区筛选 dl 重新锁定
+                    if await _recover_community_filter(page, community_name):
+                        log.info("第 %d 页风控后重新锁定小区 %s", page_no, community_name)
+                        last_html = await page.get_content()
+                    else:
+                        log.warning("第 %d 页风控后小区限定丢失且无法恢复，停止翻页保数据正确", page_no)
+                        break
 
         await human_linger(page, page_no)
         last_html = await page.get_content()
@@ -628,6 +723,7 @@ async def _do_collect(
         main_page,
         filtered_html,
         total_pages,
+        community_name,
     )
     all_listing_prices.extend(list(listing_map.values()))
     all_listing_snapshots.update(listing_snapshots)

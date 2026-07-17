@@ -311,7 +311,7 @@ async def _recover_community_filter(page, community_name: str) -> bool:
     # 用 JS 收集小区筛选 dl 内所有候选 {name, href}，Python 侧匹配后按 href 点击对应 a
     js = """
     (() => {
-        const dt = document.querySelector('dt[title="深圳小区在售二手房"]');
+        const dt = document.querySelector('dt[title*="小区在售二手房"]');
         if (!dt) return JSON.stringify({ok: false, reason: 'NO_DL'});
         const dl = dt.closest('dl');
         if (!dl) return JSON.stringify({ok: false, reason: 'NO_DL'});
