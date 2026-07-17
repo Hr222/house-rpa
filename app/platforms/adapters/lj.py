@@ -51,11 +51,12 @@ log = logging.getLogger(__name__)
 
 # 验证码 HTML 特征（基于真实 dump：hip.lianjia.com/captcha 页面）
 # hip 安全中心 + 极验 geetest SDK，链家与贝壳共用同一套安全系统
+# 注意：只留验证码页专属标识。"贝壳信息安全中心"(页脚版权)和
+# "hip-static"(静态资源路径)在正常结果页也存在，曾导致正常页误判成
+# 验证码（见 2026-07-17 中海怡翠山庄 case），已移除。
 _CAPTCHA_MARKERS = (
-    "<title>CAPTCHA</title>",       # 页面 title
-    "贝壳信息安全中心",              # 页脚（链家验证码页用贝壳安全中心署名，共用铁证）
+    "<title>CAPTCHA</title>",       # 验证码页 title（铁证，正常页不会有）
     "captcha.lianjia.com",          # window.captchaEndpoint JS 变量
-    "hip-static",                    # favicon ljcdn.com/hip-static
     'alt="CAPTCHA"',                 # <img class="bg" alt="CAPTCHA">
 )
 
@@ -580,10 +581,10 @@ async def _do_collect(
 
     # 4. 面积筛选（动态读取页面档位，点击对应区间链接）
     area_range = await click_area_segment(main_page, area, parsers.parse_area_segments, "lj")
-    await _dump(main_page, "lj_after_area")
-
+    # 面积筛选后风控兜底（检测→等人回车→重取，最多2次；和详情/翻页统一）
+    area_html = await wait_and_reload_after_block(main_page, detect_block, "面积筛选后")
     area_url = main_page.target.url or ""
-    area_html = await main_page.get_content()
+    await _dump(main_page, "lj_after_area")
 
     area_min, area_max = area_range if area_range else (area * 0.8, area * 1.2)
     log.info("[4] 面积筛选区间: %.0f~%.0f (来自档位匹配)", area_min, area_max)

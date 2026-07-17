@@ -92,12 +92,13 @@ def _is_manual_verify_html(html: str) -> bool:
     """贝壳验证码拦截页 HTML 特征（基于真实 dump 样本）。
 
     hip 安全中心 + 极验 geetest SDK，贝壳/链家共用同一套页面。
+    注意：只留验证码页专属标识。"贝壳信息安全中心"(页脚版权)和
+    "hip-static"(静态资源路径)在正常结果页也存在，曾导致正常页误判成
+    验证码（见 2026-07-17 中海怡翠山庄 case），已移除。
     """
     markers = (
-        "<title>CAPTCHA</title>",       # 页面 title
-        "贝壳信息安全中心",              # 页脚版权（贝壳链家共用安全系统铁证）
+        "<title>CAPTCHA</title>",       # 验证码页 title（铁证，正常页不会有）
         "captcha.lianjia.com",          # window.captchaEndpoint JS 变量
-        "hip-static",                    # favicon 路径 ljcdn.com/hip-static
         'alt="CAPTCHA"',                 # <img class="bg" alt="CAPTCHA">
     )
     return any(marker in (html or "") for marker in markers)
