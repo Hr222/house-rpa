@@ -563,6 +563,9 @@ async def _do_collect(
 ) -> PlatformResult:
     log.info("[5] 刷新页面（保活插口）")
     main_page = await _reset_to_start_page(main_page)
+    # 采集起点风控兜底：首页若被风控(CAPTCHA/登录失效)，阻塞等人解除后重取，
+    # 避免带着 CAPTCHA 往下走导致静默 NO_DATA
+    await wait_and_reload_after_block(main_page, detect_block, "首页")
     await _get_search_input(main_page)
     await _dump(main_page, "ke_refresh")
 

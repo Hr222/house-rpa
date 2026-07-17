@@ -31,6 +31,7 @@ from app.platforms.base import (
     click_area_segment,
     short_circuit_result,
     community_name_match,
+    wait_and_reload_after_block,
 )
 
 log = logging.getLogger(__name__)
@@ -368,6 +369,8 @@ async def _do_collect(
 ) -> PlatformResult:
     # 1. 刷新首页保活
     main_page = await reset_to_start_page(main_page)
+    # 采集起点风控兜底：首页若被风控(CAPTCHA/登录失效)，阻塞等人解除后重取
+    await wait_and_reload_after_block(main_page, detect_block, "首页")
     await _dump(main_page, "lyj_refresh")
 
     # 2. 搜索小区
