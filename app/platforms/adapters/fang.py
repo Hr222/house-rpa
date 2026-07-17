@@ -29,6 +29,7 @@ from app.utils.debug_utils import dump_html
 from app.core.models import PlatformResult
 from app.parsers import fang as parsers
 from app.platforms.fang_constants import START_URL
+from app.platforms.city_map import get_start_url
 from app.platforms.base import (
     wait_and_reload_after_block,
     human_linger,
@@ -496,9 +497,10 @@ async def _close_tab_later(tab):
         log.warning("关闭详情标签异常: %s", exc)
 
 
-async def reset_to_start_page(page):
+async def reset_to_start_page(page, city: str = "深圳"):
     """回到房天下二手房首页，并获取新的页面上下文。"""
-    refreshed_page = await page.get(START_URL)
+    url = get_start_url("fang", city)
+    refreshed_page = await page.get(url)
     await refreshed_page
     await asyncio.sleep(2)
     return refreshed_page
@@ -561,10 +563,11 @@ async def collect(
     community_name: str,
     area: float,
     request_id: Optional[str] = None,
+    city: str = "深圳",
 ) -> PlatformResult:
     """执行一次完整的房天下询价采集。"""
     start = time.time()
-    log.info("收到请求: 小区=%s 面积=%.0f㎡", community_name, area)
+    log.info("收到请求: 小区=%s 面积=%.0f㎡ 城市=%s", community_name, area, city)
     try:
         return await _do_collect(
             browser=browser,
@@ -573,6 +576,7 @@ async def collect(
             area=area,
             request_id=request_id,
             started_at=start,
+            city=city,
         )
     except Exception as exc:
         log.exception("采集异常")
@@ -593,9 +597,10 @@ async def _do_collect(
     request_id: Optional[str],
     started_at: float,
     area: float,
+    city: str = "深圳",
 ) -> PlatformResult:
     # 1. 刷新首页保活
-    main_page = await reset_to_start_page(main_page)
+    main_page = await reset_to_start_page(main_page, city)
     # 采集起点风控兜底：首页若被风控(CAPTCHA/登录失效)，阻塞等人解除后重取，
     # 避免带着 CAPTCHA 往下走导致静默 NO_DATA
     await wait_and_reload_after_block(main_page, detect_block, "首页")
@@ -664,7 +669,7 @@ async def _do_collect(
         if attempt == 1:
             log.warning("面积筛选后页数 %d→%d，小区限定可能丢失，刷新首页重试",
                          keyword_pages, area_pages)
-            main_page = await reset_to_start_page(main_page)
+            main_page = await reset_to_start_page(main_page, city)
             continue
 
         # 两次都失败

@@ -20,10 +20,12 @@ from app.platforms.base import (
     human_linger,
     _human_click,
     click_area_segment,
+    safe_select_and_click,
     short_circuit_result,
     community_name_match,
 )
 from app.platforms.ke_constants import AREA_SEGMENTS, START_URL
+from app.platforms.city_map import get_start_url
 
 log = logging.getLogger(__name__)
 
@@ -38,16 +40,17 @@ async def _dump(page, name: str):
     await dump_html(page, name, logger=log)
 
 
-async def _reset_to_start_page(page):
+async def _reset_to_start_page(page, city: str = "深圳"):
     """回到贝壳二手房首页，并获取新的页面上下文。"""
-    refreshed_page = await page.get(START_URL)
+    url = get_start_url("ke", city)
+    refreshed_page = await page.get(url)
     await refreshed_page
     await asyncio.sleep(2)
     return refreshed_page
 
 
-async def reset_to_start_page(page):
-    return await _reset_to_start_page(page)
+async def reset_to_start_page(page, city: str = "深圳"):
+    return await _reset_to_start_page(page, city)
 
 
 def _is_login_url(url: str) -> bool:
@@ -295,19 +298,23 @@ async def keepalive(main_page) -> tuple[bool, str]:
     return await probe_ready(main_page)
 
 
-async def _click_page_number(page, page_no: int) -> str:
+async def _click_page_number(page, page_no: int) -> Optional[str]:
+    """点击在售页码，返回加载完成后的 HTML；无法翻页时返回 None（优雅停止信号）。
+
+    核心逻辑（找不到按钮→风控检测→恢复重试→点击）由 base.safe_select_and_click 统一处理，
+    本函数只保留贝壳特有的点击后等待逻辑（_wait_for_results_loaded）。
+    """
     selector = f".house-lst-page-box a[data-page='{page_no}']"
-    try:
-        element = await page.select(selector, timeout=3)
-    except Exception:
-        element = None
-
-    if not element:
-        raise RuntimeError(f"未找到第 {page_no} 页页码按钮")
-
-    if not await _human_click(page, element, f"page {page_no}"):
-        raise RuntimeError(f"未能成功点击第 {page_no} 页")
-
+    element = await safe_select_and_click(
+        page, selector,
+        dump_fn=_dump,
+        dump_name=f"ke_page_{page_no}_no_button",
+        detect_fn=detect_block,
+        block_label=f"第 {page_no} 页(翻页前-按钮缺失)",
+        click_label=f"page {page_no}",
+    )
+    if element is None:
+        return None
     return await _wait_for_results_loaded(page, expected_page=page_no)
 
 
@@ -395,9 +402,19 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
     all_snapshots: dict[str, ListingSnapshot] = {}
     last_html = first_page_html
 
-    for page_no in range(1, total_pages + 1):
+    # 注意：用 while 而非 for range。风控后重新锁定小区会把浏览器带回第 1 页，
+    # 必须把 page_no 重置成 1 才能从第 1 页重新翻起；for range 的循环变量赋值会被
+    # 下一轮覆盖，无法重置，故显式 while + 末尾 page_no += 1。
+    page_no = 1
+    while page_no <= total_pages:
         if page_no > 1:
+            # 翻页前风控预检（human_linger 停留期间可能被风控，DOM 被替换成验证码页）
+            await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页(翻页前)")
+
             last_html = await _click_page_number(page, page_no)
+            if last_html is None:
+                log.warning("第 %d 页无法翻页，停止翻页保数据正确", page_no)
+                break
 
             # 翻页后风控兜底（检测→等人回车→重取，最多2次；不重新点页码避免再触发验证码）
             last_html = await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页")
@@ -412,7 +429,10 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
                     # 限定丢失，尝试点小区筛选 dl 重新锁定
                     if await _recover_community_filter(page, community_name):
                         log.info("第 %d 页风控后重新锁定小区 %s", page_no, community_name)
-                        last_html = await page.get_content()
+                        last_html = await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页(重新锁定后)")
+                        # 重新锁定会让浏览器回到该小区第 1 页，重置 page_no 从第 1 页重新翻起，
+                        # 否则当轮会把第 1 页当成本页采入、下一轮又跳 page_no+1，数据错位。
+                        page_no = 1
                     else:
                         log.warning("第 %d 页风控后小区限定丢失且无法恢复，停止翻页保数据正确", page_no)
                         break
@@ -427,6 +447,8 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
             all_records[house_id] = price
         for snapshot in page_snapshots:
             all_snapshots[snapshot.house_id] = snapshot
+
+        page_no += 1
 
     return all_records, all_snapshots, last_html
 
@@ -624,9 +646,10 @@ async def collect(
     community_name: str,
     area: float,
     request_id: Optional[str] = None,
+    city: str = "深圳",
 ) -> PlatformResult:
     start = time.time()
-    log.info("[4] 收到请求: 小区=%s 面积=%.1f㎡", community_name, area)
+    log.info("[4] 收到请求: 小区=%s 面积=%.1f㎡ 城市=%s", community_name, area, city)
     try:
         return await _do_collect(
             browser=browser,
@@ -635,6 +658,7 @@ async def collect(
             area=area,
             request_id=request_id,
             started_at=start,
+            city=city,
         )
     except Exception as exc:
         log.exception("采集异常")
@@ -655,9 +679,10 @@ async def _do_collect(
     request_id: Optional[str],
     started_at: float,
     area: float,
+    city: str = "深圳",
 ) -> PlatformResult:
     log.info("[5] 刷新页面（保活插口）")
-    main_page = await _reset_to_start_page(main_page)
+    main_page = await _reset_to_start_page(main_page, city)
     # 采集起点风控兜底：首页若被风控(CAPTCHA/登录失效)，阻塞等人解除后重取，
     # 避免带着 CAPTCHA 往下走导致静默 NO_DATA
     await wait_and_reload_after_block(main_page, detect_block, "首页")

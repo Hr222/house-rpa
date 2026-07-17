@@ -124,6 +124,55 @@ class PlatformAdapter(ABC):
         """执行轻量保活；默认直接复用 check_ready。"""
         return await self.check_ready(session)
 
+    def check_city_support(self, city: str, request_id: Optional[str] = None) -> Optional[PlatformResult]:
+        """检查平台是否支持该城市。
+
+        不支持时返回 NO_DATA 结果（含支持城市列表），支持时返回 None。
+        各薄壳适配器在 collect() 开头调用本方法，不支持则跳过采集只做保活。
+        """
+        from app.platforms.city_map import is_city_supported, CITY_MAP
+        if is_city_supported(self.code, city):
+            return None
+        supported = "、".join(sorted(CITY_MAP.get(self.code, {}).keys()))
+        reason = f"平台不支持城市「{city}」（支持: {supported}）"
+        log.warning("[%s] %s，跳过询价", self.code, reason)
+        return PlatformResult(
+            name=self.name,
+            status="NO_DATA",
+            reason=reason,
+            request_id=request_id,
+        )
+
+    async def ensure_city_navigated(self, session: PlatformSession, city: str) -> None:
+        """确保浏览器已导航到目标城市首页。
+
+        在调 adapter.collect 之前调用：如果当前页面不在目标城市域名下，
+        先导航到目标城市首页，避免在错误城市搜索导致找不到小区。
+        城市相同时跳过，减少不必要的页面刷新。
+        """
+        from urllib.parse import urlparse
+        from app.platforms.city_map import get_start_url
+
+        target_url = get_start_url(self.code, city)
+        try:
+            current_url = session.page.target.url or ""
+        except Exception:
+            current_url = ""
+
+        target_domain = urlparse(target_url).netloc   # e.g. "sz.ke.com"
+        current_domain = urlparse(current_url).netloc if current_url else ""
+
+        if target_domain == current_domain:
+            log.info("[%s] 当前已在城市「%s」(%s)，跳过导航", self.code, city, current_domain)
+            return
+
+        log.info("[%s] 城市切换: %s → %s，导航到 %s",
+                 self.code, current_domain or "未知", city, target_url)
+        page = await session.page.get(target_url)
+        await page
+        await asyncio.sleep(2)
+        session.page = page
+
     @abstractmethod
     def detect_block(self, url: str, html: str) -> tuple[bool, str]:
         """检测当前页面是否被风控/登录拦截。"""
@@ -338,6 +387,59 @@ async def _human_click(page, element, label: str) -> bool:
 
     log.warning("%s click failed: %s", label, last_error)
     return False
+
+
+async def safe_select_and_click(
+    page,
+    selector: str,
+    *,
+    dump_fn,
+    dump_name: str,
+    detect_fn,
+    block_label: str,
+    click_label: str = "",
+):
+    """通用的"安全选择+点击"：找不到元素时 dump 现场 + 风控检测 + 恢复后重试 + 点击。
+
+    封装了翻页时「select → 找不到 → dump → detect_block → wait_and_reload → retry select
+    → 仍找不到 → return None → _human_click → 点击失败 → return None」的通用逻辑。
+    各平台只需传入 selector + dump/detect 函数 + label，核心逻辑由本函数统一处理。
+
+    Args:
+        page: nodriver Tab 对象。
+        selector: CSS 选择器（含 page_no 的完整字符串）。
+        dump_fn: 各平台的 _dump 函数（导出 debug HTML）。
+        dump_name: dump 文件名前缀（如 "ke_page_3_no_button"）。
+        detect_fn: 各平台的 detect_block(url, html) -> (bool, str)。
+        block_label: 日志/风控 label（如 "第 3 页(翻页前-按钮缺失)"）。
+        click_label: 点击日志 label（如 "page 3"）。
+
+    Returns:
+        点击成功的 Element；无法找到或点击失败返回 None（优雅停止信号）。
+    """
+    try:
+        element = await page.select(selector, timeout=3)
+    except Exception:
+        element = None
+
+    if not element:
+        await dump_fn(page, dump_name)
+        # 检测风控：被风控会替换 DOM 导致找不到按钮
+        await wait_and_reload_after_block(page, detect_fn, block_label)
+        # 恢复后(或未被风控)重试找按钮
+        try:
+            element = await page.select(selector, timeout=3)
+        except Exception:
+            element = None
+        if not element:
+            log.warning("%s: 找不到按钮(风控恢复后或非风控)，停止翻页", block_label)
+            return None
+
+    if not await _human_click(page, element, click_label):
+        log.warning("%s: 点击失败，停止翻页", block_label)
+        return None
+
+    return element
 
 
 async def click_area_segment(

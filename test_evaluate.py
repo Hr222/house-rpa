@@ -25,6 +25,7 @@ INPUT_FILE = "C:/Users/Administrator/Desktop/房产评估汇总表.xlsx"
 OUTPUT_DIR = Path(__file__).parent / "results"
 POLL_INTERVAL = 6       # 轮询间隔秒数（>5 避免连续 429）
 MAX_WAIT = 600          # 单任务最长等待秒数（10 分钟，fang 最多翻 10 页约 70s）
+CITY = "深圳"            # 询价城市（评估表无城市列，统一用一个城市）
 
 # ─── 读取评估表 ─────────────────────────────────────────
 wb_in = openpyxl.load_workbook(INPUT_FILE)
@@ -65,7 +66,7 @@ for i, item in enumerate(data):
     for retry in range(6):
         r = requests.post(
             f"{BASE_URL}/inquiries",
-            json={"communityName": community, "area": area},
+            json={"city": CITY, "communityName": community, "area": area},
         )
         if r.status_code == 202:
             break
