@@ -25,7 +25,7 @@ from app.utils.debug_utils import dump_html
 from app.core.models import PlatformResult
 from app.parsers import lyj as parsers
 from app.platforms.lyj_constants import START_URL
-from app.platforms.city_map import get_start_url, get_city_prefix
+from app.platforms.city_map import get_start_url
 from app.platforms.base import (
     human_linger,
     _human_click,
@@ -103,8 +103,9 @@ async def _search_community(page, community_name: str, city: str = "深圳") -> 
 
     乐有家搜索走 URL 参数：https://{prefix}.leyoujia.com/esf/?c={community}
     """
-    prefix = get_city_prefix("lyj", city) or "shenzhen"
-    search_url = f"https://{prefix}.leyoujia.com/esf/?c={community_name}"
+    # 已由薄壳 check_city_support 确保城市支持，get_start_url 不会 ValueError
+    base_url = get_start_url("lyj", city)
+    search_url = f"{base_url}?c={community_name}"
     await page.get(search_url)
     await page
     await asyncio.sleep(3)

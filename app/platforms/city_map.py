@@ -147,14 +147,6 @@ def get_start_url(platform_code: str, city: str) -> str:
     return _URL_PATTERNS[platform_code].format(prefix=prefix)
 
 
-def get_city_prefix(platform_code: str, city: str) -> Optional[str]:
-    """获取平台在某城市的 URL 前缀，不支持时返回 None。"""
-    city_map = CITY_MAP.get(platform_code)
-    if not city_map:
-        return None
-    return city_map.get(city)
-
-
 def is_city_supported(platform_code: str, city: str) -> bool:
     """检查平台是否支持指定城市。"""
     city_map = CITY_MAP.get(platform_code)
