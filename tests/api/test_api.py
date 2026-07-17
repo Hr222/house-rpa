@@ -67,6 +67,12 @@ class FakeRuntime:
                 "requestId": request.request_id or "task-1",
             },
             "result": {
+                "success": True,
+                "finalPrice": 71086.5,
+                "branchCode": "TAKE_LOWER",
+                "branch": "差异在阈值内，取较低值",
+                "quoteAvg": 85635.0,
+                "dealAvg": 71086.5,
                 "data": {
                     "quoteAvg": 85635.0,
                     "dealAvg": 71086.5,
@@ -141,6 +147,10 @@ def test_confirm_ready_then_create_and_query_inquiry():
         "quoteAvg": 85635.0,
         "dealAvg": 71086.5,
         "finalPrice": 71086.5,
+        "success": True,
+        "statusCode": "COMPLETED",
+        "branchCode": "TAKE_LOWER",
+        "branch": "差异在阈值内，取较低值",
     }
 
 

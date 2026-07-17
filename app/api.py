@@ -131,7 +131,18 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
             raise HTTPException(status_code=404, detail="未找到对应任务")
         current_runtime.register_get(task_id)
         if task["statusCode"] == "COMPLETED" and task["result"] is not None:
-            data = task["result"]["data"]
+            result = task["result"]
+            # 补状态字段：全平台 NO_DATA 时三个价格都是 None，
+            # 若只返回 data 客户端无法判断"已完成但无数据"会死等。
+            data = {
+                **result["data"],                   # quoteAvg/dealAvg/finalPrice（可能全 None）
+                "success": result["success"],       # 无数据时为 False
+                "statusCode": task["statusCode"],   # COMPLETED
+                "branchCode": result["branchCode"], # NO_DATA / TAKE_LOWER / ...
+                "branch": result["branch"],
+            }
+            if result.get("note"):                  # 各平台 NO_DATA 原因汇总
+                data["note"] = result["note"]
         else:
             data = {
                 "taskId": task["taskId"],
