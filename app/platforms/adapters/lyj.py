@@ -25,6 +25,7 @@ from app.utils.debug_utils import dump_html
 from app.core.models import PlatformResult
 from app.parsers import lyj as parsers
 from app.platforms.lyj_constants import START_URL
+from app.platforms.city_map import get_start_url, get_city_prefix
 from app.platforms.base import (
     human_linger,
     _human_click,
@@ -96,12 +97,13 @@ async def _is_interactable(element) -> bool:
 # 搜索
 # ============================================================
 
-async def _search_community(page, community_name: str) -> str:
+async def _search_community(page, community_name: str, city: str = "深圳") -> str:
     """搜索小区，返回结果页 HTML。
 
-    乐有家搜索走 URL 参数：https://shenzhen.leyoujia.com/esf/?c={community}
+    乐有家搜索走 URL 参数：https://{prefix}.leyoujia.com/esf/?c={community}
     """
-    search_url = f"https://shenzhen.leyoujia.com/esf/?c={community_name}"
+    prefix = get_city_prefix("lyj", city) or "shenzhen"
+    search_url = f"https://{prefix}.leyoujia.com/esf/?c={community_name}"
     await page.get(search_url)
     await page
     await asyncio.sleep(3)
@@ -273,9 +275,10 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int):
 # 页面复位 / 就绪检测 / 保活
 # ============================================================
 
-async def reset_to_start_page(page):
+async def reset_to_start_page(page, city: str = "深圳"):
     """回到乐有家二手房首页，并获取新的页面上下文。"""
-    refreshed_page = await page.get(START_URL)
+    url = get_start_url("lyj", city)
+    refreshed_page = await page.get(url)
     await refreshed_page
     await asyncio.sleep(2)
     return refreshed_page
@@ -334,10 +337,11 @@ async def collect(
     community_name: str,
     area: float,
     request_id: Optional[str] = None,
+    city: str = "深圳",
 ) -> PlatformResult:
     """执行一次完整的乐有家询价采集。"""
     start = time.time()
-    log.info("乐有家收到请求: 小区=%s 面积=%.0f㎡", community_name, area)
+    log.info("乐有家收到请求: 小区=%s 面积=%.0f㎡ 城市=%s", community_name, area, city)
     try:
         return await _do_collect(
             browser=browser,
@@ -346,6 +350,7 @@ async def collect(
             area=area,
             request_id=request_id,
             started_at=start,
+            city=city,
         )
     except Exception as exc:
         log.exception("乐有家采集异常")
@@ -366,15 +371,16 @@ async def _do_collect(
     request_id: Optional[str],
     started_at: float,
     area: float,
+    city: str = "深圳",
 ) -> PlatformResult:
     # 1. 刷新首页保活
-    main_page = await reset_to_start_page(main_page)
+    main_page = await reset_to_start_page(main_page, city)
     # 采集起点风控兜底：首页若被风控(CAPTCHA/登录失效)，阻塞等人解除后重取
     await wait_and_reload_after_block(main_page, detect_block, "首页")
     await _dump(main_page, "lyj_refresh")
 
     # 2. 搜索小区
-    keyword_html = await _search_community(main_page, community_name)
+    keyword_html = await _search_community(main_page, community_name, city)
     await _dump(main_page, "lyj_keyword_result")
     keyword_url = main_page.target.url or ""
 

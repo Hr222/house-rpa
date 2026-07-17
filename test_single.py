@@ -4,6 +4,7 @@
 import time, sys, requests
 
 BASE = "http://127.0.0.1:8000"
+CITY = "深圳"
 COMMUNITY = "海岸环庆大厦"
 AREA = 183.59
 
@@ -12,7 +13,7 @@ if r.status_code != 200:
     print("服务未就绪")
     sys.exit(1)
 
-r = requests.post(f"{BASE}/inquiries", json={"communityName": COMMUNITY, "area": AREA})
+r = requests.post(f"{BASE}/inquiries", json={"city": CITY, "communityName": COMMUNITY, "area": AREA})
 if r.status_code != 202:
     print(f"失败: {r.status_code} {r.text[:200]}")
     sys.exit(1)

@@ -38,10 +38,12 @@ from app.platforms.base import (
     human_linger,
     _human_click,
     click_area_segment,
+    safe_select_and_click,
     short_circuit_result,
     community_name_match,
 )
 from app.platforms.lj_constants import START_URL
+from app.platforms.city_map import get_start_url
 
 log = logging.getLogger(__name__)
 
@@ -128,7 +130,7 @@ async def _is_interactable(element) -> bool:
 # 搜索
 # ============================================================
 
-async def _search_community(page, community_name: str) -> str:
+async def _search_community(page, community_name: str, city: str = "深圳") -> str:
     """搜索小区：填搜索框 + 真人点击搜索按钮提交。
 
     DOM:
@@ -146,7 +148,7 @@ async def _search_community(page, community_name: str) -> str:
             break
         if attempt == 1:
             log.warning("未找到搜索框 #searchInput，回首页重试")
-            refreshed = await reset_to_start_page(page)
+            refreshed = await reset_to_start_page(page, city)
             await refreshed
             await asyncio.sleep(3)
             continue
@@ -382,20 +384,24 @@ async def _recover_community_filter(page, community_name: str) -> bool:
 # 在售分页采集（参考贝壳 collect_listing_pages + 风控检测）
 # ============================================================
 
-async def _click_listing_page_number(page, page_no: int) -> str:
-    """点击在售页码，返回加载完成后的 HTML。
+async def _click_listing_page_number(page, page_no: int) -> Optional[str]:
+    """点击在售页码，返回加载完成后的 HTML；无法翻页时返回 None（优雅停止信号）。
 
     DOM（和贝壳一致）：house-lst-page-box 下 a[data-page='{n}']
+    核心逻辑（找不到按钮→风控检测→恢复重试→点击）由 base.safe_select_and_click 统一处理，
+    本函数只保留链家特有的点击后等待逻辑（await page + sleep + get_content）。
     """
     selector = f".house-lst-page-box a[data-page='{page_no}']"
-    try:
-        element = await page.select(selector, timeout=3)
-    except Exception:
-        element = None
-    if not element:
-        raise RuntimeError(f"未找到第 {page_no} 页页码按钮")
-    if not await _human_click(page, element, f"listing page {page_no}"):
-        raise RuntimeError(f"未能成功点击第 {page_no} 页")
+    element = await safe_select_and_click(
+        page, selector,
+        dump_fn=_dump,
+        dump_name=f"lj_listing_page_{page_no}_no_button",
+        detect_fn=detect_block,
+        block_label=f"第 {page_no} 页(翻页前-按钮缺失)",
+        click_label=f"listing page {page_no}",
+    )
+    if element is None:
+        return None
     await page
     await asyncio.sleep(3)
     return await page.get_content()
@@ -419,11 +425,21 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
     page_counts: list[tuple[int, int]] = []
     last_html = first_page_html
 
-    for page_no in range(1, total_pages + 1):
+    # 注意：用 while 而非 for range。风控后重新锁定小区会把浏览器带回第 1 页，
+    # 必须把 page_no 重置成 1 才能从第 1 页重新翻起；for range 的循环变量赋值会被
+    # 下一轮覆盖，无法重置，故显式 while + 末尾 page_no += 1。
+    page_no = 1
+    while page_no <= total_pages:
         if page_no > 1:
             # 翻页前真人滚动停留（防风控）
             await human_linger(page, page_no)
+            # 翻页前风控预检（human_linger 停留期间可能被风控，DOM 被替换成验证码页）
+            await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页(翻页前)")
+
             last_html = await _click_listing_page_number(page, page_no)
+            if last_html is None:
+                log.warning("第 %d 页无法翻页，停止翻页保数据正确", page_no)
+                break
 
             # 翻页后风控兜底（检测→等人回车→重取，最多2次；不重新点页码避免再触发验证码）
             last_html = await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页")
@@ -438,7 +454,10 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
                     # 限定丢失，尝试点小区筛选 dl 重新锁定
                     if await _recover_community_filter(page, community_name):
                         log.info("第 %d 页风控后重新锁定小区 %s", page_no, community_name)
-                        last_html = await page.get_content()
+                        last_html = await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页(重新锁定后)")
+                        # 重新锁定会让浏览器回到该小区第 1 页，重置 page_no 从第 1 页重新翻起，
+                        # 否则当轮会把第 1 页当成本页采入、下一轮又跳 page_no+1，数据错位。
+                        page_no = 1
                     else:
                         log.warning("第 %d 页风控后小区限定丢失且无法恢复，停止翻页保数据正确", page_no)
                         break
@@ -454,6 +473,8 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
         count = len(parsers.parse_listing_snapshots(_cut_main(last_html)))
         page_counts.append((page_no, count))
         log.info("第 %d 页在售: %d 条", page_no, count)
+
+        page_no += 1
 
     merged_html = "\n".join(all_html_parts)
     return merged_html, page_counts
@@ -511,17 +532,23 @@ async def _click_detail_link(browser, page):
 # 成交页分页点击（解析在 parsers/lj.py）
 # ============================================================
 
-async def _click_deal_page_number(page, page_no: int) -> str:
-    """点击成交页页码，返回加载完成后的 HTML。"""
+async def _click_deal_page_number(page, page_no: int) -> Optional[str]:
+    """点击成交页页码，返回加载完成后的 HTML；无法翻页时返回 None（优雅停止信号）。
+
+    核心逻辑（找不到按钮→风控检测→恢复重试→点击）由 base.safe_select_and_click 统一处理，
+    本函数只保留链家特有的点击后等待逻辑（await page + sleep + get_content）。
+    """
     selector = f"a[data-page='{page_no}']"
-    try:
-        element = await page.select(selector, timeout=3)
-    except Exception:
-        element = None
-    if not element:
-        raise RuntimeError(f"未找到第 {page_no} 页页码按钮")
-    if not await _human_click(page, element, f"deal page {page_no}"):
-        raise RuntimeError(f"未能成功点击第 {page_no} 页")
+    element = await safe_select_and_click(
+        page, selector,
+        dump_fn=_dump,
+        dump_name=f"lj_deal_page_{page_no}_no_button",
+        detect_fn=detect_block,
+        block_label=f"成交第 {page_no} 页(翻页前-按钮缺失)",
+        click_label=f"deal page {page_no}",
+    )
+    if element is None:
+        return None
     await page
     await asyncio.sleep(3)
     return await page.get_content()
@@ -539,9 +566,10 @@ async def _close_tab_later(tab):
     except Exception as exc:
         log.warning("关闭详情标签异常: %s", exc)
 
-async def reset_to_start_page(page):
+async def reset_to_start_page(page, city: str = "深圳"):
     """回到链家二手房首页，并获取新的页面上下文。"""
-    refreshed_page = await page.get(START_URL)
+    url = get_start_url("lj", city)
+    refreshed_page = await page.get(url)
     await refreshed_page
     await asyncio.sleep(2)
     return refreshed_page
@@ -611,10 +639,11 @@ async def collect(
     community_name: str,
     area: float,
     request_id: Optional[str] = None,
+    city: str = "深圳",
 ) -> PlatformResult:
     """执行一次完整的链家询价采集。"""
     start = time.time()
-    log.info("收到请求: 小区=%s 面积=%.0f㎡", community_name, area)
+    log.info("收到请求: 小区=%s 面积=%.0f㎡ 城市=%s", community_name, area, city)
     try:
         return await _do_collect(
             browser=browser,
@@ -623,6 +652,7 @@ async def collect(
             area=area,
             request_id=request_id,
             started_at=start,
+            city=city,
         )
     except Exception as exc:
         log.exception("采集异常")
@@ -643,19 +673,20 @@ async def _do_collect(
     request_id: Optional[str],
     started_at: float,
     area: float,
+    city: str = "深圳",
 ) -> PlatformResult:
     def _elapsed():
         return round(time.time() - started_at, 2)
 
     # 1. 刷新首页保活
-    main_page = await reset_to_start_page(main_page)
+    main_page = await reset_to_start_page(main_page, city)
     # 采集起点风控兜底：首页若被风控(CAPTCHA/登录失效)，阻塞等人解除后重取，
     # 避免带着 CAPTCHA 往下走导致找不到搜索框→RuntimeError→整单ERROR→服务503
     await wait_and_reload_after_block(main_page, detect_block, "首页")
     await _dump(main_page, "lj_refresh")
 
     # 2. 搜索小区
-    keyword_html = await _search_community(main_page, community_name)
+    keyword_html = await _search_community(main_page, community_name, city)
     # 搜索后风控兜底（搜索是最易触发风控的环节，带关键词请求）
     keyword_html = await wait_and_reload_after_block(main_page, detect_block, "搜索后")
     keyword_url = main_page.target.url or ""
@@ -750,11 +781,14 @@ async def _do_collect(
                     all_deals: list = []
                     for deal_page_no in range(1, total_deal_pages + 1):
                         if deal_page_no > 1:
-                            try:
-                                page_html = await _click_deal_page_number(deal_tab2, deal_page_no)
-                            except Exception as exc:
-                                log.warning("翻到成交第 %d 页失败: %s", deal_page_no, exc)
+                            # 翻页前风控预检
+                            await wait_and_reload_after_block(deal_tab2, detect_block, f"成交第 {deal_page_no} 页(翻页前)")
+                            page_html = await _click_deal_page_number(deal_tab2, deal_page_no)
+                            if page_html is None:
+                                log.warning("成交第 %d 页无法翻页，停止翻页", deal_page_no)
                                 break
+                            # 翻页后风控兜底
+                            page_html = await wait_and_reload_after_block(deal_tab2, detect_block, f"成交第 {deal_page_no} 页")
                         else:
                             page_html = first_deal_html
 

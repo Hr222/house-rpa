@@ -16,9 +16,9 @@ from app.runtime import RPARuntime
 
 
 class InquiryCreatePayload(BaseModel):
+    city: str = Field(..., min_length=1, description="城市名（如 深圳、广州）")
     community_name: str = Field(..., min_length=1, alias="communityName")
     area: float = Field(..., gt=0, alias="area")
-    city: str = "深圳"
     request_id: Optional[str] = Field(default=None, alias="requestId")
 
     model_config = {
