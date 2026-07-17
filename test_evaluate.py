@@ -110,10 +110,11 @@ for i, item in enumerate(data):
             print(f"  完成 ({elapsed}s)")
             break
 
-        # task 已完成但没 finalPrice（全平台 NO_DATA，branch=FAILED）
+        # task 已完成但没 finalPrice（全平台 NO_DATA，branch=NO_DATA）
         status_code = body.get("statusCode", body.get("status", ""))
         if status_code in ("COMPLETED", "FAILED"):
-            note = body.get("branch", body.get("error", "无数据"))
+            # 优先显示各平台无数据原因汇总（note），其次分支，最后 error
+            note = body.get("note") or body.get("branch") or body.get("error", "无数据")
             final_data = body
             print(f"  无数据 ({elapsed}s): {note}")
             break
