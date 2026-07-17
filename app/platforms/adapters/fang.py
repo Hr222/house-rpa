@@ -596,6 +596,9 @@ async def _do_collect(
 ) -> PlatformResult:
     # 1. 刷新首页保活
     main_page = await reset_to_start_page(main_page)
+    # 采集起点风控兜底：首页若被风控(CAPTCHA/登录失效)，阻塞等人解除后重取，
+    # 避免带着 CAPTCHA 往下走导致静默 NO_DATA
+    await wait_and_reload_after_block(main_page, detect_block, "首页")
     await _dump(main_page, "fang_refresh")
 
     # 3-5. 搜索 + 面积筛选（含重试：面积档位点击后可能丢失小区限定）

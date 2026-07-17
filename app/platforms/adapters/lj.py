@@ -552,6 +552,9 @@ async def _do_collect(
 
     # 1. 刷新首页保活
     main_page = await reset_to_start_page(main_page)
+    # 采集起点风控兜底：首页若被风控(CAPTCHA/登录失效)，阻塞等人解除后重取，
+    # 避免带着 CAPTCHA 往下走导致找不到搜索框→RuntimeError→整单ERROR→服务503
+    await wait_and_reload_after_block(main_page, detect_block, "首页")
     await _dump(main_page, "lj_refresh")
 
     # 2. 搜索小区
