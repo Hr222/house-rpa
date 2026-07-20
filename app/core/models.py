@@ -15,6 +15,7 @@ class InquiryRequest:
     area: float
     city: str = "深圳"
     request_id: Optional[str] = None
+    algorithm_mode: str = "default"  # "default" 现有算法 / "quote_only" 纯在售算法
 
 
 @dataclass

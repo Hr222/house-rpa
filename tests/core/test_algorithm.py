@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """算法单元测试。"""
-from app.core.algorithm import mean, decide
+from app.core.algorithm import mean, decide, decide_quote_only
+
+# ============ mean ============
 
 
 class TestMean:
@@ -12,6 +14,9 @@ class TestMean:
 
     def test_empty(self):
         assert mean([]) is None
+
+
+# ============ decide ============
 
 
 class TestDecide:
@@ -39,3 +44,23 @@ class TestDecide:
         d = decide(quote_avg=None, deal_avg=100)
         assert d.final_price == 100
         assert d.branch == "DEAL_ONLY"
+
+
+# ============ decide_quote_only ============
+
+
+class TestDecideQuoteOnly:
+    def test_has_quote_with_default_discount(self):
+        d = decide_quote_only(quote_avg=100)
+        assert d.final_price == 90.0
+        assert d.branch == "QUOTE_ONLY"
+
+    def test_has_quote_with_custom_discount(self):
+        d = decide_quote_only(quote_avg=100, quote_discount=0.85)
+        assert d.final_price == 85.0
+        assert d.branch == "QUOTE_ONLY"
+
+    def test_no_quote(self):
+        d = decide_quote_only(quote_avg=None)
+        assert d.final_price is None
+        assert d.branch == "FAILED"
