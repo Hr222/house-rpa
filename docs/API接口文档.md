@@ -148,15 +148,18 @@
 |------|------|------|------|
 | `communityName` | string | ✅ | 小区名称 |
 | `area` | float | ✅ | 精确面积（㎡），如 `89.5`。系统自动匹配各平台面积档位 |
-| `city` | string | | 城市，默认 `"深圳"` |
+| `city` | string | ✅ | 城市名（如 `深圳`、`广州`、`东莞`） |
+| `algorithmMode` | string | | 算法模式：`"default"`（成交+在售）或 `"quote_only"`（纯在售），默认 `"default"` |
 | `requestId` | string | | 请求标识，用于幂等；不填则由服务生成 `taskId` |
 
 **请求示例：**
 
 ```json
 {
+  "city": "深圳",
   "communityName": "绿景虹湾",
   "area": 89.5,
+  "algorithmMode": "default",
   "requestId": "order-001"
 }
 ```
@@ -207,6 +210,8 @@
     "quoteAvg": 85635.00,
     "dealAvg": 71086.50,
     "finalPrice": 71086.50,
+    "success": true,
+    "statusCode": "COMPLETED",
     "branchCode": "TAKE_LOWER",
     "branch": "差异在阈值内，取较低值"
   }
@@ -218,7 +223,32 @@
 | `quoteAvg` | 在售均价（元/㎡），所有成功平台累加平均 |
 | `dealAvg` | 成交均价（元/㎡），所有成功平台累加平均 |
 | `finalPrice` | 最终建议单价（元/㎡） |
-| `branchCode` | 决策分支：`TAKE_LOWER` / `DEAL_ONLY` / `QUOTE_DISCOUNT` / `FAILED` |
+| `success` | 本次询价是否得到可用结果；`NO_DATA` 时为 `false` |
+| `statusCode` | 任务状态码；完成态固定为 `COMPLETED` |
+| `branchCode` | 决策分支：`TAKE_LOWER` / `DEAL_ONLY` / `QUOTE_DISCOUNT` / `QUOTE_ONLY` / `NO_DATA` / `FAILED` |
+| `branch` | 分支说明文本；部分分支当前直接返回分支码本身 |
+| `note` | 可选，补充说明；例如所有平台都不支持该城市时返回 `"不支持该城市"` |
+
+**响应 200（已完成但无数据）：**
+
+```json
+{
+  "code": "OK",
+  "message": "查询成功",
+  "data": {
+    "quoteAvg": null,
+    "dealAvg": null,
+    "finalPrice": null,
+    "success": false,
+    "statusCode": "COMPLETED",
+    "branchCode": "NO_DATA",
+    "branch": "NO_DATA",
+    "note": "不支持该城市"
+  }
+}
+```
+
+说明：`NO_DATA` 也是**已完成**状态，因此 HTTP 仍返回 `200`；客户端应结合 `success=false` 和 `branchCode=NO_DATA` 判断“任务结束但无可用报价”。
 
 **响应 200（进行中）：**
 
@@ -341,6 +371,56 @@
 
 **响应 400：** 值不在 `(0, 1)` 区间
 
+### `GET /admin/algorithm/quote-only-discount` — 查询纯在售折扣
+
+纯在售算法（`algorithmMode="quote_only"`）会将聚合后的在售均价乘以该折扣作为最终价。
+
+**响应：**
+
+```json
+{
+  "code": "OK",
+  "message": "查询成功",
+  "data": {
+    "quoteOnlyDiscount": 0.9,
+    "isDefault": true
+  }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `quoteOnlyDiscount` | 当前纯在售折扣值，默认 `0.9` |
+| `isDefault` | 是否为默认值（未被人为修改过） |
+
+### `PUT /admin/algorithm/quote-only-discount` — 更新纯在售折扣
+
+运行时动态调整纯在售算法折扣系数，立即生效并持久化，重启后自动恢复。
+
+**请求体：**
+
+```json
+{
+  "quoteOnlyDiscount": 0.85
+}
+```
+
+| 约束 | 值 |
+|------|-----|
+| 有效范围 | `(0, 1)`，不包含 0 和 1 |
+
+**响应：**
+
+```json
+{
+  "code": "OK",
+  "message": "参数已更新",
+  "data": { "quoteOnlyDiscount": 0.85 }
+}
+```
+
+**响应 400：** 值不在 `(0, 1)` 区间
+
 ---
 
 ## 任务状态码
@@ -359,4 +439,6 @@
 | `TAKE_LOWER` | 在售均价与成交均价差值 ≤ 10% | 取两者中较低值 |
 | `DEAL_ONLY` | 差值 > 10%，或只有成交价 | 只取成交均价 |
 | `QUOTE_DISCOUNT` | 无成交数据 | 在售均价 × `noDealDiscount` |
+| `QUOTE_ONLY` | `algorithmMode="quote_only"` 且有在售数据 | 在售均价 × `quoteOnlyDiscount` |
+| `NO_DATA` | 全平台无可用在售数据，或该城市所有平台都不支持 | 任务已完成，但无可用报价 |
 | `FAILED` | 无在售也无成交 | 无法计算 |
