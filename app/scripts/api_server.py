@@ -17,9 +17,9 @@ from app.runtime import RPARuntime
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--debug",
+        "--excel",
         action="store_true",
-        help="开启 RPA 调试模式，导出关键页面 HTML 到 debug 目录。",
+        help="开启 RPA 调试模式，导出关键页面 HTML 到 excel 目录。",
     )
     parser.add_argument(
         "--manual-login",

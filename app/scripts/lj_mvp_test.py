@@ -5,7 +5,7 @@
 分页翻页 → 在售解析 → 详情页 → 成交记录 → 算法决策。
 
 用法：
-  python -m app.scripts.lj_mvp_test --manual-login --debug
+  python -m app.scripts.lj_mvp_test --manual-login --excel
 """
 
 from __future__ import annotations
@@ -1107,9 +1107,9 @@ def cli():
         help="首次打开若被拦截，先人工过验证码 / 登录，回车后重新打开再探测。",
     )
     parser.add_argument(
-        "--debug",
+        "--excel",
         action="store_true",
-        help="开启 RPA 调试模式，导出关键页面 HTML 到 debug 目录。",
+        help="开启 RPA 调试模式，导出关键页面 HTML 到 excel 目录。",
     )
     parser.add_argument(
         "--search-only",

@@ -405,17 +405,17 @@ python -m app.scripts.api_server
 
 ```bash
 # 调试 + 人工登录确认
-python -m app.scripts.api_server --debug --manual-login
+python -m app.scripts.api_server --excel --manual-login
 ```
 
 ### 单平台 MVP 测试
 
 ```bash
-python -m app.scripts.ke_mvp_test --debug --manual-login       # 贝壳
-python -m app.scripts.ajk_mvp_test --debug --manual-login      # 安居客
-python -m app.scripts.lj_mvp_test --debug --manual-login       # 链家
-python -m app.scripts.fang_mvp_test --debug --manual-login     # 房天下
-python -m app.scripts.lyj_mvp_test --debug --manual-login      # 乐有家
+python -m app.scripts.ke_mvp_test --excel --manual-login       # 贝壳
+python -m app.scripts.ajk_mvp_test --excel --manual-login      # 安居客
+python -m app.scripts.lj_mvp_test --excel --manual-login       # 链家
+python -m app.scripts.fang_mvp_test --excel --manual-login     # 房天下
+python -m app.scripts.lyj_mvp_test --excel --manual-login      # 乐有家
 ```
 
 ### 接单测试

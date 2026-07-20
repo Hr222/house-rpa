@@ -26,7 +26,7 @@ DEBUG_MODE = _env_flag("RPA_DEBUG", "0")
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent  # 项目根目录
 #开发人员调式的输出文件夹
-DEBUG_DIR = BASE_DIR / "debug"
+DEBUG_DIR = BASE_DIR / "excel"
 #日志输出文件夹
 LOG_DIR = BASE_DIR / "logs"
 #任务持久化文件夹(崩溃兜底)
