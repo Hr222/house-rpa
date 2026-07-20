@@ -309,6 +309,14 @@ def community_name_match(request_name: str, page_name: str) -> bool:
     return longest >= 3
 
 
+def has_matching_community_snapshots(snapshots: list, community_name: str) -> bool:
+    """判断快照列表里是否至少存在一条匹配目标小区的房源。"""
+    return any(
+        community_name_match(community_name, s.community_name or "")
+        for s in snapshots
+    )
+
+
 def filter_snapshots_by_community(snapshots: list, community_name: str) -> list:
     """按小区名过滤在售房源快照，剔除宽匹配搜索混入的无关小区数据。
 
@@ -345,10 +353,7 @@ def check_page_community_match_rate(
     """
     if not snapshots:
         return 0.0
-    matched = sum(
-        1 for s in snapshots
-        if community_name_match(community_name, s.community_name or "")
-    )
+    matched = len(filter_snapshots_by_community(snapshots, community_name))
     return matched / len(snapshots)
 
 

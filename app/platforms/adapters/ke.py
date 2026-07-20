@@ -23,6 +23,7 @@ from app.platforms.base import (
     safe_select_and_click,
     short_circuit_result,
     community_name_match,
+    has_matching_community_snapshots,
     check_page_community_match_rate,
     check_empty_listing_page,
 )
@@ -425,10 +426,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
             # 风控恢复后验证小区限定是否还在（风控跳转可能冲掉查询条件）
             if community_name:
                 page_snaps = parsers.parse_listing_snapshots(last_html)
-                if page_snaps and not any(
-                    community_name_match(community_name, s.community_name or "")
-                    for s in page_snaps
-                ):
+                if page_snaps and not has_matching_community_snapshots(page_snaps, community_name):
                     # 限定丢失，尝试点小区筛选 dl 重新锁定
                     if await _recover_community_filter(page, community_name):
                         log.info("第 %d 页风控后重新锁定小区 %s", page_no, community_name)
@@ -739,7 +737,7 @@ async def _do_collect(
 
     # 校验搜索结果是否真的属于目标小区（解析 listing 的社区名，不用 raw HTML 切片）
     keyword_snaps = parsers.parse_listing_snapshots(keyword_html)
-    if not any(community_name_match(community_name, s.community_name or "") for s in keyword_snaps):
+    if not has_matching_community_snapshots(keyword_snaps, community_name):
         return short_circuit_result(
             "贝壳", "NO_DATA", f"关键词搜索未匹配到小区: {community_name}",
             request_id, started_at, detail_url=detail_url,
