@@ -75,6 +75,10 @@ _NO_DEAL_DISCOUNT_DEFAULT = 0.9
 _no_deal_discount: float = _NO_DEAL_DISCOUNT_DEFAULT
 _no_deal_discount_loaded = False
 
+_QUOTE_ONLY_DISCOUNT_DEFAULT = 0.9
+_quote_only_discount: float = _QUOTE_ONLY_DISCOUNT_DEFAULT
+_quote_only_discount_loaded = False
+
 
 def _load_runtime_config() -> dict:
     """从 persist/runtime.json 加载运行时参数，文件不存在返回空 dict。"""
@@ -100,20 +104,34 @@ def _save_runtime_config(data: dict) -> None:
 
 def _ensure_loaded() -> None:
     global _no_deal_discount, _no_deal_discount_loaded
-    if _no_deal_discount_loaded:
+    global _quote_only_discount, _quote_only_discount_loaded
+    if _no_deal_discount_loaded and _quote_only_discount_loaded:
         return
     data = _load_runtime_config()
-    if "noDealDiscount" in data:
-        try:
-            value = float(data["noDealDiscount"])
-            if 0 < value < 1:
-                _no_deal_discount = value
-                log.info("从持久化恢复 noDealDiscount=%.4f", _no_deal_discount)
-            else:
-                log.warning("持久化的 noDealDiscount=%.4f 不合法，使用默认值 0.9", value)
-        except (TypeError, ValueError):
-            log.warning("持久化的 noDealDiscount 解析失败，使用默认值 0.9")
-    _no_deal_discount_loaded = True
+    if not _no_deal_discount_loaded:
+        if "noDealDiscount" in data:
+            try:
+                value = float(data["noDealDiscount"])
+                if 0 < value < 1:
+                    _no_deal_discount = value
+                    log.info("从持久化恢复 noDealDiscount=%.4f", _no_deal_discount)
+                else:
+                    log.warning("持久化的 noDealDiscount=%.4f 不合法，使用默认值 0.9", value)
+            except (TypeError, ValueError):
+                log.warning("持久化的 noDealDiscount 解析失败，使用默认值 0.9")
+        _no_deal_discount_loaded = True
+    if not _quote_only_discount_loaded:
+        if "quoteOnlyDiscount" in data:
+            try:
+                value = float(data["quoteOnlyDiscount"])
+                if 0 < value < 1:
+                    _quote_only_discount = value
+                    log.info("从持久化恢复 quoteOnlyDiscount=%.4f", _quote_only_discount)
+                else:
+                    log.warning("持久化的 quoteOnlyDiscount=%.4f 不合法，使用默认值 0.9", value)
+            except (TypeError, ValueError):
+                log.warning("持久化的 quoteOnlyDiscount 解析失败，使用默认值 0.9")
+        _quote_only_discount_loaded = True
 
 
 def get_no_deal_discount() -> float:
@@ -141,12 +159,47 @@ def set_no_deal_discount(value: float) -> float:
     _ensure_loaded()
     _no_deal_discount = value
     _no_deal_discount_loaded = True
-    _save_runtime_config({
-        "noDealDiscount": value,
-        "updatedAt": datetime.now().isoformat(),
-    })
+    _merge_and_save(noDealDiscount=value)
     log.info("noDealDiscount 已更新为 %.4f", value)
     return _no_deal_discount
+
+
+def _merge_and_save(**fields) -> None:
+    """合并写入 persist/runtime.json，保留已有字段。"""
+    existing = _load_runtime_config()
+    existing.update(fields)
+    existing["updatedAt"] = datetime.now().isoformat()
+    _save_runtime_config(existing)
+
+
+def get_quote_only_discount() -> float:
+    """返回纯在售算法的折扣系数。"""
+    _ensure_loaded()
+    return _quote_only_discount
+
+
+def set_quote_only_discount(value: float) -> float:
+    """更新纯在售折扣系数，同时弱持久化到文件。
+
+    Args:
+        value: 折扣值，需在 (0, 1) 区间。
+    """
+    if not (0 < value < 1):
+        raise ValueError(f"quoteOnlyDiscount 必须在 (0, 1) 区间，收到 {value}")
+
+    global _quote_only_discount, _quote_only_discount_loaded
+    _ensure_loaded()
+    _quote_only_discount = value
+    _quote_only_discount_loaded = True
+    _merge_and_save(quoteOnlyDiscount=value)
+    log.info("quoteOnlyDiscount 已更新为 %.4f", value)
+    return _quote_only_discount
+
+
+def is_quote_only_discount_default() -> bool:
+    """当前 quoteOnlyDiscount 是否还是出厂默认值。"""
+    _ensure_loaded()
+    return _quote_only_discount == _QUOTE_ONLY_DISCOUNT_DEFAULT
 
 
 def is_no_deal_discount_default() -> bool:
@@ -157,3 +210,4 @@ def is_no_deal_discount_default() -> bool:
 
 # 兼容旧代码：模块导入时的别名（但不推荐再用，应走 getter）
 NO_DEAL_DISCOUNT = _NO_DEAL_DISCOUNT_DEFAULT
+QUOTE_ONLY_DISCOUNT = _QUOTE_ONLY_DISCOUNT_DEFAULT

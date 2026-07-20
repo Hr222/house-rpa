@@ -20,6 +20,7 @@ class InquiryCreatePayload(BaseModel):
     community_name: str = Field(..., min_length=1, alias="communityName")
     area: float = Field(..., gt=0, alias="area")
     request_id: Optional[str] = Field(default=None, alias="requestId")
+    algorithm_mode: str = Field(default="default", alias="algorithmMode")
 
     model_config = {
         "populate_by_name": True,
@@ -28,6 +29,14 @@ class InquiryCreatePayload(BaseModel):
 
 class NoDealDiscountPayload(BaseModel):
     no_deal_discount: float = Field(..., gt=0, lt=1, alias="noDealDiscount")
+
+    model_config = {
+        "populate_by_name": True,
+    }
+
+
+class QuoteOnlyDiscountPayload(BaseModel):
+    quote_only_discount: float = Field(..., gt=0, lt=1, alias="quoteOnlyDiscount")
 
     model_config = {
         "populate_by_name": True,
@@ -89,6 +98,7 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
             area=payload.area,
             city=payload.city,
             request_id=payload.request_id,
+            algorithm_mode=payload.algorithm_mode,
         )
         try:
             task = await current_runtime.enqueue_inquiry(request)
@@ -172,6 +182,29 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
             "code": "OK",
             "message": "参数已更新",
             "data": {"noDealDiscount": new_value},
+        }
+
+    @app.get("/admin/algorithm/quote-only-discount")
+    async def get_quote_only_discount():
+        return {
+            "code": "OK",
+            "message": "查询成功",
+            "data": {
+                "quoteOnlyDiscount": config.get_quote_only_discount(),
+                "isDefault": config.is_quote_only_discount_default(),
+            },
+        }
+
+    @app.put("/admin/algorithm/quote-only-discount")
+    async def update_quote_only_discount(payload: QuoteOnlyDiscountPayload):
+        try:
+            new_value = config.set_quote_only_discount(payload.quote_only_discount)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {
+            "code": "OK",
+            "message": "参数已更新",
+            "data": {"quoteOnlyDiscount": new_value},
         }
 
     return app

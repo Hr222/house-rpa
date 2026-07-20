@@ -118,6 +118,19 @@
 
 其中 `noDealDiscount` 可通过 API 动态调整（见 [11. API 约定](#11-api-约定)）。
 
+### 纯在售算法（`quote_only` 模式）
+
+通过 API 请求体 `"algorithmMode": "quote_only"` 切换到此模式。
+
+代码位置：`app/core/algorithm.py:decide_quote_only()`
+
+- 聚合所有平台在售均价 → `quote_avg`
+- 最终单价 = `quote_avg × quoteOnlyDiscount`（默认 0.9）
+- branch：`QUOTE_ONLY`
+- 无在售数据：`NO_DATA`
+
+其中 `quoteOnlyDiscount` 可通过 API 动态调整（见 [11. API 约定](#11-api-约定)）。
+
 ## 5. 架构分层
 
 整体分为 5 层：
@@ -224,7 +237,9 @@ jeethink-rpa/
 
 ### `app/core/algorithm.py`
 
-纯函数 `decide(quote_avg, deal_avg, diff_threshold, no_deal_discount)`，4 条决策分支，无 IO，所有平台共用。
+纯函数，无 IO，所有平台共用。两套算法可通过 `algorithmMode` 切换：
+- `decide(quote_avg, deal_avg, diff_threshold, no_deal_discount)` — 4 条决策分支，默认算法
+- `decide_quote_only(quote_avg, quote_discount)` — 纯在售算法，仅在售均价打折输出
 
 ### `app/api.py`
 
@@ -240,6 +255,8 @@ FastAPI 入口。接口清单：
 | GET | `/inquiries/{taskId}` | 查询任务结果 |
 | GET | `/admin/algorithm/no-deal-discount` | 查询无成交折扣 |
 | PUT | `/admin/algorithm/no-deal-discount` | 更新无成交折扣 |
+| GET | `/admin/algorithm/quote-only-discount` | 查询纯在售折扣 |
+| PUT | `/admin/algorithm/quote-only-discount` | 更新纯在售折扣 |
 
 ### `app/runtime.py`
 
@@ -257,7 +274,7 @@ FastAPI 入口。接口清单：
 
 平台调度与结果汇总层。
 
-- `build_inquiry_result()` — 把所有 `SUCCESS` 平台的在售均价、成交单价跨平台累加平均后，调用 `decide()` 算最终价。
+- `build_inquiry_result()` — 把所有 `SUCCESS` 平台的在售均价、成交单价跨平台累加平均后，根据 `algorithm_mode` 选择调用 `decide()` 或 `decide_quote_only()` 算最终价。
 - `RPAInquiryService` — 管理各平台 session，执行 `run_inquiry()`。
 
 ### `app/platforms/base.py`
@@ -346,6 +363,7 @@ FastAPI 入口。接口清单：
 | `GET_INQUIRY_MIN_INTERVAL` | `10` | GET 查询限流：同一 taskId 两次查询最小间隔秒数（`RPA_GET_MIN_INTERVAL`） |
 | `DEAL_DIFF_THRESHOLD` | `0.10` | 差值阈值 |
 | `get_no_deal_discount()` | `0.9` | 无成交折扣（可运行时更新，弱持久化） |
+| `get_quote_only_discount()` | `0.9` | 纯在售折扣（可运行时更新，弱持久化） |
 
 ### 平台常量
 
@@ -421,7 +439,8 @@ python test_inquiry.py
   "city": "深圳",
   "communityName": "绿景虹湾",
   "area": 89.5,
-  "requestId": "demo-001"
+  "requestId": "demo-001",
+  "algorithmMode": "default"
 }
 ```
 
@@ -430,6 +449,7 @@ python test_inquiry.py
 | `city` | string | 是 | 城市名（如 深圳、广州、东莞） |
 | `communityName` | string | 是 | 小区名称 |
 | `area` | number | 是 | 精确面积（㎡） |
+| `algorithmMode` | string | 否 | 算法模式，`"default"`（成交+在售）或 `"quote_only"`（纯在售），默认 `"default"` |
 | `requestId` | string | 否 | 自定义任务 ID，不传则自动生成 |
 
 返回：
@@ -550,6 +570,46 @@ python test_inquiry.py
 - 值必须在 `(0, 1)` 区间，否则返回 400。
 - 更新后立即持久化到 `persist/runtime.json`，重启后自动恢复。
 
+### 查询纯在售折扣
+
+`GET /admin/algorithm/quote-only-discount`
+
+```json
+{
+  "code": "OK",
+  "message": "查询成功",
+  "data": {
+    "quoteOnlyDiscount": 0.9,
+    "isDefault": true
+  }
+}
+```
+
+### 更新纯在售折扣
+
+`PUT /admin/algorithm/quote-only-discount`
+
+请求体：
+
+```json
+{
+  "quoteOnlyDiscount": 0.85
+}
+```
+
+返回：
+
+```json
+{
+  "code": "OK",
+  "message": "参数已更新",
+  "data": { "quoteOnlyDiscount": 0.85 }
+}
+```
+
+- 值必须在 `(0, 1)` 区间，否则返回 400。
+- 更新后立即持久化到 `persist/runtime.json`，重启后自动恢复。
+
 ### 服务未就绪
 
 ```json
@@ -575,8 +635,8 @@ python test_inquiry.py
 
 ### 算法参数持久化
 
-- `noDealDiscount` 通过 `PUT /admin/algorithm/no-deal-discount` 更新时，同步写入 `persist/runtime.json`。
-- 启动时自动读取，文件不存在则使用默认值 `0.9`。
+- `noDealDiscount` / `quoteOnlyDiscount` 通过 `PUT /admin/algorithm/...` 更新时，同步写入 `persist/runtime.json`。
+- 启动时自动读取，文件不存在则使用默认值（`0.9`）。
 - 这是**弱持久化**：仅保证重启不丢失，不做分布式一致性等强保证。
 
 ### 持久化文件结构

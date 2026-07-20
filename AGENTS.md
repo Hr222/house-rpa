@@ -18,7 +18,9 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 - Python 3.14,nodriver(反检测浏览器库,**非 selenium/playwright**)。
 - 分层:`api → runtime → service → platform adapter → parser/algorithm`。
 - 平台适配器统一继承 `app/platforms/base.py:PlatformAdapter`。
-- 最终取值走 `app/core/algorithm.py:decide()`,**纯函数,所有平台共用**。
+- 最终取值走 `app/core/algorithm.py`，**纯函数，所有平台共用**，两套算法可切换：
+  - `decide(quote_avg, deal_avg)` — 默认「成交+在售」综合决策（4 条分支）
+  - `decide_quote_only(quote_avg)` — 「纯在售」，只看在售均价打折输出
 - 多城市支持:`app/platforms/city_map.py` 维护 5 平台 × 广东 21 城 URL 前缀映射,
   各 adapter `collect()` / `reset_to_start_page()` 接收 `city` 参数,
   薄壳在采集前调 `check_city_support()` + `ensure_city_navigated()` 确保城市正确。
@@ -30,8 +32,8 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 **业务流程是定死的。没有用户的明确指令,AI 不得擅自:**
 - 增删采集步骤(如自作主张加循环检测、删掉某步)
 - 改变步骤顺序
-- 修改 `core/algorithm.py` / `service.py` / `core/models.py` / `runtime.py` / `api.py`
-- 改变 `decide()` 的决策规则或阈值
+- 修改 `service.py` / `core/models.py` / `runtime.py` / `api.py`
+- 改变 `decide()` / `decide_quote_only()` 的决策规则或阈值（新增算法函数不算擅改，但需用户明确指令）
 
 **平台差异 ≠ 改流程。** 某平台因特性"略过"某步(如安居客无成交→不点详情),
 是平台适配,不是流程变更。代码注释里必须写清楚"为什么略过"。
@@ -62,6 +64,8 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
    - `app/platforms/<code>.py` — 薄壳适配器,委托给 adapter
 6. **注册两处**:`app/platforms/__init__.py` 导出 + `app/registry.py` 追加。
 7. **不改核心层**:`core/models` / `core/algorithm` / `service` / `runtime` / `api` 一行不改。
+8. **算法模式可选**:`InquiryRequest.algorithm_mode` 支持 `"default"`（成交+在售）和 `"quote_only"`（纯在售），
+   由 API 入参控制，默认 `"default"`。新平台采集流程与现有一致，无需因算法模式不同而改动。
 
 ## 5. 平台特性差异记录
 
@@ -111,7 +115,7 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 
 | 文件 | 职责 | 改动频率 |
 |---|---|---|
-| `app/core/algorithm.py` | 最终取值决策(纯函数) | 极低,业务规则锁定 |
+| `app/core/algorithm.py` | 最终取值决策(纯函数，两套算法: decide/decide_quote_only) | 极低,业务规则锁定 |
 | `app/service.py` | 平台调度+汇总 | 低 |
 | `app/runtime.py` | 浏览器/队列/保活/状态机 | 低 |
 | `app/api.py` | FastAPI 接口 | 低 |

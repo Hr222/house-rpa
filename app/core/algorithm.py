@@ -53,3 +53,20 @@ def decide(
     if diff <= diff_threshold:
         return Decision(final_price=min(quote_avg, deal_avg), branch="TAKE_LOWER")
     return Decision(final_price=deal_avg, branch="DEAL_ONLY")
+
+
+def decide_quote_only(
+    quote_avg: Optional[float],
+    quote_discount: float = 0.9,
+) -> Decision:
+    """纯在售算法：聚合在售均价后打折输出，不依赖成交数据。
+
+    - 有在售数据：quote_avg × quote_discount → 最终单价
+    - 无在售数据 → FAILED
+    """
+    if quote_avg is None:
+        return Decision(final_price=None, branch="FAILED")
+    return Decision(
+        final_price=quote_avg * quote_discount,
+        branch="QUOTE_ONLY",
+    )

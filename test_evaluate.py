@@ -95,7 +95,7 @@ for i, item in enumerate(data):
     for retry in range(6):
         r = requests.post(
             f"{BASE_URL}/inquiries",
-            json={"city": city, "communityName": community, "area": area},
+            json={"city": city, "communityName": community, "area": area, "algorithmMode": "quote_only"},
         )
         if r.status_code == 202:
             break
@@ -219,10 +219,8 @@ thin_border = Border(
     left=Side(style="thin"), right=Side(style="thin"),
     top=Side(style="thin"), bottom=Side(style="thin"),
 )
-red_font = Font(color="FF0000", bold=True)
-green_font = Font(color="008000")
 
-add_headers = ["询价单价", "差距比例%", "是否采用售均价"]
+add_headers = ["询价单价", "差距比例%", "偏差评级", "是否采用售均价"]
 for j, h in enumerate(add_headers):
     cell = ws.cell(row=1, column=out_start_col + j, value=h)
     cell.font = header_font
@@ -248,19 +246,28 @@ for i, r in enumerate(results):
     cell.alignment = Alignment(horizontal="center")
     if diff is not None:
         cell.number_format = '0.00"%"'
-        if abs(diff) > 10:
-            cell.font = red_font
-        elif abs(diff) <= 5:
-            cell.font = green_font
+
+    # 偏差评级
+    if diff is None:
+        rating = "N/A"
+    elif abs(diff) <= 5:
+        rating = "偏差小（≤5%）"
+    elif abs(diff) <= 10:
+        rating = "偏差中等（5%~10%）"
+    else:
+        rating = "偏差大（>10%）"
+    cell = ws.cell(row=row, column=out_start_col + 2, value=rating)
+    cell.border = thin_border
+    cell.alignment = Alignment(horizontal="center")
 
     # 是否采用售均价
-    cell = ws.cell(row=row, column=out_start_col + 2, value=r["分支"])
+    cell = ws.cell(row=row, column=out_start_col + 3, value=r["分支"])
     cell.border = thin_border
     cell.alignment = Alignment(horizontal="center")
 
 # 列宽
 from openpyxl.utils import get_column_letter
-for j, width in enumerate([14, 14, 28]):
+for j, width in enumerate([14, 14, 16, 28]):
     col_letter = get_column_letter(out_start_col + j)
     ws.column_dimensions[col_letter].width = width
 
