@@ -451,7 +451,7 @@ async def safe_select_and_click(
     Args:
         page: nodriver Tab 对象。
         selector: CSS 选择器（含 page_no 的完整字符串）。
-        dump_fn: 各平台的 _dump 函数（导出 debug HTML）。
+        dump_fn: 各平台的 _dump 函数（导出 excel HTML）。
         dump_name: dump 文件名前缀（如 "ke_page_3_no_button"）。
         detect_fn: 各平台的 detect_block(url, html) -> (bool, str)。
         block_label: 日志/风控 label（如 "第 3 页(翻页前-按钮缺失)"）。

@@ -3,7 +3,7 @@
 
 用法：
   1. 先启动 RPA 服务并确认所有平台就绪：
-     python -m app.scripts.api_server --debug --manual-login
+     python -m app.scripts.api_server --excel --manual-login
   2. 再跑本脚本：
      python test_evaluate.py
 
