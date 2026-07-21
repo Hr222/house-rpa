@@ -16,7 +16,7 @@ def build_default_adapters() -> list[PlatformAdapter]:
     return [
         KePlatformAdapter(),
         AjkPlatformAdapter(),
-        FangPlatformAdapter(),
+        #FangPlatformAdapter(),
         LjPlatformAdapter(),
         LyjPlatformAdapter(),
     ]
