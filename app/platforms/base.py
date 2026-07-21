@@ -263,50 +263,38 @@ def short_circuit_result(
     )
 
 
-# 小区名分期后缀（中英文括号及内容，如 (一期)/(二期)/（一期））
-_PHASE_SUFFIX_PATTERN = re.compile(r"\([^)]*\)|（[^）]*）")
+# 小区名分期标识，如 (四期西区)、一期、二期。
+_PARENTHESIZED_PHASE_PATTERN = re.compile(r"\([^)]*\)|（[^）]*）")
+_TRAILING_PHASE_PATTERN = re.compile(
+    r"(?:第?[一二三四五六七八九十百零〇两\d]+期)(?:[东西南北中]区)?$"
+)
+_COMMUNITY_NAME_NOISE_PATTERN = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff]+")
 
 
-def _strip_phase_suffix(name: str) -> str:
-    """去掉小区名里的分期括号后缀，如 '星河荣御花苑(一期)' → '星河荣御花苑'。"""
+def _normalize_community_name(name: str) -> str:
+    """规范化抓取到的小区名，忽略标点、空白和末尾分期标识。"""
     if not name:
         return ""
-    return _PHASE_SUFFIX_PATTERN.sub("", name).strip()
+    normalized = _PARENTHESIZED_PHASE_PATTERN.sub("", name)
+    normalized = _COMMUNITY_NAME_NOISE_PATTERN.sub("", normalized)
+    return _TRAILING_PHASE_PATTERN.sub("", normalized)
 
 
-def community_name_match(request_name: str, page_name: str) -> bool:
-    """请求小区名与页面小区名是否匹配（容忍分期括号 + 命名差异）。
+def community_name_match(request_name: str, captured_name: str) -> bool:
+    """只比较请求名称与房源快照的结构化小区名称。
 
-    房产数据常见噪音：业务系统 "星河荣御花苑(一期)" vs 平台 "星河荣御一期"，
-    两边各有增删，单纯子串匹配会漏判导致误报 NO_DATA。策略：
-    1. 去掉分期括号 (一期)/(二期)/（一期）；
-    2. 双向子串（保留原 in 容差，如 "万科" 匹配 "万科城"）；
-    3. 最长公共子串 ≥ 3 字（处理两边各有增删的命名差异，
-       如 "星河荣御花苑" vs "星河荣御一期" 公共子串 "星河荣御" 4 字）。
-
-    不去通名（花苑/花园/苑等）——风险大，"汇雅苑" 去 "苑" 会与 "汇雅轩" 误匹配。
+    允许空白、标点、分期和明确的前缀/简称差异；不读取页面 DOM、房源标题
+    或搜索关键词，也不使用公共片段相似度猜测，避免同品牌或同产品系小区误匹配。
     """
-    nr = _strip_phase_suffix(request_name)
-    np_ = _strip_phase_suffix(page_name)
+    nr = _normalize_community_name(request_name)
+    np_ = _normalize_community_name(captured_name)
     if not nr or not np_:
         return False
-    # 双向子串（精确 + 容差）
-    if nr in np_ or np_ in nr:
+    if nr == np_:
         return True
-    # 最长公共子串（DP）
-    m, n = len(nr), len(np_)
-    longest = 0
-    # 滚动数组优化空间
-    prev = [0] * (n + 1)
-    for i in range(1, m + 1):
-        cur = [0] * (n + 1)
-        for j in range(1, n + 1):
-            if nr[i - 1] == np_[j - 1]:
-                cur[j] = prev[j - 1] + 1
-                if cur[j] > longest:
-                    longest = cur[j]
-        prev = cur
-    return longest >= 3
+
+    shorter, longer = sorted((nr, np_), key=len)
+    return len(shorter) >= 3 and shorter in longer
 
 
 def has_matching_community_snapshots(snapshots: list, community_name: str) -> bool:
@@ -321,7 +309,7 @@ def filter_snapshots_by_community(snapshots: list, community_name: str) -> list:
     """按小区名过滤在售房源快照，剔除宽匹配搜索混入的无关小区数据。
 
     lj/fang 等平台关键词搜索是宽匹配，翻页后会混入大量非目标小区的房源。
-    本函数在解析完 merged_html 后统一过滤，只保留 community_name_match 的快照。
+    本函数供逐页过滤和返回前防御校验共用，只保留 community_name_match 的快照。
 
     Args:
         snapshots: parse_listing_snapshots 返回的 ListingSnapshot 列表。
@@ -336,25 +324,15 @@ def filter_snapshots_by_community(snapshots: list, community_name: str) -> list:
     ]
 
 
-def check_page_community_match_rate(
-    snapshots: list, community_name: str
-) -> float:
-    """计算本页快照中匹配目标小区的比例（翻页兜底机制用）。
-
-    复用 community_name_match 判断每条快照是否匹配目标小区。
-    翻页时连续 N 页匹配率为 0 → 关键词搜索是宽匹配，停止翻页避免白跑。
-
-    Args:
-        snapshots: parse_listing_snapshots 返回的 ListingSnapshot 列表。
-        community_name: 请求的目标小区名。
-
-    Returns:
-        匹配率 0.0~1.0。snapshots 为空返回 0.0。
-    """
-    if not snapshots:
-        return 0.0
-    matched = len(filter_snapshots_by_community(snapshots, community_name))
-    return matched / len(snapshots)
+def prepare_listing_data(snapshots: list, community_name: str) -> tuple[list, list[float]]:
+    """过滤目标小区房源，并从同一批快照生成在售单价。"""
+    filtered = filter_snapshots_by_community(snapshots, community_name)
+    quote_prices = [
+        snapshot.unit_price
+        for snapshot in filtered
+        if snapshot.unit_price is not None and snapshot.unit_price > 0
+    ]
+    return filtered, quote_prices
 
 
 async def wait_and_reload_after_block(tab, detect_func, label: str = "页面") -> str:

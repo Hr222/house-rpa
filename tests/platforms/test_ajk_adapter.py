@@ -2,7 +2,7 @@
 """安居客 adapter 回归测试。"""
 
 from app.core.models import ListingSnapshot
-from app.platforms.adapters.ajk import _filter_listing_snapshots
+from app.platforms.base import filter_snapshots_by_community
 
 
 def test_filter_listing_snapshots_keeps_prefix_match_and_drops_unrelated():
@@ -13,7 +13,7 @@ def test_filter_listing_snapshots_keeps_prefix_match_and_drops_unrelated():
         ListingSnapshot(house_id="3", community_name="静安府", unit_price=30108.0),
     ]
 
-    filtered = _filter_listing_snapshots(snapshots, "静安府")
+    filtered = filter_snapshots_by_community(snapshots, "静安府")
 
     assert [item.community_name for item in filtered] == ["华润静安府", "静安府"]
 
@@ -25,4 +25,4 @@ def test_filter_listing_snapshots_returns_empty_when_no_community_matches():
         ListingSnapshot(house_id="2", community_name="半山臻境", unit_price=61000.0),
     ]
 
-    assert _filter_listing_snapshots(snapshots, "静安府") == []
+    assert filter_snapshots_by_community(snapshots, "静安府") == []

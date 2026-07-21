@@ -24,8 +24,8 @@ from app.core import config
 from app.platforms.base import (
     _human_click,
     click_area_segment,
-    filter_snapshots_by_community,
     has_matching_community_snapshots,
+    prepare_listing_data,
     short_circuit_result,
     wait_and_reload_after_block,
 )
@@ -228,18 +228,6 @@ async def _scroll_to_bottom(page, max_rounds: int = 20, wait: float = 1.8) -> in
     return rounds
 
 
-def _filter_listing_snapshots(snapshots: list, community_name: str) -> list:
-    """按小区名过滤安居客在售快照，剔除宽搜索滚动混入的无关房源。"""
-    filtered = filter_snapshots_by_community(snapshots, community_name)
-    log.info(
-        "安居客在售房源过滤: 总%d条 -> 匹配小区 %s %d条",
-        len(snapshots),
-        community_name,
-        len(filtered),
-    )
-    return filtered
-
-
 # ============================================================
 # 搜索
 # ============================================================
@@ -435,14 +423,17 @@ async def _do_collect(
     area_html = await main_page.get_content()
 
     # 6. 解析在售房源
-    snapshots = parsers.parse_listing_snapshots(area_html)
-    snapshots = _filter_listing_snapshots(snapshots, community_name)
+    parsed_snapshots = parsers.parse_listing_snapshots(area_html)
+    snapshots, quote_prices = prepare_listing_data(parsed_snapshots, community_name)
+    log.info(
+        "安居客在售房源最终校验: 总 %d 条 -> 匹配小区 %s %d 条",
+        len(parsed_snapshots), community_name, len(snapshots),
+    )
     if not snapshots:
         return short_circuit_result(
             "安居客", "NO_DATA", f"面积筛选后未匹配到小区: {community_name}",
             request_id, started_at,
         )
-    quote_prices = [s.unit_price for s in snapshots if s.unit_price]
     if not quote_prices:
         return short_circuit_result(
             "安居客", "NO_DATA", "面积结果页未抓到在售单价",

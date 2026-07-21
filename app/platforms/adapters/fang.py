@@ -25,7 +25,7 @@ from typing import Optional
 
 from app.core import config
 from app.utils.debug_utils import dump_html
-from app.core.models import PlatformResult
+from app.core.models import ListingSnapshot, PlatformResult
 from app.parsers import fang as parsers
 from app.platforms.fang_constants import START_URL
 from app.platforms.city_map import get_start_url
@@ -37,7 +37,7 @@ from app.platforms.base import (
     short_circuit_result,
     has_matching_community_snapshots,
     filter_snapshots_by_community,
-    check_page_community_match_rate,
+    prepare_listing_data,
     check_empty_listing_page,
 )
 
@@ -227,8 +227,8 @@ async def _wait_for_results_loaded(page, expected_page: Optional[int] = None, ti
     return last_html or await page.get_content()
 
 
-async def _click_page_number(page, page_no: int) -> str:
-    """点击房天下页码按钮，返回加载完成后的 HTML。
+async def _click_page_number(page, page_no: int) -> None:
+    """点击房天下页码按钮并等待加载完成。
 
     DOM: <div class="page_box"><div class="page_al"><span><a href="...">2</a></span>
     页码文本即页号，靠文本定位。
@@ -254,64 +254,57 @@ async def _click_page_number(page, page_no: int) -> str:
     if not await _human_click(page, target, f"page {page_no}"):
         raise RuntimeError(f"未能成功点击第 {page_no} 页")
 
-    return await _wait_for_results_loaded(page, expected_page=page_no)
+    await _wait_for_results_loaded(page, expected_page=page_no)
 
 
 
-async def _collect_listing_pages(page, first_page_html: str, total_pages: int, community_name: str = "", dump_prefix: str = "fang_area_page"):
-    """逐页采集，合并所有页的主结果区 HTML 供后续解析。参考贝壳 collect_listing_pages。
+async def _collect_listing_pages(page, total_pages: int, community_name: str = ""):
+    """逐页采集并只累计匹配目标小区的在售房源。
 
-    每页单独截断到"您可能感兴趣的新房"(InterestedNewHouse)之前，再拼接。
-    如果在合并后的 HTML 上截断，第一页的 InterestedNewHouse 会把第二页全切掉。
-
-    返回 (合并后的主结果区 HTML, 每页记录数, 每页 dump 文件)。
+    每页单独截断到"您可能感兴趣的新房"(InterestedNewHouse)之前再解析。
+    第 2 页起若整页无目标小区房源，立即停止后续翻页。
     """
 
     def _cut_main(html_text: str) -> str:
         cut = html_text.find("InterestedNewHouse")
         return html_text[:cut] if cut > 0 else html_text
 
-    all_html_parts: list[str] = [_cut_main(first_page_html)]
+    all_snapshots: list[ListingSnapshot] = []
     page_counts: list[tuple[int, int]] = []
-    page_files: list[Optional] = []
-    last_html = first_page_html
     consecutive_empty = 0
-    consecutive_no_match = 0
 
     for page_no in range(1, total_pages + 1):
         if page_no > 1:
             try:
-                last_html = await _click_page_number(page, page_no)
+                await _click_page_number(page, page_no)
             except RuntimeError:
                 log.warning("第 %d 页页码按钮未找到，停止翻页", page_no)
                 break
 
             # 翻页后风控兜底（检测→等人回车→重取，最多 2 次；不重新点页码避免再触发验证码）
-            last_html = await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页")
-
-            all_html_parts.append(_cut_main(last_html))
+            await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页")
 
         await human_linger(page, page_no)
-        last_html = await page.get_content()
-        page_file = await _dump(page, f"{dump_prefix}_{page_no}")
-        page_files.append(page_file)
+        page_html = await page.get_content()
+        await _dump(page, f"fang_area_page_{page_no}")
 
-        count = last_html.count("元/㎡")
+        page_snapshots = parsers.parse_listing_snapshots(_cut_main(page_html))
+        matched_snapshots = filter_snapshots_by_community(page_snapshots, community_name)
+        count = len(page_snapshots)
         page_counts.append((page_no, count))
+        log.info(
+            "房天下第 %d/%d 页在售过滤: 总 %d 条 -> 匹配小区 %s %d 条",
+            page_no, total_pages, count, community_name, len(matched_snapshots),
+        )
 
-        # 翻页兜底：连续 2 页无匹配小区 → 关键词搜索是宽匹配，停止翻页
-        if community_name:
-            page_snaps = parsers.parse_listing_snapshots(_cut_main(last_html))
-            if page_snaps:
-                match_rate = check_page_community_match_rate(page_snaps, community_name)
-                if match_rate == 0:
-                    consecutive_no_match += 1
-                    log.warning("第 %d 页无匹配小区 %s (连续 %d 页)", page_no, community_name, consecutive_no_match)
-                    if consecutive_no_match >= 2:
-                        log.warning("连续 %d 页无匹配小区，停止翻页", consecutive_no_match)
-                        break
-                else:
-                    consecutive_no_match = 0
+        if page_snapshots and not matched_snapshots:
+            if page_no == 1:
+                log.warning("第 1 页面积结果全部不属于小区 %s，停止采集", community_name)
+            else:
+                log.warning("第 %d 页房源全部不属于小区 %s，停止后续翻页", page_no, community_name)
+            break
+
+        all_snapshots.extend(matched_snapshots)
 
         # 空页检测：首页空→error+停止，连续空页≥2→warning+停止
         should_stop, consecutive_empty = check_empty_listing_page(
@@ -319,8 +312,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
         if should_stop:
             break
 
-    merged_html = "\n".join(all_html_parts)
-    return merged_html, page_counts, page_files, last_html
+    return all_snapshots, page_counts
 
 
 # ============================================================
@@ -702,6 +694,14 @@ async def _do_collect(
     area_min, area_max = area_range if area_range else (area * 0.8, area * 1.2)
     log.info("[4] 面积筛选区间: %.0f~%.0f (来自档位匹配)", area_min, area_max)
 
+    # 详情入口只在第一页有；先确认面积结果页仍包含目标小区，再打开详情标签。
+    first_page_snapshots = parsers.parse_listing_snapshots(area_html)
+    if not has_matching_community_snapshots(first_page_snapshots, community_name):
+        return short_circuit_result(
+            "房天下", "NO_DATA", f"面积筛选后未匹配到小区: {community_name}",
+            request_id, started_at,
+        )
+
     # 6. 点开小区详情（Ctrl+点击后台新标签，入口只在第一页有，翻页前必须点）
     log.info("点击小区详情（分页前先点开）")
     detail_clicked, detail_tab = await _click_detail_link(browser, main_page)
@@ -721,22 +721,22 @@ async def _do_collect(
         )
 
     # 分页采集在售房源（主线程，和成交导航并行）
-    merged_html, page_counts, page_files, last_page_html = await _collect_listing_pages(
-        main_page, area_html, area_pages, community_name
+    collected_snapshots, page_counts = await _collect_listing_pages(
+        main_page, area_pages, community_name
     )
     log.info("分页采集完成: 每页 %s", page_counts)
 
-    # 7. 解析在售房源 + 按小区名过滤（fang 关键词搜索是宽匹配，翻页后会混入无关小区）
-    snapshots = parsers.parse_listing_snapshots(merged_html)
-    filtered = filter_snapshots_by_community(snapshots, community_name)
-    log.info("在售房源过滤: 总 %d 条 → 匹配小区 %s %d 条", len(snapshots), community_name, len(filtered))
-    if not filtered:
+    # 7. 返回前防御校验，确保在售价格与房源明细来自同一批目标小区数据
+    snapshots, quote_prices = prepare_listing_data(collected_snapshots, community_name)
+    log.info(
+        "房天下在售房源最终校验: 已采集 %d 条 -> 匹配小区 %s %d 条",
+        len(collected_snapshots), community_name, len(snapshots),
+    )
+    if not snapshots:
         return short_circuit_result(
             "房天下", "NO_DATA", f"面积筛选后未匹配到小区: {community_name}",
             request_id, started_at,
         )
-    snapshots = filtered
-    quote_prices = [s.unit_price for s in snapshots if s.unit_price]
     if not quote_prices:
         return short_circuit_result(
             "房天下", "NO_DATA", "面积结果页未抓到在售单价",
