@@ -52,7 +52,8 @@
 
 - **面积筛选**：所有平台已统一为"动态读取页面 HTML 档位 + 点击对应链接"的方式，
   由 `base.py` 的 `click_area_segment` 提供通用逻辑，各平台只需实现 `parsers.parse_area_segments`。
-- **安居客**：无成交记录，业务上用挂牌均价顶替 `deal_prices`；无分页，滚动到底即可；不点详情页；搜索结果先校验至少有一条目标小区快照，最终计算前再按目标小区过滤在售快照，避免宽搜索混入其他小区。
+- **小区数据过滤**：所有平台搜索后先校验目标小区；分页平台逐页过滤，只累计目标小区房源。第 1 页非空但全部无关时返回 `NO_DATA`，第 2 页起非空但全部无关时立即停止后续翻页并保留此前有效数据；返回前再次校验，确保房源明细与在售价格来自同一批数据。
+- **安居客**：无成交记录，业务上用挂牌均价顶替 `deal_prices`；无分页，滚动到底即可；不点详情页。
 - **乐有家**：同安居客，无成交记录，小区均价顶替 `deal_prices`；搜索走 URL 参数。
 - **链家**：贝壳子公司，DOM 高度相似；成交筛选用严格区间 + 近半年（与贝壳 ±20% 容差不同）。
 - **房天下**：成交筛选用严格区间 + 近半年；详情入口只在第一页，Ctrl+点击后台打开。
@@ -70,13 +71,14 @@
 7. 刷新常驻页面，执行轻量保活。
 8. 搜索目标小区，并校验搜索结果里至少存在一条目标小区快照。
 9. 结果页按面积筛选。
-10. 抓取主结果区在售单价，过滤推荐/广告区块，并在最终计算均价前按目标小区再次过滤快照。
-11. 如有分页，按真实点击页码方式翻页并采集。
-12. 如需详情页，打开小区详情。
-13. 抓取小区均价和成交案例（平台有则采，无则跳过或顶替）。
-14. 对成交案例按面积筛选后计算成交均价。
-15. 按业务规则计算最终单价。
-16. 返回结果，页面回到待命状态。
+10. 抓取主结果区，过滤推荐/广告区块，并立即按目标小区过滤房源快照。
+11. 如有分页，按真实点击页码采集：第 1 页非空但全部无关时返回 `NO_DATA`；第 2 页起非空但全部无关时立即停止，混合页只保留匹配房源并继续；空页走独立空页检测。
+12. 返回平台结果前再次过滤，并从同一批快照生成 `listing_snapshots` 与 `quote_prices`。
+13. 如需详情页，打开小区详情。
+14. 抓取小区均价和成交案例（平台有则采，无则跳过或顶替）。
+15. 对成交案例按面积筛选后计算成交均价。
+16. 按业务规则计算最终单价。
+17. 返回结果，页面回到待命状态。
 
 > 如果所有平台都不支持该城市，直接返回 `NO_DATA`，note 为"不支持该城市"。
 
@@ -305,9 +307,10 @@ FastAPI 入口。接口清单：
 | `click_area_segment(page, area, parse_func, code)` | 动态读取面积档位并点击匹配项 |
 | `is_generic_captcha_page(html)` | 通用验证码页兜底检测（跨平台共性） |
 | `short_circuit_result(name, status, reason, ...)` | 统一构造短路返回（NO_DATA 等），消除各平台重复模板 |
-| `community_name_match(request_name, page_name)` | 小区名匹配（容忍分期括号 + 命名差异） |
+| `community_name_match(request_name, captured_name)` | 比较请求小区名与抓取快照的结构化小区名；不使用整页 HTML、标题或搜索词 |
 | `has_matching_community_snapshots(snapshots, community_name)` | 判断搜索结果里是否至少命中一条目标小区快照，用于首轮校验 |
-| `filter_snapshots_by_community(snapshots, community_name)` | 在最终计算前按目标小区过滤快照，剔除宽搜索混入的其他小区 |
+| `filter_snapshots_by_community(snapshots, community_name)` | 只按 `ListingSnapshot.community_name` 过滤抓取数据，供逐页过滤和返回前防御校验共用 |
+| `prepare_listing_data(snapshots, community_name)` | 过滤目标小区快照，并从同一批快照生成 `quote_prices`，保证明细与价格同源 |
 
 ### `app/platforms/<code>.py` + `adapters/<code>.py`
 
@@ -402,22 +405,22 @@ python -m app.scripts.api_server
 
 常用参数（所有脚本统一）：
 
-- `--debug` — 开启调试模式，导出关键页面 HTML 到 `debug/` 目录
+- `--debug` — 开启调试模式，导出关键页面 HTML 到 `excel/` 目录（兼容旧参数 `--excel`）
 - `--manual-login` — 启用终端回车确认登录：平台未就绪时提示回车，人工完成登录后继续
 
 ```bash
 # 调试 + 人工登录确认
-python -m app.scripts.api_server --excel --manual-login
+python -m app.scripts.api_server --debug --manual-login
 ```
 
 ### 单平台 MVP 测试
 
 ```bash
-python -m app.scripts.ke_mvp_test --excel --manual-login       # 贝壳
-python -m app.scripts.ajk_mvp_test --excel --manual-login      # 安居客
-python -m app.scripts.lj_mvp_test --excel --manual-login       # 链家
-python -m app.scripts.fang_mvp_test --excel --manual-login     # 房天下
-python -m app.scripts.lyj_mvp_test --excel --manual-login      # 乐有家
+python -m app.scripts.ke_mvp_test --debug --manual-login       # 贝壳
+python -m app.scripts.ajk_mvp_test --debug --manual-login      # 安居客
+python -m app.scripts.lj_mvp_test --debug --manual-login       # 链家
+python -m app.scripts.fang_mvp_test --debug --manual-login     # 房天下
+python -m app.scripts.lyj_mvp_test --debug --manual-login      # 乐有家
 ```
 
 ### 接单测试
@@ -670,7 +673,7 @@ persist/                  # 项目根目录下
 
 ### 调试 HTML
 
-开启调试模式（`--debug` 或 `RPA_DEBUG=1`）后，关键页面 HTML 导出到 `debug/*.html`。
+开启调试模式（`--debug`、兼容参数 `--excel`，或 `RPA_DEBUG=1`）后，关键页面 HTML 导出到 `excel/*.html`。
 
 主要用于：
 

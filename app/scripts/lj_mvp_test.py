@@ -1107,9 +1107,11 @@ def cli():
         help="首次打开若被拦截，先人工过验证码 / 登录，回车后重新打开再探测。",
     )
     parser.add_argument(
+        "--debug",
         "--excel",
+        dest="debug",
         action="store_true",
-        help="开启 RPA 调试模式，导出关键页面 HTML 到 excel 目录。",
+        help="开启 RPA 调试模式，导出关键页面 HTML 到 excel 目录（兼容旧参数 --excel）。",
     )
     parser.add_argument(
         "--search-only",

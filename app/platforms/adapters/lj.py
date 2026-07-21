@@ -21,7 +21,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import random
 import re
@@ -31,7 +30,7 @@ from typing import Optional
 
 from app.core import config
 from app.utils.debug_utils import dump_html
-from app.core.models import PlatformResult
+from app.core.models import ListingSnapshot, PlatformResult
 from app.parsers import lj as parsers
 from app.platforms.base import (
     wait_and_reload_after_block,
@@ -40,10 +39,9 @@ from app.platforms.base import (
     click_area_segment,
     safe_select_and_click,
     short_circuit_result,
-    community_name_match,
     has_matching_community_snapshots,
     filter_snapshots_by_community,
-    check_page_community_match_rate,
+    prepare_listing_data,
     check_empty_listing_page,
 )
 from app.platforms.lj_constants import START_URL
@@ -305,85 +303,6 @@ async def _fill_area_inputs(page, area_min, area_max):
     return confirm_clicked
 
 
-async def _recover_community_filter(page, community_name: str) -> bool:
-    """风控恢复后重新锁定小区：点击结果页顶部小区筛选 dl 里的目标小区项。
-
-    链家/贝壳搜索结果页顶部有小区筛选 dl（<dt title="深圳小区在售二手房">），
-    风控跳转可能把 URL 的小区限定（rs小区名）冲掉，继续翻页会采到别的小区。
-    本函数在 dl 里找 .name 匹配目标小区的 a 标签并点击，重新锁定小区。
-
-    Returns: True 表示成功点击并重新锁定；False 表示 dl 不在或没匹配项（调用方应停止翻页保数据正确）。
-    """
-    # 用 JS 收集小区筛选 dl 内所有候选 {name, href}，Python 侧匹配后按 href 点击对应 a
-    js = """
-    (() => {
-        const dt = document.querySelector('dt[title*="小区在售二手房"]');
-        if (!dt) return JSON.stringify({ok: false, reason: 'NO_DL'});
-        const dl = dt.closest('dl');
-        if (!dl) return JSON.stringify({ok: false, reason: 'NO_DL'});
-        const items = [];
-        dl.querySelectorAll('a').forEach(a => {
-            const nameSpan = a.querySelector('.name');
-            if (nameSpan) items.push({name: nameSpan.textContent.trim(), href: a.getAttribute('href') || ''});
-        });
-        return JSON.stringify({ok: true, items: items});
-    })()
-    """
-    try:
-        raw = await page.evaluate(js, return_by_value=True)
-    except Exception as exc:
-        log.warning("重新锁定小区时读筛选区失败: %s", exc)
-        return False
-
-    try:
-        data = json.loads(raw) if raw else {}
-    except Exception:
-        data = {}
-    if not data.get("ok"):
-        log.info("小区筛选 dl 不存在或为空，无法重新锁定")
-        return False
-
-    items = data.get("items") or []
-    # 用 community_name_match 找匹配目标小区的项
-    target = None
-    for it in items:
-        if community_name_match(community_name, it.get("name", "")):
-            target = it
-            break
-    if target is None:
-        log.info("小区筛选 dl 候选 %s 与目标 %r 不匹配，不点击", items, community_name)
-        return False
-
-    # 按目标 href 定位 a 并点击（href 形如 /ershoufang/c{id}rs{小区}/）
-    href = target.get("href", "")
-    el = None
-    # 优先用小区 id 段（c{数字}rs）定位，唯一且不受 URL 编码影响
-    cid_match = re.search(r"/c(\d+)rs", href)
-    locator = f"/c{cid_match.group(1)}rs" if cid_match else href[-40:]
-    if locator:
-        try:
-            el = await page.select(f'a[href*="{locator}"]', timeout=3)
-        except Exception:
-            el = None
-    if el is None:
-        # 兜底：用文本找
-        try:
-            el = await page.find(target.get("name", ""), timeout=3)
-        except Exception:
-            el = None
-    if el is None:
-        log.warning("匹配到筛选项 %r 但定位不到可点击元素", target)
-        return False
-
-    clicked = await _human_click(page, el, f"重新锁定小区 {target.get('name')}")
-    if clicked:
-        await page
-        await asyncio.sleep(3)
-        log.info("已点击重新锁定小区: %s", target.get("name"))
-        return True
-    return False
-
-
 # ============================================================
 # 在售分页采集（参考贝壳 collect_listing_pages + 风控检测）
 # ============================================================
@@ -412,83 +331,56 @@ async def _click_listing_page_number(page, page_no: int) -> Optional[str]:
 
 
 
-async def _collect_listing_pages(page, first_page_html: str, total_pages: int, community_name: str = ""):
-    """逐页采集在售 HTML，合并后返回。参考贝壳 collect_listing_pages。
+async def _collect_listing_pages(page, total_pages: int, community_name: str = ""):
+    """逐页采集并只累计匹配目标小区的在售房源。
 
-    每页截断到"猜你喜欢"之前再拼接。
+    每页截断到"猜你喜欢"之前再解析。
     翻页前真人滚动停留，翻页后用通用 detect_block 检测风控，被拦则暂停等人工。
-    风控恢复后验证小区限定是否还在（风控跳转可能冲掉 URL 的 rs 小区限定），
-    丢了则点结果页顶部小区筛选 dl 重新锁定，无法恢复则停止翻页保数据正确。
+    第 2 页起若整页无目标小区房源，立即停止后续翻页。
     """
 
     def _cut_main(html_text: str) -> str:
         cut = html_text.find("猜你喜欢")
         return html_text[:cut] if cut > 0 else html_text
 
-    all_html_parts: list[str] = [_cut_main(first_page_html)]
+    all_snapshots: list[ListingSnapshot] = []
     page_counts: list[tuple[int, int]] = []
-    last_html = first_page_html
     consecutive_empty = 0
-    consecutive_no_match = 0
 
-    # 注意：用 while 而非 for range。风控后重新锁定小区会把浏览器带回第 1 页，
-    # 必须把 page_no 重置成 1 才能从第 1 页重新翻起；for range 的循环变量赋值会被
-    # 下一轮覆盖，无法重置，故显式 while + 末尾 page_no += 1。
-    page_no = 1
-    while page_no <= total_pages:
+    for page_no in range(1, total_pages + 1):
         if page_no > 1:
             # 翻页前真人滚动停留（防风控）
             await human_linger(page, page_no)
             # 翻页前风控预检（human_linger 停留期间可能被风控，DOM 被替换成验证码页）
             await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页(翻页前)")
 
-            last_html = await _click_listing_page_number(page, page_no)
-            if last_html is None:
+            if await _click_listing_page_number(page, page_no) is None:
                 log.warning("第 %d 页无法翻页，停止翻页保数据正确", page_no)
                 break
 
             # 翻页后风控兜底（检测→等人回车→重取，最多2次；不重新点页码避免再触发验证码）
-            last_html = await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页")
-
-            # 风控恢复后验证小区限定是否还在（风控跳转可能冲掉查询条件）
-            if community_name:
-                page_snaps = parsers.parse_listing_snapshots(last_html)
-                if page_snaps and not has_matching_community_snapshots(page_snaps, community_name):
-                    # 限定丢失，尝试点小区筛选 dl 重新锁定
-                    if await _recover_community_filter(page, community_name):
-                        log.info("第 %d 页风控后重新锁定小区 %s", page_no, community_name)
-                        last_html = await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页(重新锁定后)")
-                        # 重新锁定会让浏览器回到该小区第 1 页，重置 page_no 从第 1 页重新翻起，
-                        # 否则当轮会把第 1 页当成本页采入、下一轮又跳 page_no+1，数据错位。
-                        page_no = 1
-                    else:
-                        log.warning("第 %d 页风控后小区限定丢失且无法恢复，停止翻页保数据正确", page_no)
-                        break
-
-            all_html_parts.append(_cut_main(last_html))
+            await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页")
         else:
             await human_linger(page, page_no)
 
-        last_html = await page.get_content()
-        if page_no > 1:
-            all_html_parts[-1] = _cut_main(last_html)
-
-        page_snaps = parsers.parse_listing_snapshots(_cut_main(last_html))
+        page_html = await page.get_content()
+        page_snaps = parsers.parse_listing_snapshots(_cut_main(page_html))
+        matched_snapshots = filter_snapshots_by_community(page_snaps, community_name)
         count = len(page_snaps)
         page_counts.append((page_no, count))
-        log.info("第 %d 页在售: %d 条", page_no, count)
+        log.info(
+            "链家第 %d/%d 页在售过滤: 总 %d 条 -> 匹配小区 %s %d 条",
+            page_no, total_pages, count, community_name, len(matched_snapshots),
+        )
 
-        # 翻页兜底：连续 2 页无匹配小区 → 关键词搜索是宽匹配，停止翻页
-        if community_name and page_snaps:
-            match_rate = check_page_community_match_rate(page_snaps, community_name)
-            if match_rate == 0:
-                consecutive_no_match += 1
-                log.warning("第 %d 页无匹配小区 %s (连续 %d 页)", page_no, community_name, consecutive_no_match)
-                if consecutive_no_match >= 2:
-                    log.warning("连续 %d 页无匹配小区，停止翻页", consecutive_no_match)
-                    break
+        if page_snaps and not matched_snapshots:
+            if page_no == 1:
+                log.warning("第 1 页面积结果全部不属于小区 %s，停止采集", community_name)
             else:
-                consecutive_no_match = 0
+                log.warning("第 %d 页房源全部不属于小区 %s，停止后续翻页", page_no, community_name)
+            break
+
+        all_snapshots.extend(matched_snapshots)
 
         # 空页检测：首页空→error+停止，连续空页≥2→warning+停止
         should_stop, consecutive_empty = check_empty_listing_page(
@@ -496,10 +388,7 @@ async def _collect_listing_pages(page, first_page_html: str, total_pages: int, c
         if should_stop:
             break
 
-        page_no += 1
-
-    merged_html = "\n".join(all_html_parts)
-    return merged_html, page_counts
+    return all_snapshots, page_counts
 
 
 # ============================================================
@@ -753,20 +642,22 @@ async def _do_collect(
     # 5. 分页采集在售房源
     total_pages = parsers.parse_listing_total_pages(area_html)
     log.info("在售总页数: %d", total_pages)
-    merged_html, page_counts = await _collect_listing_pages(main_page, area_html, total_pages, community_name)
+    collected_snapshots, page_counts = await _collect_listing_pages(
+        main_page, total_pages, community_name
+    )
     log.info("在售分页完成: 每页 %s", page_counts)
 
-    # 6. 解析在售房源 + 按小区名过滤（lj 关键词搜索是宽匹配，翻页后会混入无关小区）
-    snapshots = parsers.parse_listing_snapshots(merged_html)
-    filtered = filter_snapshots_by_community(snapshots, community_name)
-    log.info("在售房源过滤: 总 %d 条 → 匹配小区 %s %d 条", len(snapshots), community_name, len(filtered))
-    if not filtered:
+    # 6. 返回前防御校验，确保在售价格与房源明细来自同一批目标小区数据
+    snapshots, quote_prices = prepare_listing_data(collected_snapshots, community_name)
+    log.info(
+        "链家在售房源最终校验: 已采集 %d 条 -> 匹配小区 %s %d 条",
+        len(collected_snapshots), community_name, len(snapshots),
+    )
+    if not snapshots:
         return short_circuit_result(
             "链家", "NO_DATA", f"面积筛选后未匹配到小区: {community_name}",
             request_id, started_at,
         )
-    snapshots = filtered
-    quote_prices = [s.unit_price for s in snapshots if s.unit_price]
     if not quote_prices:
         return short_circuit_result(
             "链家", "NO_DATA", "面积结果页未抓到在售单价",

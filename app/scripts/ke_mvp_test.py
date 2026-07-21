@@ -604,9 +604,11 @@ def cli():
         help="启动后等待人工完成登录，回车后继续。",
     )
     parser.add_argument(
+        "--debug",
         "--excel",
+        dest="debug",
         action="store_true",
-        help="开启 RPA 调试模式，导出关键页面 HTML 到 excel 目录。",
+        help="开启 RPA 调试模式，导出关键页面 HTML 到 excel 目录（兼容旧参数 --excel）。",
     )
     parser.add_argument(
         "--community",

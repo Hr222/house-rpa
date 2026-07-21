@@ -3,7 +3,7 @@
 
 用法：
   1. 先启动 RPA 服务并确认所有平台就绪：
-     python -m app.scripts.api_server --excel --manual-login
+     python -m app.scripts.api_server --debug --manual-login
   2. 再跑本脚本：
      python test_evaluate.py
 
@@ -24,8 +24,162 @@ BASE_URL = "http://127.0.0.1:8000"
 INPUT_FILE = "C:/Users/Administrator/Desktop/房产评估汇总表_生成2.xlsx"
 OUTPUT_DIR = Path(__file__).parent / "results"
 POLL_INTERVAL = 6       # 轮询间隔秒数（>5 避免连续 429）
-MAX_WAIT = 600          # 单任务最长等待秒数（10 分钟，fang 最多翻 10 页约 70s）
+MAX_WAIT = 600          # 单任务软等待阈值；超过后只报警，不判失败，继续阻塞等待
 DEFAULT_CITY = "广州"    # Excel 无 city 列时的默认城市
+REQUEST_TIMEOUT = 15    # 单次 HTTP 请求超时
+READY_CHECK_INTERVAL = 5
+MANUAL_BLOCK_KEYWORDS = (
+    "验证码", "人机验证", "验证", "风控", "captcha", "verify",
+    "登录已失效", "登录", "WAIT_MANUAL_VERIFY", "LOGIN_EXPIRED",
+)
+
+
+def _safe_json(resp):
+    try:
+        return resp.json()
+    except Exception:
+        return {}
+
+
+def _http(method: str, path: str, **kwargs):
+    kwargs.setdefault("timeout", REQUEST_TIMEOUT)
+    return requests.request(method, f"{BASE_URL}{path}", **kwargs)
+
+
+def _looks_like_manual_block(text: str | None) -> bool:
+    if not text:
+        return False
+    lower = str(text).lower()
+    return any(keyword.lower() in lower for keyword in MANUAL_BLOCK_KEYWORDS)
+
+
+def _extract_manual_block_reasons(snapshot: dict) -> list[str]:
+    reasons = []
+    for platform in snapshot.get("platforms", []):
+        status_code = platform.get("statusCode", "")
+        message = platform.get("message", "")
+        if status_code in {"WAIT_MANUAL_VERIFY", "WAIT_LOGIN"} or _looks_like_manual_block(message):
+            reasons.append(f"{platform.get('name', platform.get('code', '未知平台'))}: {message or status_code}")
+    return reasons
+
+
+def _wait_until_service_ready(reason: str):
+    """服务端进入人工验证/重新登录状态时，阻塞等待恢复。"""
+    print(f"\n  ⚠ 服务端待人工处理：{reason}")
+    printed_hint = False
+    heartbeat = 0
+    while True:
+        try:
+            ready_resp = _http("GET", "/health/ready")
+            if ready_resp.status_code == 200:
+                print("  服务已恢复就绪，继续当前任务")
+                return
+        except requests.RequestException as exc:
+            print(f"  等待服务恢复时请求失败：{exc}")
+
+        snapshot = {}
+        try:
+            status_resp = _http("GET", "/admin/status")
+            snapshot = _safe_json(status_resp).get("data", {}) if status_resp.status_code == 200 else {}
+        except requests.RequestException:
+            snapshot = {}
+
+        if not printed_hint:
+            reasons = _extract_manual_block_reasons(snapshot)
+            if reasons:
+                for item in reasons:
+                    print(f"  - {item}")
+            print("  请在浏览器处理验证码/登录问题，并在 api_server 所在终端完成必要的回车确认。")
+            printed_hint = True
+        elif heartbeat % 6 == 0:
+            service_code = snapshot.get("serviceStatusCode", "UNKNOWN")
+            current_task = snapshot.get("currentTaskId") or "-"
+            print(f"  仍在等待服务恢复... service={service_code} currentTaskId={current_task}")
+
+        heartbeat += 1
+        time.sleep(READY_CHECK_INTERVAL)
+
+
+def _create_inquiry_task(city: str, community: str, area: float) -> str | None:
+    """创建询价任务。服务端待人工处理时阻塞等待恢复，而不是直接失败。"""
+    while True:
+        try:
+            resp = _http(
+                "POST",
+                "/inquiries",
+                json={
+                    "city": city,
+                    "communityName": community,
+                    "area": area,
+                    "algorithmMode": "default",
+                },
+            )
+        except requests.RequestException as exc:
+            print(f"  创建任务请求失败，{READY_CHECK_INTERVAL}s 后重试：{exc}", flush=True)
+            time.sleep(READY_CHECK_INTERVAL)
+            continue
+
+        if resp.status_code == 202:
+            return _safe_json(resp).get("data", {}).get("taskId")
+
+        if resp.status_code == 503:
+            payload = _safe_json(resp)
+            snapshot = payload.get("data", {})
+            reason = payload.get("message") or snapshot.get("serviceStatus") or "RPA 服务未就绪"
+            _wait_until_service_ready(reason)
+            continue
+
+        print(f"  ❌ 创建任务失败: {resp.status_code} {resp.text[:100]}")
+        return None
+
+
+def _poll_task_until_done(task_id: str) -> tuple[str, dict | None]:
+    """轮询任务结果。遇到人工验证/登录短路时，返回 RETRY 让上层重试当前记录。"""
+    print(f"  taskId={task_id[:12]}... 等待中", end="", flush=True)
+    elapsed = 0
+    warned_long_wait = False
+
+    while True:
+        time.sleep(POLL_INTERVAL)
+        elapsed += POLL_INTERVAL
+
+        try:
+            resp = _http("GET", f"/inquiries/{task_id}")
+        except requests.RequestException as exc:
+            print(f"\n  查询任务失败，继续等待：{exc}")
+            continue
+
+        if resp.status_code == 429:
+            retry = _safe_json(resp).get("data", {}).get("retryAfter", 10)
+            time.sleep(retry)
+            elapsed += retry
+            continue
+
+        if resp.status_code != 200:
+            print(f"\n  查询任务异常: {resp.status_code} {resp.text[:100]}")
+            continue
+
+        body = _safe_json(resp).get("data", {})
+
+        if "finalPrice" in body and body["finalPrice"] is not None:
+            print(f"  完成 ({elapsed}s)")
+            return "DONE", body
+
+        status_code = body.get("statusCode", body.get("status", ""))
+        if status_code in ("COMPLETED", "FAILED"):
+            reason = body.get("note") or body.get("error") or body.get("branch") or "无数据"
+            if _looks_like_manual_block(reason):
+                print(f"\n  检测到人工验证/登录短路 ({elapsed}s): {reason}")
+                _wait_until_service_ready(reason)
+                return "RETRY", None
+            print(f"  无数据 ({elapsed}s): {reason}")
+            return "DONE", body
+
+        if elapsed >= MAX_WAIT and not warned_long_wait:
+            warned_long_wait = True
+            print(f"\n  已等待 {elapsed}s，任务仍未完成；继续阻塞等待，可能正在人工过风控")
+
+        print(".", end="", flush=True)
 
 # ─── 读取评估表 ─────────────────────────────────────────
 wb_in = openpyxl.load_workbook(INPUT_FILE)
@@ -74,7 +228,7 @@ for row_idx in range(2, ws_in.max_row + 1):
 print(f"读取到 {len(data)} 条评估记录")
 
 # ─── 检查服务就绪 ───────────────────────────────────────
-r = requests.get(f"{BASE_URL}/health/ready")
+r = _http("GET", "/health/ready")
 if r.status_code != 200:
     print("❌ RPA 服务未就绪，请先启动并确认所有平台就绪")
     sys.exit(1)
@@ -90,73 +244,26 @@ for i, item in enumerate(data):
     city = item["city"]
 
     print(f"\n[{i+1}/{len(data)}] {city} {community} 面积={area}㎡ 评估单价={eval_price}")
-
-    # 创建询价任务（503 时等待后重试）
-    for retry in range(6):
-        r = requests.post(
-            f"{BASE_URL}/inquiries",
-            json={"city": city, "communityName": community, "area": area, "algorithmMode": "default"},
-        )
-        if r.status_code == 202:
-            break
-        if r.status_code == 503:
-            print(f"  服务降级中，10s后重试({retry+1}/6)...", flush=True)
-            time.sleep(10)
-        else:
-            break
-
-    if r.status_code != 202:
-        print(f"  ❌ 创建任务失败: {r.status_code} {r.text[:100]}")
-        results.append({
-            "社区": community, "面积": area, "评估单价": eval_price,
-            "询价单价": None, "差距%": None, "分支": "ERROR",
-            "在售均价": None, "成交均价": None, "状态": "FAILED",
-        })
-        continue
-
-    task_id = r.json()["data"]["taskId"]
-    print(f"  taskId={task_id[:12]}... 等待中", end="", flush=True)
-
-    # 轮询结果
-    elapsed = 0
     final_data = None
-    while elapsed < MAX_WAIT:
-        time.sleep(POLL_INTERVAL)
-        elapsed += POLL_INTERVAL
-        r = requests.get(f"{BASE_URL}/inquiries/{task_id}")
+    while True:
+        task_id = _create_inquiry_task(city, community, area)
+        if not task_id:
+            results.append({
+                "社区": community, "面积": area, "评估单价": eval_price,
+                "询价单价": None, "差距%": None, "分支": "ERROR",
+                "在售均价": None, "成交均价": None, "状态": "FAILED",
+            })
+            break
 
-        # 限流 429：等提示的秒数再试
-        if r.status_code == 429:
-            retry = r.json().get("data", {}).get("retryAfter", 10)
-            time.sleep(retry)
-            elapsed += retry
+        outcome, payload = _poll_task_until_done(task_id)
+        if outcome == "RETRY":
+            print("  当前记录将在服务恢复后自动重试")
             continue
 
-        body = r.json().get("data", {})
-
-        # task 已完成且有 finalPrice → 正常取值
-        if "finalPrice" in body and body["finalPrice"] is not None:
-            final_data = body
-            print(f"  完成 ({elapsed}s)")
-            break
-
-        # task 已完成但没 finalPrice（全平台 NO_DATA，branch=NO_DATA）
-        status_code = body.get("statusCode", body.get("status", ""))
-        if status_code in ("COMPLETED", "FAILED"):
-            # 优先显示各平台无数据原因汇总（note），其次分支，最后 error
-            note = body.get("note") or body.get("branch") or body.get("error", "无数据")
-            final_data = body
-            print(f"  无数据 ({elapsed}s): {note}")
-            break
-
-        print(".", end="", flush=True)
+        final_data = payload
+        break
 
     if final_data is None:
-        results.append({
-            "社区": community, "面积": area, "评估单价": eval_price,
-            "询价单价": None, "差距%": None, "分支": "TIMEOUT",
-            "在售均价": None, "成交均价": None, "状态": "TIMEOUT",
-        })
         continue
 
     # 计算结果
