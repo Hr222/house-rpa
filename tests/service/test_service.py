@@ -64,32 +64,32 @@ def test_build_inquiry_result_quote_only():
     """quote_only 模式：只看在售均价打折，忽略成交数据。"""
     a = PlatformResult(
         name="平台A", status="SUCCESS",
-        community_avg_price=100.0,
-        quote_prices=[],
+        community_avg_price=1000.0,
+        quote_prices=[10.0, 20.0],
         deal_prices=[80.0],  # 成交价应被忽略
     )
     b = PlatformResult(
         name="平台B", status="SUCCESS",
-        community_avg_price=200.0,
-        quote_prices=[],
+        community_avg_price=2000.0,
+        quote_prices=[100.0],
         deal_prices=[150.0],
     )
 
     result = build_inquiry_result([a, b], algorithm_mode="quote_only")
 
     assert result.success is True
-    # quote_avg = (100+200)/2 = 150, deal_avg 不使用
-    assert result.quote_avg == 150.0
+    # quote_avg = (10+20+100)/3, community_avg_price 不参与
+    assert result.quote_avg == 43.33
     assert result.deal_avg is None
-    # 150 * 0.9 = 135.0
-    assert result.final_price == 135.0
+    # 43.333... * 0.9 = 39.0
+    assert result.final_price == 39.0
     assert result.branch == "QUOTE_ONLY"
 
 
 def test_build_inquiry_result_quote_only_no_quote():
     """quote_only 模式无在售数据时返回 FAILED。"""
     result = build_inquiry_result(
-        [PlatformResult(name="平台A", status="SUCCESS")],
+        [PlatformResult(name="平台A", status="SUCCESS", community_avg_price=100.0)],
         algorithm_mode="quote_only",
     )
 

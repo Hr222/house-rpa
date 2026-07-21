@@ -38,8 +38,8 @@ log = logging.getLogger("fang-mvp-test")
 START_URL = "https://sz.esf.fang.com/"
 
 # 固定测试场景：与贝壳/安居客脚本一致
-COMMUNITY_NAME = "绿景虹湾"
-AREA = 80.0
+COMMUNITY_NAME = "星河丹堤花园"
+AREA = 87.97
 
 
 # ============================================================

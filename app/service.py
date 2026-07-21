@@ -8,7 +8,7 @@ import logging
 from typing import Iterable, Optional
 
 from app.core import config
-from app.core.algorithm import decide, decide_quote_only, mean
+from app.core.algorithm import AlgorithmInput, evaluate_algorithm
 from app.core.models import InquiryRequest, InquiryResult, PlatformResult, PlatformSession
 from app.platforms.base import PlatformAdapter
 from app.core.price_utils import format_price, round_price
@@ -26,21 +26,20 @@ def build_inquiry_result(
         "default"    — 现有算法（成交+在售，via decide()）
         "quote_only" — 纯在售算法（只用在售均价打折，via decide_quote_only()）
     """
-    # 收集所有平台的在售均价（优先用 community_avg_price，其次 quote_prices 均值）
-    all_quote_avgs: list[float] = []
-    all_deal_prices: list[float] = []
+    successful_results = [r for r in platform_results if r.status == "SUCCESS"]
+    evaluation = evaluate_algorithm(
+        algorithm_mode=algorithm_mode,
+        inputs=AlgorithmInput(
+            quote_price_lists=[r.quote_prices for r in successful_results],
+            community_avg_prices=[r.community_avg_price for r in successful_results],
+            deal_price_lists=[r.deal_prices for r in successful_results],
+            diff_threshold=config.DEAL_DIFF_THRESHOLD,
+            no_deal_discount=config.get_no_deal_discount(),
+            quote_only_discount=config.get_quote_only_discount(),
+        ),
+    )
 
-    for r in platform_results:
-        if r.status != "SUCCESS":
-            continue
-        # 在售均价
-        quote = r.community_avg_price or mean(r.quote_prices)
-        if quote is not None and quote > 0:
-            all_quote_avgs.append(quote)
-        # 成交单价（quote_only 模式下仍收集但不用）
-        all_deal_prices.extend(r.deal_prices)
-
-    if not all_quote_avgs:
+    if evaluation.quote_avg is None:
         # 全部平台都不支持该城市时，返回简洁提示
         all_city_unsupported = (
             len(platform_results) > 0
@@ -56,28 +55,12 @@ def build_inquiry_result(
             note = "; ".join(reasons) if reasons else "所有平台均无数据"
         return InquiryResult(success=False, branch="NO_DATA", note=note, platform_results=platform_results)
 
-    quote_avg = sum(all_quote_avgs) / len(all_quote_avgs)
-
-    if algorithm_mode == "quote_only":
-        decision = decide_quote_only(
-            quote_avg,
-            config.get_quote_only_discount(),
-        )
-        deal_avg = None
-    else:
-        deal_avg = mean(all_deal_prices) if all_deal_prices else None
-        decision = decide(
-            quote_avg,
-            deal_avg,
-            config.DEAL_DIFF_THRESHOLD,
-            config.get_no_deal_discount(),
-        )
     return InquiryResult(
-        success=decision.final_price is not None,
-        final_price=round_price(decision.final_price),
-        branch=decision.branch,
-        quote_avg=round_price(quote_avg),
-        deal_avg=round_price(deal_avg),
+        success=evaluation.decision.final_price is not None,
+        final_price=round_price(evaluation.decision.final_price),
+        branch=evaluation.decision.branch,
+        quote_avg=round_price(evaluation.quote_avg),
+        deal_avg=round_price(evaluation.deal_avg),
         platform=None,
         platform_results=platform_results,
     )

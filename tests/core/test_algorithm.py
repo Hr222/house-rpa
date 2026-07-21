@@ -1,6 +1,14 @@
 # -*- coding: utf-8 -*-
 """算法单元测试。"""
-from app.core.algorithm import mean, decide, decide_quote_only
+from app.core.algorithm import (
+    AlgorithmInput,
+    aggregate_quote_only_prices,
+    decide,
+    decide_quote_only,
+    evaluate_algorithm,
+    get_algorithm_strategy,
+    mean,
+)
 
 # ============ mean ============
 
@@ -14,6 +22,40 @@ class TestMean:
 
     def test_empty(self):
         assert mean([]) is None
+
+
+def test_aggregate_quote_only_pools_all_listing_prices():
+    assert aggregate_quote_only_prices([[10.0, 20.0], [100.0]]) == 130.0 / 3
+
+
+def test_algorithm_registry_dispatches_quote_only_strategy():
+    inputs = AlgorithmInput(
+        quote_price_lists=[[10.0, 20.0], [100.0]],
+        community_avg_prices=[1000.0, 2000.0],
+        deal_price_lists=[[80.0], [150.0]],
+    )
+
+    strategy = get_algorithm_strategy("quote_only")
+    result = evaluate_algorithm("quote_only", inputs)
+
+    assert strategy.__class__.__name__ == "QuoteOnlyAlgorithm"
+    assert result.quote_avg == 130.0 / 3
+    assert result.deal_avg is None
+    assert result.decision.final_price == 39.0
+
+
+def test_unknown_algorithm_mode_falls_back_to_default():
+    inputs = AlgorithmInput(
+        quote_price_lists=[[]],
+        community_avg_prices=[100.0],
+        deal_price_lists=[[90.0]],
+    )
+
+    result = evaluate_algorithm("unknown", inputs)
+
+    assert result.quote_avg == 100.0
+    assert result.deal_avg == 90.0
+    assert result.decision.branch == "DEAL_ONLY"
 
 
 # ============ decide ============

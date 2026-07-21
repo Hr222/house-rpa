@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Iterable, List, Optional, Protocol
 
 
 def mean(prices: List[float]) -> Optional[float]:
@@ -19,6 +19,66 @@ def mean(prices: List[float]) -> Optional[float]:
 class Decision:
     final_price: Optional[float]
     branch: str
+
+
+@dataclass
+class AlgorithmInput:
+    quote_price_lists: list[list[float]]
+    community_avg_prices: list[Optional[float]]
+    deal_price_lists: list[list[float]]
+    diff_threshold: float = 0.10
+    no_deal_discount: float = 0.9
+    quote_only_discount: float = 0.9
+
+
+class AlgorithmStrategy(Protocol):
+    def evaluate(self, inputs: AlgorithmInput) -> "AlgorithmEvaluation":
+        ...
+
+
+@dataclass
+class AlgorithmEvaluation:
+    quote_avg: Optional[float]
+    deal_avg: Optional[float]
+    decision: Decision
+
+
+def aggregate_default_quote(
+    quote_price_lists: Iterable[Iterable[float]],
+    community_avg_prices: Iterable[Optional[float]],
+) -> Optional[float]:
+    """Aggregate the historical DEFAULT quote source per platform."""
+    platform_quotes: list[float] = []
+    for quote_prices, community_avg_price in zip(
+        quote_price_lists,
+        community_avg_prices,
+    ):
+        quote = community_avg_price or mean(list(quote_prices))
+        if quote is not None and quote > 0:
+            platform_quotes.append(quote)
+    return mean(platform_quotes)
+
+
+def aggregate_quote_only_prices(
+    quote_price_lists: Iterable[Iterable[float]],
+) -> Optional[float]:
+    """Pool every listing price across successful platforms."""
+    all_quote_prices: list[float] = []
+    for quote_prices in quote_price_lists:
+        all_quote_prices.extend(
+            price for price in quote_prices if price is not None and price > 0
+        )
+    return mean(all_quote_prices)
+
+
+def aggregate_deal_prices(
+    deal_price_lists: Iterable[Iterable[float]],
+) -> Optional[float]:
+    """Pool every deal price across successful platforms."""
+    all_deal_prices: list[float] = []
+    for deal_prices in deal_price_lists:
+        all_deal_prices.extend(deal_prices)
+    return mean(all_deal_prices)
 
 
 def decide(
@@ -70,3 +130,58 @@ def decide_quote_only(
         final_price=quote_avg * quote_discount,
         branch="QUOTE_ONLY",
     )
+
+
+class DefaultAlgorithm:
+    """Historical transaction-plus-listing strategy."""
+
+    def evaluate(self, inputs: AlgorithmInput) -> AlgorithmEvaluation:
+        quote_avg = aggregate_default_quote(
+            inputs.quote_price_lists,
+            inputs.community_avg_prices,
+        )
+        deal_avg = aggregate_deal_prices(inputs.deal_price_lists)
+        return AlgorithmEvaluation(
+            quote_avg=quote_avg,
+            deal_avg=deal_avg,
+            decision=decide(
+                quote_avg,
+                deal_avg,
+                inputs.diff_threshold,
+                inputs.no_deal_discount,
+            ),
+        )
+
+
+class QuoteOnlyAlgorithm:
+    """Listing-only strategy that pools all listing prices."""
+
+    def evaluate(self, inputs: AlgorithmInput) -> AlgorithmEvaluation:
+        quote_avg = aggregate_quote_only_prices(inputs.quote_price_lists)
+        return AlgorithmEvaluation(
+            quote_avg=quote_avg,
+            deal_avg=None,
+            decision=decide_quote_only(
+                quote_avg,
+                inputs.quote_only_discount,
+            ),
+        )
+
+
+ALGORITHM_REGISTRY: dict[str, AlgorithmStrategy] = {
+    "default": DefaultAlgorithm(),
+    "quote_only": QuoteOnlyAlgorithm(),
+}
+
+
+def get_algorithm_strategy(algorithm_mode: str) -> AlgorithmStrategy:
+    """Resolve an algorithm mode, preserving DEFAULT fallback behavior."""
+    return ALGORITHM_REGISTRY.get(algorithm_mode, ALGORITHM_REGISTRY["default"])
+
+
+def evaluate_algorithm(
+    algorithm_mode: str,
+    inputs: AlgorithmInput,
+) -> AlgorithmEvaluation:
+    """Evaluate standard platform inputs through the selected strategy."""
+    return get_algorithm_strategy(algorithm_mode).evaluate(inputs)

@@ -111,7 +111,7 @@ def _create_inquiry_task(city: str, community: str, area: float) -> str | None:
                     "city": city,
                     "communityName": community,
                     "area": area,
-                    "algorithmMode": "default",
+                    "algorithmMode": "quote_only",
                 },
             )
         except requests.RequestException as exc:
@@ -285,7 +285,9 @@ for i, item in enumerate(data):
         diff_pct = round((final_price - eval_price) / eval_price * 100, 2)
 
     # 判断分支含义
-    if "QUOTE" in str(branch):
+    if "QUOTE_ONLY" in str(branch):
+        branch_display = "纯在售（折扣后）"
+    elif "QUOTE" in str(branch):
         branch_display = "采用售均价"
     elif "DEAL" in str(branch):
         branch_display = "差值>10%，取成交均价"
