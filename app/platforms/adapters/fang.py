@@ -37,6 +37,9 @@ from app.platforms.base import (
     short_circuit_result,
     has_matching_community_snapshots,
     filter_snapshots_by_community,
+    listing_filter_summary,
+    listing_no_data_reason,
+    listing_no_data_status,
     prepare_listing_data,
     check_empty_listing_page,
 )
@@ -727,14 +730,15 @@ async def _do_collect(
     log.info("分页采集完成: 每页 %s", page_counts)
 
     # 7. 返回前防御校验，确保在售价格与房源明细来自同一批目标小区数据
-    snapshots, quote_prices = prepare_listing_data(collected_snapshots, community_name)
+    snapshots, quote_prices = prepare_listing_data(collected_snapshots, community_name, area)
     log.info(
-        "房天下在售房源最终校验: 已采集 %d 条 -> 匹配小区 %s %d 条",
-        len(collected_snapshots), community_name, len(snapshots),
+        "房天下在售房源最终校验: %s",
+        listing_filter_summary(collected_snapshots, community_name, area),
     )
     if not snapshots:
         return short_circuit_result(
-            "房天下", "NO_DATA", f"面积筛选后未匹配到小区: {community_name}",
+            "房天下", listing_no_data_status(collected_snapshots, community_name, area),
+            listing_no_data_reason(collected_snapshots, community_name, area),
             request_id, started_at,
         )
     if not quote_prices:

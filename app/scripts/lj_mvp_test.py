@@ -20,7 +20,7 @@ from typing import Optional
 import nodriver as uc
 
 from app.core import config
-from app.core.algorithm import decide
+from app.core.algorithm import AlgorithmInput, evaluate_algorithm
 from app.utils.debug_utils import dump_html as shared_dump_html
 from app.utils.debug_utils import set_debug_mode
 from app.utils.mvp_result import print_mvp_result
@@ -683,8 +683,12 @@ def print_summary(
     all_deals_count: int,
     filtered_deals_count: int,
     deal_avg: Optional[float],
+    final_price: Optional[float],
+    branch: str,
     body_len: Optional[int],
     conclusion: str,
+    listing_snapshots: list,
+    algorithm_mode: str,
 ):
     print_mvp_result(
         platform="链家",
@@ -692,15 +696,15 @@ def print_summary(
         area=AREA,
         trace={
             "home_blocked": open_blocked,
-            "search_url": search_url,
+            "search_url": result_url,
             "area_ok": area_confirmed,
             "area_url": area_url,
-            "area_pages": total_pages,
+            "area_pages": 0,
             "detail_ok": detail_clicked,
             "detail_url": detail_url,
         },
         listings={
-            "count": listing_count,
+            "count": len(listing_snapshots),
             "avg": quote_avg,
             "snapshots": listing_snapshots,
         },
@@ -753,7 +757,12 @@ def print_summary(
     print()
 
 
-async def main(manual_login: bool = False, debug: bool = False, search_only: bool = False):
+async def main(
+    manual_login: bool = False,
+    debug: bool = False,
+    search_only: bool = False,
+    algorithm_mode: str = "default",
+):
     if debug:
         set_debug_mode(True)
 
@@ -795,6 +804,7 @@ async def main(manual_login: bool = False, debug: bool = False, search_only: boo
     deal_prices: list = []
     deal_avg = None
     final_price = None
+    branch = ""
 
     try:
         # ---- 第1步：打开首页 ----
@@ -859,7 +869,21 @@ async def main(manual_login: bool = False, debug: bool = False, search_only: boo
             merged_html, page_counts = await collect_listing_pages(page, search_html, total_pages)
             listing_snapshots = parse_listing_snapshots(merged_html)
             quote_prices = [s.unit_price for s in listing_snapshots if s.unit_price]
-            quote_avg = sum(quote_prices) / len(quote_prices) if quote_prices else None
+            evaluation = evaluate_algorithm(
+                algorithm_mode=algorithm_mode,
+                inputs=AlgorithmInput(
+                    quote_price_lists=[quote_prices],
+                    community_avg_prices=[None],
+                    deal_price_lists=[[]],
+                    diff_threshold=config.DEAL_DIFF_THRESHOLD,
+                    no_deal_discount=config.get_no_deal_discount(),
+                    quote_only_discount=config.get_quote_only_discount(),
+                ),
+            )
+            quote_avg = evaluation.quote_avg
+            deal_avg = evaluation.deal_avg
+            final_price = evaluation.decision.final_price
+            branch = evaluation.decision.branch
             area_prices_count = len(quote_prices)
             area_url = page.target.url or ""
             log.info(
@@ -873,6 +897,8 @@ async def main(manual_login: bool = False, debug: bool = False, search_only: boo
             print_listing_snapshots(listing_snapshots)
             print()
             print(f"在售均价(单位:元/平): {format_price(quote_avg)}")
+            print(f"算法模式: {algorithm_mode}")
+            print(f"最终取值(单位:元/平): {format_price(final_price)}")
             print("=" * 60)
 
             print_summary(
@@ -901,9 +927,13 @@ async def main(manual_login: bool = False, debug: bool = False, search_only: boo
                 deal_url="",
                 all_deals_count=0,
                 filtered_deals_count=0,
-                deal_avg=None,
+                deal_avg=deal_avg,
+                final_price=final_price,
+                branch=branch,
                 body_len=body_len,
                 conclusion=f"search-only: 分页 {len(page_counts)} 页，合计在售 {area_prices_count} 条，均价 {format_price(quote_avg)}",
+                listing_snapshots=listing_snapshots,
+                algorithm_mode=algorithm_mode,
             )
             await wait_for_manual_close()
             return
@@ -1019,15 +1049,24 @@ async def main(manual_login: bool = False, debug: bool = False, search_only: boo
                 else:
                     log.warning("[5] 未能打开小区详情页")
 
-            # ---- 算最终价：在售均价 vs 成交均价 ----
+            # ---- 算最终价：通过统一算法策略评估 ----
             if quote_avg is not None or deal_avg is not None:
-                decision = decide(
-                    quote_avg=quote_avg,
-                    deal_avg=deal_avg,
-                    diff_threshold=config.DEAL_DIFF_THRESHOLD,
-                    no_deal_discount=config.get_no_deal_discount(),
+                evaluation = evaluate_algorithm(
+                    algorithm_mode=algorithm_mode,
+                    inputs=AlgorithmInput(
+                        quote_price_lists=[quote_prices],
+                        # 链家服务层当前不取小区均价；脚本保留该值仅用于展示。
+                        community_avg_prices=[None],
+                        deal_price_lists=[deal_prices],
+                        diff_threshold=config.DEAL_DIFF_THRESHOLD,
+                        no_deal_discount=config.get_no_deal_discount(),
+                        quote_only_discount=config.get_quote_only_discount(),
+                    ),
                 )
-                final_price = decision.final_price
+                quote_avg = evaluation.quote_avg
+                deal_avg = evaluation.deal_avg
+                final_price = evaluation.decision.final_price
+                branch = evaluation.decision.branch
                 print()
                 print("=" * 60)
                 print("链家 平台结果")
@@ -1035,6 +1074,7 @@ async def main(manual_login: bool = False, debug: bool = False, search_only: boo
                 print()
                 print(f"在售均价(单位:元/平): {format_price(quote_avg)}")
                 print(f"成交均价(单位:元/平): {format_price(deal_avg)}")
+                print(f"算法模式: {algorithm_mode}")
                 print(f"最终取值(单位:元/平): {format_price(final_price)}")
                 print()
                 print("模拟返回 body")
@@ -1084,8 +1124,12 @@ async def main(manual_login: bool = False, debug: bool = False, search_only: boo
             all_deals_count=len(all_deals),
             filtered_deals_count=len(filtered_deals),
             deal_avg=deal_avg,
+            final_price=final_price,
+            branch=branch,
             body_len=body_len,
             conclusion=conclusion,
+            listing_snapshots=listing_snapshots,
+            algorithm_mode=algorithm_mode,
         )
 
         await wait_for_manual_close()
@@ -1118,8 +1162,21 @@ def cli():
         action="store_true",
         help="只测试搜索+在售分页，不做面积筛选和小区详情。",
     )
+    parser.add_argument(
+        "--algorithm-mode",
+        choices=("default", "quote_only"),
+        default="default",
+        help="算法模式：default=成交+在售，quote_only=仅在售均价打折。",
+    )
     args = parser.parse_args()
-    uc.loop().run_until_complete(main(manual_login=args.manual_login, debug=args.debug, search_only=args.search_only))
+    uc.loop().run_until_complete(
+        main(
+            manual_login=args.manual_login,
+            debug=args.debug,
+            search_only=args.search_only,
+            algorithm_mode=args.algorithm_mode,
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -96,3 +96,26 @@ def test_build_inquiry_result_quote_only_no_quote():
     assert result.success is False
     assert result.final_price is None
     assert result.branch == "NO_DATA"
+
+
+def test_build_inquiry_result_distinguishes_area_mismatch():
+    """所有平台命中小区但面积不匹配时，使用独立分支枚举。"""
+    result = build_inquiry_result(
+        [
+            PlatformResult(
+                name="平台A",
+                status="NO_MATCHING_AREA",
+                reason="命中小区但无请求面积±10%房源",
+            ),
+            PlatformResult(
+                name="平台B",
+                status="NO_MATCHING_AREA",
+                reason="命中小区但无请求面积±10%房源",
+            ),
+        ],
+        algorithm_mode="quote_only",
+    )
+
+    assert result.success is False
+    assert result.final_price is None
+    assert result.branch == "NO_MATCHING_AREA"
