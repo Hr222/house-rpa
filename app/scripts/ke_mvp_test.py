@@ -23,7 +23,7 @@ from typing import Optional
 import nodriver as uc
 
 from app.core import config
-from app.core.algorithm import decide, mean
+from app.core.algorithm import AlgorithmInput, evaluate_algorithm, mean
 from app.core.models import ListingSnapshot
 from app.core.price_utils import format_price, round_price
 from app.parsers import ke as parsers
@@ -367,6 +367,7 @@ async def run_ke_collect(
     community_name: str,
     area: float,
     manual_login: bool = False,
+    algorithm_mode: str = "default",
 ) -> dict:
     """执行一次完整的贝壳询价采集，返回汇总 dict。"""
     started_at = time.time()
@@ -451,8 +452,8 @@ async def run_ke_collect(
     if not all_listing_prices:
         raise RuntimeError("面积结果页未抓到在售单价")
 
-    quote_avg = mean(all_listing_prices)
-    log.info("[6] 在售均价: %s (共 %d 条)", format_price(quote_avg), len(all_listing_prices))
+    listing_avg = mean(all_listing_prices)
+    log.info("[6] 在售均价: %s (共 %d 条)", format_price(listing_avg), len(all_listing_prices))
 
     # ---- 6. 小区详情页 ----
     detail_url = parsers.find_detail_link(last_page_html) or detail_url
@@ -481,13 +482,16 @@ async def run_ke_collect(
         log.warning("未能打开小区详情页，跳过成交记录采集")
 
     # ---- 7. 算法决策 ----
-    effective_quote = community_avg_price or quote_avg
-    deal_avg = mean(deal_prices) if deal_prices else None
-    decision = decide(
-        effective_quote,
-        deal_avg,
-        config.DEAL_DIFF_THRESHOLD,
-        config.get_no_deal_discount(),
+    evaluation = evaluate_algorithm(
+        algorithm_mode=algorithm_mode,
+        inputs=AlgorithmInput(
+            quote_price_lists=[all_listing_prices],
+            community_avg_prices=[community_avg_price],
+            deal_price_lists=[deal_prices],
+            diff_threshold=config.DEAL_DIFF_THRESHOLD,
+            no_deal_discount=config.get_no_deal_discount(),
+            quote_only_discount=config.get_quote_only_discount(),
+        ),
     )
 
     elapsed = round(time.time() - started_at, 2)
@@ -497,13 +501,15 @@ async def run_ke_collect(
         "area": area,
         "listing_snapshots": all_snapshots,
         "quote_prices": all_listing_prices,
-        "quote_avg": round_price(quote_avg),
+        "listing_avg": round_price(listing_avg),
+        "quote_avg": round_price(evaluation.quote_avg),
         "community_avg_price": community_avg_price,
         "deal_prices": deal_prices,
-        "deal_avg": round_price(deal_avg),
+        "deal_avg": round_price(evaluation.deal_avg),
         "deal_records": deal_records,
-        "final_price": round_price(decision.final_price),
-        "branch": decision.branch,
+        "final_price": round_price(evaluation.decision.final_price),
+        "branch": evaluation.decision.branch,
+        "algorithm_mode": algorithm_mode,
         "listing_count": len(all_listing_prices),
         "deal_count": len(deal_prices),
         "elapsed_seconds": elapsed,
@@ -540,7 +546,7 @@ def _print_mvp(result_data: dict):
         },
         listings={
             "count": result_data["listing_count"],
-            "avg": result_data["quote_avg"],
+            "avg": result_data["listing_avg"],
             "snapshots": result_data["listing_snapshots"],
         },
         deals={
@@ -563,6 +569,7 @@ async def main(
     area: float = DEFAULT_AREA,
     manual_login: bool = False,
     debug: bool = False,
+    algorithm_mode: str = "default",
 ):
     if debug:
         set_debug_mode(True)
@@ -579,6 +586,7 @@ async def main(
             f"\n贝壳 MVP 测试"
             f"\n小区: {community_name}"
             f"\n面积: {area:.1f} ㎡"
+            f"\n算法: {algorithm_mode}"
             f"\n"
         )
 
@@ -587,6 +595,7 @@ async def main(
             community_name=community_name,
             area=area,
             manual_login=manual_login,
+            algorithm_mode=algorithm_mode,
         )
         _print_mvp(result)
 
@@ -622,6 +631,12 @@ def cli():
         default=DEFAULT_AREA,
         help=f"面积(㎡)，默认 {DEFAULT_AREA}",
     )
+    parser.add_argument(
+        "--algorithm-mode",
+        choices=("default", "quote_only"),
+        default="default",
+        help="算法模式：default=成交+在售，quote_only=仅在售均价打折。",
+    )
     args = parser.parse_args()
     uc.loop().run_until_complete(
         main(
@@ -629,6 +644,7 @@ def cli():
             area=args.area,
             manual_login=args.manual_login,
             debug=args.debug,
+            algorithm_mode=args.algorithm_mode,
         )
     )
 

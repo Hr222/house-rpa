@@ -18,15 +18,23 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import nodriver as uc
 
 from app.core import config
-from app.core.algorithm import decide
+from app.core.algorithm import AlgorithmInput, evaluate_algorithm
 from app.utils.debug_utils import dump_html as shared_dump_html
 from app.utils.debug_utils import set_debug_mode
-from app.core.models import ListingSnapshot
 from app.core.price_utils import format_price
+from app.parsers import fang as fang_parsers
+from app.platforms.base import (
+    has_matching_community_snapshots,
+    listing_filter_summary,
+    listing_no_data_reason,
+    prepare_listing_data,
+)
+from app.platforms.city_map import get_start_url
 from app.utils.mvp_result import print_mvp_result
 from app.utils.logging_utils import setup_logging
 
@@ -35,11 +43,24 @@ log = logging.getLogger("fang-mvp-test")
 
 # 房天下深圳二手房首页
 # 二手房是 esf 子域：https://{城市拼音缩写}.esf.fang.com/
-START_URL = "https://sz.esf.fang.com/"
+CITY = "深圳"
+EXPECTED_HOST = "sz.esf.fang.com"
+START_URL = get_start_url("fang", CITY)
 
-# 固定测试场景：与贝壳/安居客脚本一致
+# 固定测试场景：与搜索 dump 的深圳页面一致
 COMMUNITY_NAME = "星河丹堤花园"
 AREA = 87.97
+
+
+def is_expected_city_url(url: str) -> bool:
+    """防止房天下搜索结果跨城市跳转后继续采集。"""
+    return (urlparse(url or "").hostname or "").lower() == EXPECTED_HOST
+
+
+def city_drift_reason(url: str) -> str:
+    """生成城市漂移原因，便于人工核对实际落地城市。"""
+    actual_host = urlparse(url or "").hostname or "空 URL"
+    return f"城市偏移：期望{CITY}({EXPECTED_HOST})，实际 URL={url or actual_host}"
 
 
 # ============================================================
@@ -509,68 +530,8 @@ def filter_deal_records(records: list, area_min: float, area_max: float, months:
 
 
 def parse_listing_snapshots(html: str) -> list:
-    """从主结果区提取在售房源快照。
-
-    DOM:
-      <dl class="clearfix ...">
-        <dt>...图片...</dt>
-        <dd>
-          <h4><a><span class="tit_shop">绿景虹湾 房源标签...</span></a></h4>
-          <p class="tel_shop">3室2厅 | 88.35㎡ | ...</p>
-        </dd>
-        <dd class="price_right"><span class="red"><b>530</b>万</span><span>59988元/㎡</span></dd>
-      </dl>
-
-    边界：截断到"您可能感兴趣的新房"(InterestedNewHouse)之前，排除新房推荐位。
-    """
-    cut = html.find("InterestedNewHouse")
-    main_html = html[:cut] if cut > 0 else html
-
-    snapshots = []
-    for block in re.finditer(r'<dl class="clearfix[^"]*"[^>]*>(.*?)</dl>', main_html, re.S):
-        chunk = block.group(1)
-
-        # 小区名：tit_shop 取第一个词
-        name_m = re.search(r'tit_shop[^>]*>(.*?)</span>', chunk, re.S)
-        community_name = None
-        if name_m:
-            community_name = re.sub(r'<[^>]+>', '', name_m.group(1)).strip().split()[0] if re.sub(r'<[^>]+>', '', name_m.group(1)).strip() else None
-
-        # 户型+面积：tel_shop 里 "3室2厅 | 88.35㎡ | ..."
-        tel_m = re.search(r'tel_shop[^>]*>(.*?)</p>', chunk, re.S)
-        layout = None
-        area = None
-        if tel_m:
-            tel_text = re.sub(r'<[^>]+>', '', tel_m.group(1))
-            layout_m = re.search(r'(\d+室\d+厅)', tel_text)
-            if layout_m:
-                layout = layout_m.group(1)
-            area_m = re.search(r'([\d.]+)\s*㎡', tel_text)
-            if area_m:
-                area = float(area_m.group(1))
-
-        # 总价(万)
-        total_m = re.search(r'<b>([\d,]+)</b>\s*万', chunk)
-        total_price = float(total_m.group(1).replace(",", "")) if total_m else None
-
-        # 单价
-        price_m = re.search(r'<span>([\d,]+)\s*元/㎡</span>', chunk)
-        unit_price = float(price_m.group(1).replace(",", "")) if price_m else None
-
-        if unit_price is None and total_price is None:
-            continue
-
-        snapshots.append(
-            ListingSnapshot(
-                house_id="",
-                community_name=community_name,
-                area=area,
-                layout=layout,
-                unit_price=unit_price,
-                total_price=total_price,
-            )
-        )
-    return snapshots
+    """复用正式房天下 parser，确保 MVP 与 adapter 解析口径一致。"""
+    return fang_parsers.parse_listing_snapshots(html)
 
 
 def print_listing_snapshots(snapshots: list):
@@ -620,12 +581,15 @@ def print_summary(
     all_deals_count: int,
     filtered_deals_count: int,
     deal_avg: Optional[float],
+    final_price: Optional[float],
+    branch: str,
     body_len: Optional[int],
     prices_count: int,
     conclusion: str,
     listing_snapshots: list,
     filtered_deals: list,
     quote_avg: Optional[float],
+    algorithm_mode: str,
 ):
     print_mvp_result(
         platform="房天下",
@@ -660,7 +624,11 @@ def print_summary(
     )
 
 
-async def main(manual_login: bool = False, debug: bool = False):
+async def main(
+    manual_login: bool = False,
+    debug: bool = False,
+    algorithm_mode: str = "default",
+):
     if debug:
         set_debug_mode(True)
 
@@ -683,6 +651,8 @@ async def main(manual_login: bool = False, debug: bool = False):
     result_title: Optional[str] = None
     result_blocked = False
     result_block_reason: Optional[str] = None
+    search_no_data = False
+    search_no_data_reason: Optional[str] = None
     body_len: Optional[int] = None
     prices_count = 0
     area_confirmed = False
@@ -705,6 +675,7 @@ async def main(manual_login: bool = False, debug: bool = False):
     listing_snapshots: list = []
     quote_avg = None
     final_price = None
+    branch = ""
 
     try:
         # ---- 第1步：打开首页 ----
@@ -721,6 +692,9 @@ async def main(manual_login: bool = False, debug: bool = False):
         elif is_login_html(open_html):
             open_blocked = True
             open_block_reason = "命中登录页"
+        elif not is_expected_city_url(open_url):
+            open_blocked = True
+            open_block_reason = city_drift_reason(open_url)
         log.info("[1] 首次打开 URL: %s, 是否被拦: %s", open_url, open_blocked)
 
         # ---- 人工处理后重新打开 ----
@@ -789,12 +763,32 @@ async def main(manual_login: bool = False, debug: bool = False):
         elif is_login_html(result_html):
             result_blocked = True
             result_block_reason = "命中登录页"
+        elif not is_expected_city_url(result_url):
+            result_blocked = True
+            result_block_reason = city_drift_reason(result_url)
+
+        if not result_blocked:
+            keyword_listing_snapshots = parse_listing_snapshots(result_html)
+            if not has_matching_community_snapshots(
+                keyword_listing_snapshots,
+                COMMUNITY_NAME,
+            ):
+                search_no_data = True
+                search_no_data_reason = (
+                    f"搜索结果未匹配到目标小区: {COMMUNITY_NAME}"
+                )
+                log.warning(
+                    "[2] %s；页面城市=%s，结构化结果小区示例=%s",
+                    search_no_data_reason,
+                    CITY,
+                    sorted({item.community_name for item in keyword_listing_snapshots if item.community_name})[:5],
+                )
 
         if not result_blocked:
             prices_count = result_html.count("元/㎡") + result_html.count("元/平米")
 
         # ---- 第3步：面积自定义筛选 70-90 ----
-        if not result_blocked:
+        if not result_blocked and not search_no_data:
             log.info("[3] 填写面积筛选: %.1f", AREA)
             area_confirmed = await fill_area_inputs(page, AREA, AREA)
             area_file = await dump_html(page, "fang_after_area")
@@ -826,12 +820,29 @@ async def main(manual_login: bool = False, debug: bool = False):
             area_prices_count = merged_html.count("元/㎡")
             log.info("[4] 分页采集完成: 每页 %s, 合计在售 %d", page_counts, area_prices_count)
 
-            # 解析在售房源快照，算在售均价
-            listing_snapshots = parse_listing_snapshots(merged_html)
-            quote_prices = [s.unit_price for s in listing_snapshots if s.unit_price]
+            # 解析在售房源快照，按正式 adapter 同口径过滤小区和面积 ±10%。
+            parsed_listing_snapshots = parse_listing_snapshots(merged_html)
+            listing_snapshots, quote_prices = prepare_listing_data(
+                parsed_listing_snapshots,
+                COMMUNITY_NAME,
+                AREA,
+            )
+            area_prices_count = len(listing_snapshots)
             quote_avg = sum(quote_prices) / len(quote_prices) if quote_prices else None
-            log.info("[4] 在售房源解析: %d 条, 在售均价 %s", len(quote_prices),
-                     f"{quote_avg:.2f}" if quote_avg else "None")
+            log.info(
+                "[4] 在售房源最终过滤: %s, 在售均价 %s",
+                listing_filter_summary(parsed_listing_snapshots, COMMUNITY_NAME, AREA),
+                f"{quote_avg:.2f}" if quote_avg else "None",
+            )
+
+            if not listing_snapshots:
+                log.warning(
+                    "[4] 房天下 MVP 返回 NO_MATCHING_AREA: %s",
+                    listing_no_data_reason(parsed_listing_snapshots, COMMUNITY_NAME, AREA),
+                )
+                # 没有目标面积在售房源时，不继续使用成交记录生成最终价。
+                detail_tab = None
+                branch = "NO_MATCHING_AREA"
 
             # ---- 第5步续：切到详情标签（激活焦点），dump 详情页 HTML ----
             if detail_tab is not None:
@@ -903,15 +914,23 @@ async def main(manual_login: bool = False, debug: bool = False):
                 else:
                     log.warning("[5] 未能点击小区成交 tab")
 
-            # ---- 算最终价：在售均价 vs 成交均价 ----
+            # ---- 算最终价：通过统一算法策略评估 ----
             if quote_avg is not None or deal_avg is not None:
-                decision = decide(
-                    quote_avg=quote_avg,
-                    deal_avg=deal_avg,
-                    diff_threshold=config.DEAL_DIFF_THRESHOLD,
-                    no_deal_discount=config.get_no_deal_discount(),
+                evaluation = evaluate_algorithm(
+                    algorithm_mode=algorithm_mode,
+                    inputs=AlgorithmInput(
+                        quote_price_lists=[quote_prices],
+                        community_avg_prices=[None],
+                        deal_price_lists=[deal_prices],
+                        diff_threshold=config.DEAL_DIFF_THRESHOLD,
+                        no_deal_discount=config.get_no_deal_discount(),
+                        quote_only_discount=config.get_quote_only_discount(),
+                    ),
                 )
-                final_price = decision.final_price
+                quote_avg = evaluation.quote_avg
+                deal_avg = evaluation.deal_avg
+                final_price = evaluation.decision.final_price
+                branch = evaluation.decision.branch
 
                 # 输出对齐 batch_mvp_test 格式
                 print()
@@ -934,7 +953,10 @@ async def main(manual_login: bool = False, debug: bool = False):
                 print("=" * 60)
 
         # 判定结论
-        if result_blocked:
+        if search_no_data:
+            branch = "NO_DATA"
+            conclusion = search_no_data_reason or "搜索结果未匹配目标小区，返回 NO_DATA。"
+        elif result_blocked:
             conclusion = f"流程被拦：{result_block_reason}，需人工处理或重试。"
         elif not area_confirmed:
             conclusion = "面积筛选未能成功提交，需查看 HTML 确认输入框与确定按钮。"
@@ -942,6 +964,8 @@ async def main(manual_login: bool = False, debug: bool = False):
             conclusion = (
                 f"采集成功：{AREA}㎡ 分页 {len(page_counts)} 页，合计在售 {area_prices_count} 条。"
             )
+        elif prices_count > 0 and listing_snapshots == []:
+            conclusion = "平台结果页有房源，但没有房源面积落入请求面积 ±10%，返回 NO_MATCHING_AREA。"
         elif prices_count > 0:
             conclusion = "搜索成功但面积筛选后未识别到在售，需查看筛选后 HTML。"
         else:
@@ -975,9 +999,15 @@ async def main(manual_login: bool = False, debug: bool = False):
             all_deals_count=len(all_deals),
             filtered_deals_count=len(filtered_deals),
             deal_avg=deal_avg,
+            final_price=final_price,
+            branch=branch,
             body_len=body_len,
             prices_count=prices_count,
             conclusion=conclusion,
+            listing_snapshots=listing_snapshots,
+            filtered_deals=filtered_deals,
+            quote_avg=quote_avg,
+            algorithm_mode=algorithm_mode,
         )
 
         await wait_for_manual_close()
@@ -1005,8 +1035,20 @@ def cli():
         action="store_true",
         help="开启 RPA 调试模式，导出关键页面 HTML 到 excel 目录（兼容旧参数 --excel）。",
     )
+    parser.add_argument(
+        "--algorithm-mode",
+        choices=("default", "quote_only"),
+        default="default",
+        help="算法模式：default=成交+在售，quote_only=仅在售均价打折。",
+    )
     args = parser.parse_args()
-    uc.loop().run_until_complete(main(manual_login=args.manual_login, debug=args.debug))
+    uc.loop().run_until_complete(
+        main(
+            manual_login=args.manual_login,
+            debug=args.debug,
+            algorithm_mode=args.algorithm_mode,
+        )
+    )
 
 
 if __name__ == "__main__":

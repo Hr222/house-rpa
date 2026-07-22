@@ -50,6 +50,18 @@ def build_inquiry_result(
         )
         if all_city_unsupported:
             note = "不支持该城市"
+        elif platform_results and all(
+            r.status == "NO_MATCHING_AREA" for r in platform_results
+        ):
+            note = "; ".join(
+                f"{r.name}: {r.reason}" for r in platform_results if r.reason
+            ) or "所有平台均无匹配面积房源"
+            return InquiryResult(
+                success=False,
+                branch="NO_MATCHING_AREA",
+                note=note,
+                platform_results=platform_results,
+            )
         else:
             reasons = [f"{r.name}: {r.reason}" for r in platform_results if r.reason]
             note = "; ".join(reasons) if reasons else "所有平台均无数据"

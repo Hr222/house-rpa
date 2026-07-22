@@ -25,6 +25,9 @@ from app.platforms.base import (
     _human_click,
     click_area_segment,
     has_matching_community_snapshots,
+    listing_filter_summary,
+    listing_no_data_reason,
+    listing_no_data_status,
     prepare_listing_data,
     short_circuit_result,
     wait_and_reload_after_block,
@@ -424,14 +427,15 @@ async def _do_collect(
 
     # 6. 解析在售房源
     parsed_snapshots = parsers.parse_listing_snapshots(area_html)
-    snapshots, quote_prices = prepare_listing_data(parsed_snapshots, community_name)
+    snapshots, quote_prices = prepare_listing_data(parsed_snapshots, community_name, area)
     log.info(
-        "安居客在售房源最终校验: 总 %d 条 -> 匹配小区 %s %d 条",
-        len(parsed_snapshots), community_name, len(snapshots),
+        "安居客在售房源最终校验: %s",
+        listing_filter_summary(parsed_snapshots, community_name, area),
     )
     if not snapshots:
         return short_circuit_result(
-            "安居客", "NO_DATA", f"面积筛选后未匹配到小区: {community_name}",
+            "安居客", listing_no_data_status(parsed_snapshots, community_name, area),
+            listing_no_data_reason(parsed_snapshots, community_name, area),
             request_id, started_at,
         )
     if not quote_prices:

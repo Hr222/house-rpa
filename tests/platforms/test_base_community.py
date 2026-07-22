@@ -4,8 +4,13 @@
 from app.core.models import ListingSnapshot
 from app.platforms.base import (
     community_name_match,
+    filter_snapshots_by_area,
     filter_snapshots_by_community,
     has_matching_community_snapshots,
+    listing_area_bounds,
+    listing_filter_summary,
+    listing_no_data_reason,
+    listing_no_data_status,
     prepare_listing_data,
 )
 
@@ -101,3 +106,60 @@ def test_prepare_listing_data_preserves_snapshots_without_house_ids():
 
     assert len(filtered) == 2
     assert quote_prices == [65000.0, 67000.0]
+
+
+def test_filter_snapshots_by_area_uses_request_area_tolerance():
+    """在售房源按请求面积 ±10% 严格过滤，边界值保留。"""
+    snapshots = [
+        ListingSnapshot(house_id="low", area=89.9),
+        ListingSnapshot(house_id="min", area=90.0),
+        ListingSnapshot(house_id="mid", area=100.0),
+        ListingSnapshot(house_id="max", area=110.0),
+        ListingSnapshot(house_id="high", area=110.1),
+        ListingSnapshot(house_id="unknown", area=None),
+    ]
+
+    assert listing_area_bounds(100.0) == (90.0, 110.00000000000001)
+    filtered = filter_snapshots_by_area(snapshots, 100.0)
+
+    assert [item.house_id for item in filtered] == ["min", "mid", "max"]
+
+
+def test_prepare_listing_data_keeps_snapshots_and_prices_from_same_area_batch():
+    """面积过滤后明细和在售单价必须来自同一批快照。"""
+    snapshots = [
+        ListingSnapshot(
+            house_id="1", community_name="示例花园", area=90.0, unit_price=65000.0
+        ),
+        ListingSnapshot(
+            house_id="2", community_name="示例花园", area=120.0, unit_price=48000.0
+        ),
+    ]
+
+    filtered, quote_prices = prepare_listing_data(snapshots, "示例花园", 100.0)
+
+    assert [item.house_id for item in filtered] == ["1"]
+    assert quote_prices == [65000.0]
+
+
+def test_listing_no_data_reason_distinguishes_area_miss():
+    """命中小区但没有目标面积房源时，原因必须明确指出面积范围。"""
+    snapshots = [
+        ListingSnapshot(house_id="1", community_name="示例花园", area=70.0)
+    ]
+
+    summary = listing_filter_summary(snapshots, "示例花园", 100.0)
+    reason = listing_no_data_reason(snapshots, "示例花园", 100.0)
+
+    assert "命中小区 1 条" in summary
+    assert "命中面积 0 条" in summary
+    assert "命中小区但无请求面积±10%房源" in reason
+    assert "90.00~110.00㎡" in reason
+    assert listing_no_data_status(snapshots, "示例花园", 100.0) == "NO_MATCHING_AREA"
+
+
+def test_listing_no_data_status_keeps_plain_no_data_for_community_miss():
+    """没有命中目标小区时继续使用普通 NO_DATA。"""
+    snapshots = [ListingSnapshot(house_id="1", community_name="其他小区", area=100.0)]
+
+    assert listing_no_data_status(snapshots, "示例花园", 100.0) == "NO_DATA"

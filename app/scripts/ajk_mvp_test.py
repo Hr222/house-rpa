@@ -23,7 +23,7 @@ from app.core import config
 from app.utils.debug_utils import dump_html as shared_dump_html
 from app.utils.debug_utils import set_debug_mode
 from app.core.models import ListingSnapshot
-from app.core.algorithm import decide
+from app.core.algorithm import AlgorithmInput, evaluate_algorithm
 from app.utils.mvp_result import print_mvp_result
 from app.utils.logging_utils import setup_logging
 
@@ -406,7 +406,8 @@ def parse_community_avg_price(html: str):
       </div>
 
     注意：安居客无成交记录，业务上把挂牌均价当作 deal_prices 的替代，
-    让 decide() 正常按"在售均价 vs 成交均价"对比出最终价。
+    让 DEFAULT 算法正常按"在售均价 vs 成交均价"对比出最终价；
+    quote_only 模式由统一算法入口忽略这组替代成交数据。
     """
     m = re.search(
         r'community-info-detail-price-money[^>]*>\s*<em[^>]*>\s*([\d,]+)\s*</em>\s*元\s*/?\s*㎡',
@@ -436,8 +437,10 @@ def print_summary(
     listing_snapshots: list,
     listing_avg: Optional[float],
     listing_price: Optional[float],
+    deal_avg: Optional[float],
     final_price: Optional[float],
     branch: str,
+    algorithm_mode: str,
     conclusion: str,
 ):
     print_mvp_result(
@@ -458,13 +461,16 @@ def print_summary(
         },
         deals={
             "count": 0,
-            "avg": listing_price,
+            "avg": deal_avg,
             "records": [],
-            "substitute": f"挂牌均价顶替 {listing_price}元/㎡",
+            "substitute": (
+                f"挂牌均价顶替 {listing_price}元/㎡（{algorithm_mode}："
+                f"{'使用' if algorithm_mode == 'default' else '忽略'}）"
+            ),
         },
         result={
             "quote_avg": listing_avg or 0,
-            "deal_avg": listing_price,
+            "deal_avg": deal_avg,
             "final_price": final_price or 0,
             "branch": branch,
         },
@@ -472,7 +478,11 @@ def print_summary(
     )
 
 
-async def main(manual_login: bool = False, debug: bool = False):
+async def main(
+    manual_login: bool = False,
+    debug: bool = False,
+    algorithm_mode: str = "default",
+):
     if debug:
         set_debug_mode(True)
 
@@ -631,23 +641,30 @@ async def main(manual_login: bool = False, debug: bool = False):
             print_listing_snapshots(listing_snapshots)
             print("-" * 60)
 
-            # ---- 算最终价：在售均价 vs 挂牌均价（顶替成交均价）----
+            # ---- 算最终价：挂牌均价继续作为 DEFAULT 的成交替代输入 ----
             listing_avg = sum(main_listing_prices) / len(main_listing_prices)
             listing_price = parse_community_avg_price(area_html)
             # 安居客无成交记录，把挂牌均价作为 deal_prices 唯一元素
-            deal_avg = listing_price
-            decision = decide(
-                quote_avg=listing_avg,
-                deal_avg=deal_avg,
-                diff_threshold=config.DEAL_DIFF_THRESHOLD,
-                no_deal_discount=config.get_no_deal_discount(),
+            deal_prices = [listing_price] if listing_price is not None else []
+            evaluation = evaluate_algorithm(
+                algorithm_mode=algorithm_mode,
+                inputs=AlgorithmInput(
+                    quote_price_lists=[main_listing_prices],
+                    community_avg_prices=[None],
+                    deal_price_lists=[deal_prices],
+                    diff_threshold=config.DEAL_DIFF_THRESHOLD,
+                    no_deal_discount=config.get_no_deal_discount(),
+                    quote_only_discount=config.get_quote_only_discount(),
+                ),
             )
-            final_price = decision.final_price
-            branch = decision.branch
+            deal_avg = evaluation.deal_avg
+            final_price = evaluation.decision.final_price
+            branch = evaluation.decision.branch
             log.info(
-                "[4] 在售均价=%.2f 挂牌均价(顶替成交)=%s 最终价=%.2f 分支=%s",
+                "[4] 在售均价=%.2f 挂牌均价(顶替成交)=%s 算法=%s 最终价=%.2f 分支=%s",
                 listing_avg,
-                deal_avg,
+                listing_price,
+                algorithm_mode,
                 final_price,
                 branch,
             )
@@ -688,8 +705,10 @@ async def main(manual_login: bool = False, debug: bool = False):
             listing_snapshots=listing_snapshots,
             listing_avg=listing_avg,
             listing_price=listing_price,
+            deal_avg=deal_avg,
             final_price=final_price,
             branch=branch,
+            algorithm_mode=algorithm_mode,
             conclusion=conclusion,
         )
 
@@ -718,8 +737,20 @@ def cli():
         action="store_true",
         help="开启 RPA 调试模式，导出关键页面 HTML 到 excel 目录（兼容旧参数 --excel）。",
     )
+    parser.add_argument(
+        "--algorithm-mode",
+        choices=("default", "quote_only"),
+        default="default",
+        help="算法模式：default=成交+在售，quote_only=仅在售均价打折。",
+    )
     args = parser.parse_args()
-    uc.loop().run_until_complete(main(manual_login=args.manual_login, debug=args.debug))
+    uc.loop().run_until_complete(
+        main(
+            manual_login=args.manual_login,
+            debug=args.debug,
+            algorithm_mode=args.algorithm_mode,
+        )
+    )
 
 
 if __name__ == "__main__":

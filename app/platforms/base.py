@@ -11,9 +11,11 @@ import time
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from app.core.models import InquiryRequest, PlatformResult, PlatformSession
+from app.core.models import InquiryRequest, ListingSnapshot, PlatformResult, PlatformSession
 
 log = logging.getLogger(__name__)
+
+NO_MATCHING_AREA = "NO_MATCHING_AREA"
 
 # 未登录时页面的登录链接（a标签文本为"登录" + href含login/passport且非logout）
 _LOGIN_HREF_PATTERN = re.compile(
@@ -239,7 +241,7 @@ def short_circuit_result(
     started_at: float,
     detail_url: Optional[str] = None,
 ) -> PlatformResult:
-    """构造三类状态短路返回（NO_DATA / WAIT_MANUAL_VERIFY / LOGIN_EXPIRED 等）。
+    """构造短路返回（NO_DATA / NO_MATCHING_AREA / WAIT_MANUAL_VERIFY 等）。
 
     统一计算 elapsed_seconds，消除各平台 round(time.time()-started_at, 2)
     与 lj 的 _elapsed() 两套写法。各 adapter 的短路返回改调本函数，
@@ -247,7 +249,7 @@ def short_circuit_result(
 
     Args:
         name: 平台中文名（如 "贝壳"）。
-        status: NO_DATA / WAIT_MANUAL_VERIFY / LOGIN_EXPIRED 等。
+        status: NO_DATA / NO_MATCHING_AREA / WAIT_MANUAL_VERIFY 等。
         reason: 短路原因（透传给调用方/日志）。
         request_id: 询价请求 id。
         started_at: 采集开始时间戳（time.time()）。
@@ -324,9 +326,91 @@ def filter_snapshots_by_community(snapshots: list, community_name: str) -> list:
     ]
 
 
-def prepare_listing_data(snapshots: list, community_name: str) -> tuple[list, list[float]]:
-    """过滤目标小区房源，并从同一批快照生成在售单价。"""
+LISTING_AREA_TOLERANCE = 0.10
+
+
+def listing_area_bounds(area: float, tolerance: float = LISTING_AREA_TOLERANCE) -> tuple[float, float]:
+    """计算在售房源的精确面积范围（默认请求面积 ±10%）。"""
+    return area * (1 - tolerance), area * (1 + tolerance)
+
+
+def filter_snapshots_by_area(
+    snapshots: list[ListingSnapshot],
+    area: float,
+    tolerance: float = LISTING_AREA_TOLERANCE,
+) -> list[ListingSnapshot]:
+    """按房源实际面积过滤，面积缺失的快照不视为命中。"""
+    area_min, area_max = listing_area_bounds(area, tolerance)
+    return [
+        snapshot
+        for snapshot in snapshots
+        if snapshot.area is not None and area_min <= snapshot.area <= area_max
+    ]
+
+
+def listing_filter_summary(
+    snapshots: list[ListingSnapshot],
+    community_name: str,
+    area: float,
+    tolerance: float = LISTING_AREA_TOLERANCE,
+) -> str:
+    """生成在售房源过滤日志，区分小区命中和面积命中。"""
+    community_snapshots = filter_snapshots_by_community(snapshots, community_name)
+    area_snapshots = filter_snapshots_by_area(community_snapshots, area, tolerance)
+    area_min, area_max = listing_area_bounds(area, tolerance)
+    missing_area_count = sum(item.area is None for item in community_snapshots)
+    return (
+        f"原始 {len(snapshots)} 条 -> 命中小区 {len(community_snapshots)} 条 -> "
+        f"命中面积 {len(area_snapshots)} 条 "
+        f"(请求面积 {area:.2f}㎡, 范围 {area_min:.2f}~{area_max:.2f}㎡, "
+        f"面积缺失 {missing_area_count} 条)"
+    )
+
+
+def listing_no_data_reason(
+    snapshots: list[ListingSnapshot],
+    community_name: str,
+    area: float,
+    tolerance: float = LISTING_AREA_TOLERANCE,
+) -> str:
+    """生成面积精确过滤后的无数据原因。"""
+    community_snapshots = filter_snapshots_by_community(snapshots, community_name)
+    if not community_snapshots:
+        return f"面积筛选后未匹配到小区: {community_name}"
+
+    area_min, area_max = listing_area_bounds(area, tolerance)
+    return (
+        f"命中小区但无请求面积±{tolerance:.0%}房源: "
+        f"请求面积={area:.2f}㎡, 范围={area_min:.2f}~{area_max:.2f}㎡, "
+        f"小区房源={len(community_snapshots)}条"
+    )
+
+
+def listing_no_data_status(
+    snapshots: list[ListingSnapshot],
+    community_name: str,
+    area: float,
+    tolerance: float = LISTING_AREA_TOLERANCE,
+) -> str:
+    """区分普通无数据与命中小区但面积不匹配。"""
+    community_snapshots = filter_snapshots_by_community(snapshots, community_name)
+    if community_snapshots and not filter_snapshots_by_area(
+        community_snapshots, area, tolerance
+    ):
+        return NO_MATCHING_AREA
+    return "NO_DATA"
+
+
+def prepare_listing_data(
+    snapshots: list[ListingSnapshot],
+    community_name: str,
+    area: Optional[float] = None,
+    area_tolerance: float = LISTING_AREA_TOLERANCE,
+) -> tuple[list[ListingSnapshot], list[float]]:
+    """过滤目标小区和精确面积房源，并从同一批快照生成在售单价。"""
     filtered = filter_snapshots_by_community(snapshots, community_name)
+    if area is not None:
+        filtered = filter_snapshots_by_area(filtered, area, area_tolerance)
     quote_prices = [
         snapshot.unit_price
         for snapshot in filtered

@@ -46,6 +46,7 @@ PLATFORM_STATUS_TEXT = {
     "WAIT_MANUAL_VERIFY": "等待人工验证",
     "LOGIN_EXPIRED": "登录已失效",
     "NO_DATA": "无数据",
+    "NO_MATCHING_AREA": "面积不匹配",
     "SUCCESS": "成功",
     "ERROR": "异常",
 }
@@ -54,6 +55,7 @@ BRANCH_TEXT = {
     "TAKE_LOWER": "差异在阈值内，取较低值",
     "DEAL_ONLY": "仅采用成交均价",
     "QUOTE_DISCOUNT": "无成交，报价打折",
+    "NO_MATCHING_AREA": "无匹配面积房源",
     "FAILED": "无可用结果",
 }
 
@@ -473,7 +475,7 @@ class RPARuntime:
                 continue
 
             state = self.platform_states[code]
-            if item.status in {"SUCCESS", "NO_DATA"}:
+            if item.status in {"SUCCESS", "NO_DATA", "NO_MATCHING_AREA"}:
                 state.status = "READY"
                 state.message = item.reason or "READY"
                 state.last_ready_at = time.time()

@@ -41,7 +41,7 @@ class ListingSnapshot:
 class PlatformResult:
     """单平台采集结果。"""
     name: str
-    status: str  # SUCCESS / NO_DATA / BLOCKED / LOGIN_EXPIRED / WAIT_MANUAL_VERIFY / ERROR
+    status: str  # SUCCESS / NO_DATA / NO_MATCHING_AREA / LOGIN_EXPIRED / WAIT_MANUAL_VERIFY / ERROR
     community_avg_price: Optional[float] = None   # 详情页小区均价(元/㎡) = P_quote
     quote_prices: List[float] = field(default_factory=list)   # 在售单价列表
     deal_prices: List[float] = field(default_factory=list)    # 成交单价列表(筛选后)
@@ -69,7 +69,7 @@ class InquiryResult:
     """询价最终结果。"""
     success: bool
     final_price: Optional[float] = None    # 最终建议单价(元/㎡)
-    branch: str = "FAILED"                  # TAKE_LOWER / DEAL_ONLY / QUOTE_DISCOUNT / NO_DATA / FAILED
+    branch: str = "FAILED"                  # TAKE_LOWER / DEAL_ONLY / QUOTE_DISCOUNT / NO_DATA / NO_MATCHING_AREA / FAILED
     note: Optional[str] = None              # 失败/无数据时的说明
     quote_avg: Optional[float] = None
     deal_avg: Optional[float] = None
