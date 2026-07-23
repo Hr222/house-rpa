@@ -5,6 +5,7 @@ from app.core.models import ListingSnapshot
 from app.platforms.base import (
     community_name_match,
     filter_snapshots_by_area,
+    filter_snapshots_by_area_with_fallback,
     filter_snapshots_by_community,
     has_matching_community_snapshots,
     listing_area_bounds,
@@ -123,6 +124,36 @@ def test_filter_snapshots_by_area_uses_request_area_delta():
     filtered = filter_snapshots_by_area(snapshots, 100.0)
 
     assert [item.house_id for item in filtered] == ["min", "mid", "max"]
+
+
+def test_filter_snapshots_by_area_falls_back_to_ten_when_strict_has_no_hit():
+    snapshots = [
+        ListingSnapshot(house_id="fallback", area=109.0),
+        ListingSnapshot(house_id="outside", area=111.0),
+    ]
+
+    filtered, applied_tolerance = filter_snapshots_by_area_with_fallback(
+        snapshots,
+        100.0,
+    )
+
+    assert [item.house_id for item in filtered] == ["fallback"]
+    assert applied_tolerance == 10.0
+
+
+def test_filter_snapshots_by_area_does_not_widen_when_strict_has_hit():
+    snapshots = [
+        ListingSnapshot(house_id="strict", area=100.0),
+        ListingSnapshot(house_id="fallback", area=109.0),
+    ]
+
+    filtered, applied_tolerance = filter_snapshots_by_area_with_fallback(
+        snapshots,
+        100.0,
+    )
+
+    assert [item.house_id for item in filtered] == ["strict"]
+    assert applied_tolerance == 1.0
 
 
 def test_prepare_listing_data_keeps_snapshots_and_prices_from_same_area_batch():

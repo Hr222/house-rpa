@@ -528,7 +528,7 @@ def build_workbook(records: list[InquiryRecord]) -> Workbook:
 def derive_output_path(log_path: Path, output_path: Optional[Path]) -> Path:
     if output_path is not None:
         return output_path
-    return log_path.with_name("community_log_export_fixed.xlsx")
+    return log_path.with_name("评估对比_20260723_165310_详细数据.xlsx")
 
 
 def save_workbook(workbook: Workbook, path: Path) -> Path:

@@ -5,6 +5,7 @@
 - [3. 业务链路](#3-业务链路)
 - [4. 业务取值规则](#4-业务取值规则)
 - [5. 架构分层](#5-架构分层)
+- [系统架构与运行时状态](docs/系统架构与运行时状态.md)
 - [6. 目录说明](#6-目录说明)
 - [7. 核心模块说明](#7-核心模块说明)
 - [8. 配置与常量边界](#8-配置与常量边界)
@@ -261,6 +262,9 @@ FastAPI 入口。接口清单：
 - 启动常驻浏览器。
 - 打开各平台常驻页面。
 - 维护平台状态（`PlatformRuntimeState`）。
+- 平台健康状态与单次询价结果分离管理：验证码/风控进入 `WAIT_MANUAL_VERIFY`，登录失效进入 `WAIT_LOGIN`，普通任务 `ERROR` 不覆盖平台健康状态。
+- 任务结果回写带平台状态版本保护，旧任务不能覆盖人工确认或保活产生的新状态。
+- 人工回车确认批次与平台保活互斥，避免保活在批量确认过程中抢先改写状态，导致部分平台被跳过。
 - 管理任务队列（`asyncio.Queue`，串行消费）。
 - 定时保活循环（默认 120s）。
 - 崩溃恢复：全部平台首次就绪后，从 `persist/` 恢复未完成任务（只一次）。
@@ -294,7 +298,9 @@ FastAPI 入口。接口清单：
 |------|------|
 | `human_linger(page, page_no)` | 翻页后模拟真人停留 |
 | `wait_for_manual_unblock()` | 风控/登录拦截时等待人工处理 |
-| `wait_and_reload_after_block(tab, detect_func, label)` | 详情/成交页风控统一处理：检测→等人回车→重取，最多 2 次 |
+| `detect_common_block(url, html)` | 统一检测公共 URL/HTML 风控标识 |
+| `detect_block_with_common(detect_func, url, html)` | 平台专属风控规则优先，未命中时使用 base.py 公共兜底 |
+| `wait_and_reload_after_block(tab, detect_func, label)` | 详情/成交页风控统一处理：平台规则 + 公共规则检测→等人回车→重取，最多 2 次 |
 | `_human_click(page, element, label)` | 真人节奏点击（JS 优先，随机间隔） |
 | `safe_select_and_click(page, selector, ...)` | 安全选择+点击：找不到元素时 dump + 风控检测 + 恢复后重试 |
 | `check_empty_listing_page(page_no, count, consecutive_empty, total_pages, platform)` | 翻页空页检测：首页空→error+停止，连续2页空→warning+停止（4 个翻页平台共用） |
@@ -382,6 +388,15 @@ FastAPI 入口。接口清单：
 7. 开始接收 `/inquiries` 请求。
 
 未就绪时收到询价请求，返回 `503 SERVICE_NOT_READY`。
+
+平台状态边界：
+
+- `PlatformHealthStatus` 表示平台当前是否可继续采集。
+- `PlatformResultStatus` 表示单次询价结果，`ERROR` 只记录本次任务异常。
+- 验证码、人机验证和公共风控标识统一使用 `WAIT_MANUAL_VERIFY`。
+- 登录页或登录态失效统一使用 `LOGIN_EXPIRED`，运行时映射为 `WAIT_LOGIN`。
+- 人工确认、保活和任务回写通过运行时状态版本协调，旧任务结果不能覆盖新状态。
+- 人工确认批次期间暂停并发平台保活；就绪检查和保活共用互斥控制，保证一次回车完整处理当前待确认平台。
 
 ## 10. 运行方式
 

@@ -11,6 +11,7 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 
 - 入口服务:`app/scripts/api_server.py`
 - 平台扩展指南:`docs/平台扩展对接文档.md`
+- 系统架构与运行时状态:`docs/系统架构与运行时状态.md`
 - 业务说明:`README.md`
 
 ## 2. 技术栈与 API 约定
@@ -32,7 +33,7 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 **业务流程是定死的。没有用户的明确指令,AI 不得擅自:**
 - 增删采集步骤(如自作主张加循环检测、删掉某步)
 - 改变步骤顺序
-- 修改 `service.py` / `core/models.py` / `runtime.py` / `api.py`
+- 修改 `service.py` / `core/models.py` / `runtime.py` / `api.py`（除非用户明确授权本次修改）
 - 改变 `decide()` / `decide_quote_only()` 的决策规则或阈值（新增算法函数不算擅改，但需用户明确指令）
 
 **平台差异 ≠ 改流程。** 某平台因特性"略过"某步(如安居客无成交→不点详情),
@@ -41,6 +42,15 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 判定标准:
 - 看到"被风控/被拦"就想加重试循环 → ❌ 擅改流程
 - 某平台没有某数据源所以跳过该步采集 → ✅ 平台适配(需注释说明)
+
+### 统一状态与风控边界
+
+- `app/core/status.py` 集中定义服务状态、平台健康状态、平台采集结果状态和任务状态。
+- `PlatformHealthStatus` 表示平台能否继续工作；`PlatformResultStatus` 只表示本次询价结果，二者不得直接混用。
+- 平台适配器保留平台专属风控规则；`app/platforms/base.py` 集中维护公共 URL/HTML 风控标识并作为兜底入口。
+- 验证码或人机验证的单次结果使用 `WAIT_MANUAL_VERIFY`，并将平台健康状态置为 `WAIT_MANUAL_VERIFY`；登录失效的单次结果使用 `LOGIN_EXPIRED`，并将平台健康状态置为 `WAIT_LOGIN`。普通采集异常使用 `ERROR`，不得用普通 `ERROR` 覆盖平台健康状态。
+- 任务结束回写不得覆盖任务开始后发生的人工确认或保活状态变化。
+- 人工回车确认期间，平台就绪检查与保活使用同一互斥控制；一次确认批次完成前，保活不得抢先改写平台健康状态。
 
 ## 4. 对接新平台的标准流程
 
@@ -63,7 +73,7 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
    - `app/platforms/adapters/<code>.py` — 真实采集逻辑(浏览器操作,MVP 验证过的函数移植过来;解析调 `parsers`)
    - `app/platforms/<code>.py` — 薄壳适配器,委托给 adapter
 6. **注册两处**:`app/platforms/__init__.py` 导出 + `app/registry.py` 追加。
-7. **不改核心层**:`core/models` / `core/algorithm` / `service` / `runtime` / `api` 一行不改。
+7. **不改核心层**:`core/models` / `core/algorithm` / `service` / `runtime` / `api` 一行不改；若用户明确授权修改既有运行时状态管理，才可按本次指令调整 `runtime.py`，不得借机改变采集流程或算法。
 8. **算法模式可选**:`InquiryRequest.algorithm_mode` 支持 `"default"`（成交+在售）和 `"quote_only"`（纯在售），
    由 API 入参控制，默认 `"default"`。新平台采集流程与现有一致，无需因算法模式不同而改动。
 
@@ -124,6 +134,8 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 | 文件 | 职责 | 改动频率 |
 |---|---|---|
 | `app/core/algorithm.py` | 最终取值决策(纯函数，两套算法: decide/decide_quote_only) | 极低,业务规则锁定 |
+| `app/core/status.py` | 集中定义服务、平台健康、平台结果、任务状态及平台健康转移事件 | 低 |
+| `docs/系统架构与运行时状态.md` | 系统分层、状态模型、并发协调、风控边界和排错入口 | 低 |
 | `app/service.py` | 平台调度+汇总 | 低 |
 | `app/runtime.py` | 浏览器/队列/保活/状态机 | 低 |
 | `app/api.py` | FastAPI 接口 | 低 |
