@@ -65,24 +65,24 @@ def test_build_inquiry_result_quote_only():
     a = PlatformResult(
         name="平台A", status="SUCCESS",
         community_avg_price=1000.0,
-        quote_prices=[10.0, 20.0],
+        quote_prices=[100.0, 200.0, 200.0],
         deal_prices=[80.0],  # 成交价应被忽略
     )
     b = PlatformResult(
         name="平台B", status="SUCCESS",
         community_avg_price=2000.0,
-        quote_prices=[100.0],
+        quote_prices=[300.0, 1000.0],
         deal_prices=[150.0],
     )
 
     result = build_inquiry_result([a, b], algorithm_mode="quote_only")
 
     assert result.success is True
-    # quote_avg = (10+20+100)/3, community_avg_price 不参与
-    assert result.quote_avg == 43.33
+    # quote_only 只使用房源挂牌价；去重、剔除极端高价后取中位数
+    assert result.quote_avg == 200.0
     assert result.deal_avg is None
-    # 43.333... * 0.9 = 39.0
-    assert result.final_price == 39.0
+    # 200 * 0.9 = 180.0
+    assert result.final_price == 180.0
     assert result.branch == "QUOTE_ONLY"
 
 
@@ -105,12 +105,12 @@ def test_build_inquiry_result_distinguishes_area_mismatch():
             PlatformResult(
                 name="平台A",
                 status="NO_MATCHING_AREA",
-                reason="命中小区但无请求面积±10%房源",
+                reason="命中小区但无请求面积±1㎡房源",
             ),
             PlatformResult(
                 name="平台B",
                 status="NO_MATCHING_AREA",
-                reason="命中小区但无请求面积±10%房源",
+                reason="命中小区但无请求面积±1㎡房源",
             ),
         ],
         algorithm_mode="quote_only",
