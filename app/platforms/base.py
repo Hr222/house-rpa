@@ -326,12 +326,12 @@ def filter_snapshots_by_community(snapshots: list, community_name: str) -> list:
     ]
 
 
-LISTING_AREA_TOLERANCE = 0.10
+LISTING_AREA_TOLERANCE = 1.0
 
 
 def listing_area_bounds(area: float, tolerance: float = LISTING_AREA_TOLERANCE) -> tuple[float, float]:
-    """计算在售房源的精确面积范围（默认请求面积 ±10%）。"""
-    return area * (1 - tolerance), area * (1 + tolerance)
+    """计算在售房源的精确面积范围（默认请求面积 ±1㎡）。"""
+    return area - tolerance, area + tolerance
 
 
 def filter_snapshots_by_area(
@@ -339,7 +339,7 @@ def filter_snapshots_by_area(
     area: float,
     tolerance: float = LISTING_AREA_TOLERANCE,
 ) -> list[ListingSnapshot]:
-    """按房源实际面积过滤，面积缺失的快照不视为命中。"""
+    """按房源实际面积过滤，默认命中请求面积 ±1㎡，面积缺失不命中。"""
     area_min, area_max = listing_area_bounds(area, tolerance)
     return [
         snapshot
@@ -380,7 +380,7 @@ def listing_no_data_reason(
 
     area_min, area_max = listing_area_bounds(area, tolerance)
     return (
-        f"命中小区但无请求面积±{tolerance:.0%}房源: "
+        f"命中小区但无请求面积±{tolerance:g}㎡房源: "
         f"请求面积={area:.2f}㎡, 范围={area_min:.2f}~{area_max:.2f}㎡, "
         f"小区房源={len(community_snapshots)}条"
     )
@@ -407,7 +407,7 @@ def prepare_listing_data(
     area: Optional[float] = None,
     area_tolerance: float = LISTING_AREA_TOLERANCE,
 ) -> tuple[list[ListingSnapshot], list[float]]:
-    """过滤目标小区和精确面积房源，并从同一批快照生成在售单价。"""
+    """过滤目标小区和请求面积 ±1㎡房源，并从同一批快照生成在售单价。"""
     filtered = filter_snapshots_by_community(snapshots, community_name)
     if area is not None:
         filtered = filter_snapshots_by_area(filtered, area, area_tolerance)

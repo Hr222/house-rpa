@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from statistics import median as statistics_median, quantiles
 from typing import Iterable, List, Optional, Protocol
 
 
@@ -13,6 +14,52 @@ def mean(prices: List[float]) -> Optional[float]:
     if not valid:
         return None
     return sum(valid) / len(valid)
+
+
+def remove_extreme_prices(
+    prices: Iterable[Optional[float]],
+) -> list[float]:
+    """Return unique positive prices after Tukey-IQR outlier filtering.
+
+    Fewer than four unique prices are kept as-is because there is not enough
+    data to identify an extreme value reliably. Values outside the 1.5*IQR
+    fences are removed; if no value falls outside the fences, nothing is
+    removed.
+    """
+    unique_prices = sorted(
+        {
+            float(price)
+            for price in prices
+            if price is not None and price > 0
+        }
+    )
+    if len(unique_prices) < 4:
+        return unique_prices
+
+    quartiles = quantiles(
+        unique_prices,
+        n=4,
+        method="inclusive",
+    )
+    q1, q3 = quartiles[0], quartiles[2]
+    iqr = q3 - q1
+    if iqr <= 0:
+        return unique_prices
+
+    lower_fence = q1 - 1.5 * iqr
+    upper_fence = q3 + 1.5 * iqr
+    filtered = [
+        price
+        for price in unique_prices
+        if lower_fence <= price <= upper_fence
+    ]
+    return filtered or unique_prices
+
+
+def median(prices: Iterable[Optional[float]]) -> Optional[float]:
+    """Deduplicate, remove IQR outliers, and return the median price."""
+    cleaned = remove_extreme_prices(prices)
+    return statistics_median(cleaned) if cleaned else None
 
 
 @dataclass
@@ -62,13 +109,13 @@ def aggregate_default_quote(
 def aggregate_quote_only_prices(
     quote_price_lists: Iterable[Iterable[float]],
 ) -> Optional[float]:
-    """Pool every listing price across successful platforms."""
+    """Pool listings, remove duplicates/extremes, and return their median."""
     all_quote_prices: list[float] = []
     for quote_prices in quote_price_lists:
         all_quote_prices.extend(
             price for price in quote_prices if price is not None and price > 0
         )
-    return mean(all_quote_prices)
+    return median(all_quote_prices)
 
 
 def aggregate_deal_prices(

@@ -1,0 +1,7 @@
+interface:
+  display_name: "房产评估提纯"
+  short_description: "核验小区名称、剔除非民用项目并生成城市评估汇总表"
+  default_prompt: "使用 $property-evaluation 处理这份房产评估数据。"
+
+policy:
+  allow_implicit_invocation: true

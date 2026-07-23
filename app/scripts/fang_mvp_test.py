@@ -820,7 +820,7 @@ async def main(
             area_prices_count = merged_html.count("元/㎡")
             log.info("[4] 分页采集完成: 每页 %s, 合计在售 %d", page_counts, area_prices_count)
 
-            # 解析在售房源快照，按正式 adapter 同口径过滤小区和面积 ±10%。
+            # 解析在售房源快照，按正式 adapter 同口径过滤小区和面积 ±1㎡。
             parsed_listing_snapshots = parse_listing_snapshots(merged_html)
             listing_snapshots, quote_prices = prepare_listing_data(
                 parsed_listing_snapshots,
@@ -965,7 +965,7 @@ async def main(
                 f"采集成功：{AREA}㎡ 分页 {len(page_counts)} 页，合计在售 {area_prices_count} 条。"
             )
         elif prices_count > 0 and listing_snapshots == []:
-            conclusion = "平台结果页有房源，但没有房源面积落入请求面积 ±10%，返回 NO_MATCHING_AREA。"
+            conclusion = "平台结果页有房源，但没有房源面积落入请求面积 ±1㎡，返回 NO_MATCHING_AREA。"
         elif prices_count > 0:
             conclusion = "搜索成功但面积筛选后未识别到在售，需查看筛选后 HTML。"
         else:
