@@ -15,6 +15,15 @@ import nodriver as uc
 
 from app.core import config
 from app.core.models import InquiryRequest, InquiryResult, PlatformSession
+from app.core.status import (
+    PlatformHealthEvent,
+    PlatformHealthStatus,
+    PlatformResultStatus,
+    ServiceStatus,
+    TaskStatus,
+    transition_platform_health,
+)
+from app.platforms.base import is_manual_verify_reason
 from app.registry import build_default_adapters
 from app.service import RPAInquiryService
 from app.utils.task_store import delete_task, save_task, load_pending_tasks
@@ -38,17 +47,21 @@ TASK_STATUS_TEXT = {
     "FAILED": "失败",
 }
 
-PLATFORM_STATUS_TEXT = {
+PLATFORM_HEALTH_STATUS_TEXT = {
     "INIT": "初始化中",
     "WAIT_LOGIN": "等待登录",
     "READY": "已就绪",
-    "BUSY": "执行中",
     "WAIT_MANUAL_VERIFY": "等待人工验证",
-    "LOGIN_EXPIRED": "登录已失效",
+    "ERROR": "平台异常",
+}
+
+PLATFORM_RESULT_STATUS_TEXT = {
+    "SUCCESS": "成功",
     "NO_DATA": "无数据",
     "NO_MATCHING_AREA": "面积不匹配",
-    "SUCCESS": "成功",
-    "ERROR": "异常",
+    "WAIT_MANUAL_VERIFY": "等待人工验证",
+    "LOGIN_EXPIRED": "登录已失效",
+    "ERROR": "本次采集异常",
 }
 
 BRANCH_TEXT = {
@@ -84,6 +97,7 @@ class PlatformRuntimeState:
     start_url: str
     status: str
     message: str
+    version: int = 0
     last_ready_at: Optional[float] = None
     last_keepalive_at: Optional[float] = None
 
@@ -92,7 +106,7 @@ class PlatformRuntimeState:
 class InquiryTaskRecord:
     task_id: str
     request: InquiryRequest
-    status: str = "QUEUED"
+    status: str = TaskStatus.QUEUED
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
@@ -136,8 +150,10 @@ class RPARuntime:
         self.keepalive_task: Optional[asyncio.Task] = None
         self.heartbeat_task: Optional[asyncio.Task] = None
         self.console_confirmation_task: Optional[asyncio.Task] = None
+        self._platform_check_lock = asyncio.Lock()
+        self._manual_confirmation_active = False
         self.current_task_id: Optional[str] = None
-        self.status = "BOOTING"
+        self.status = ServiceStatus.BOOTING
         self.message = "启动中"
         self._last_get_at: dict[str, float] = {}  # GET 限流：taskId -> 上次查询时间戳
         self._restored: bool = False  # 崩溃恢复标志：全部就绪后只恢复一次残留任务
@@ -146,7 +162,7 @@ class RPARuntime:
         if self.service is not None:
             return
 
-        self.status = "BOOTING"
+        self.status = ServiceStatus.BOOTING
         self.message = "启动浏览器中"
 
         # 为每个平台创建独立浏览器实例
@@ -177,11 +193,11 @@ class RPARuntime:
                 code=code,
                 name=session.name,
                 start_url=session.start_url,
-                status="WAIT_LOGIN",
+                status=PlatformHealthStatus.WAIT_LOGIN,
                 message="等待人工登录后确认",
             )
 
-        self.status = "WAIT_LOGIN"
+        self.status = ServiceStatus.WAIT_LOGIN
         self.message = "等待人工登录并确认平台就绪"
         self._focus_browser_window("启动完成，等待登录")
         self.worker_task = asyncio.create_task(self._worker_loop(), name="rpa-worker")
@@ -214,7 +230,7 @@ class RPARuntime:
         self.heartbeat_task = None
         self.console_confirmation_task = None
         self.current_task_id = None
-        self.status = "STOPPING"
+        self.status = ServiceStatus.STOPPING
         self.message = "已停止"
 
     def is_ready(self) -> bool:
@@ -267,6 +283,10 @@ class RPARuntime:
         return self._serialize_task(record)
 
     async def confirm_platform_ready(self, code: str) -> dict:
+        async with self._platform_check_lock:
+            return await self._confirm_platform_ready(code)
+
+    async def _confirm_platform_ready(self, code: str) -> dict:
         if self.service is None:
             raise RuntimeError("SERVICE_NOT_STARTED")
         if code not in self.adapter_map:
@@ -276,18 +296,16 @@ class RPARuntime:
         session: PlatformSession = self.service.sessions[code]
         ready, message = await adapter.check_ready(session)
         state = self.platform_states[code]
-        state.message = message
         if ready:
-            state.status = "READY"
-            state.last_ready_at = time.time()
-            # 平台恢复就绪时立即刷新全局状态，不等下一次 keepalive
-            if all(s.status == "READY" for s in self.platform_states.values()):
-                self.status = "READY"
-                self.message = "所有平台已就绪"
+            self._set_platform_health(code, PlatformHealthEvent.READY_CHECK_PASSED, message)
+        elif is_manual_verify_reason(message):
+            self._set_platform_health(
+                code, PlatformHealthEvent.READY_CHECK_MANUAL_VERIFY, message
+            )
         else:
-            state.status = "WAIT_LOGIN"
+            self._set_platform_health(code, PlatformHealthEvent.READY_CHECK_FAILED, message)
         self._refresh_service_status()
-        if state.status != "READY":
+        if state.status != PlatformHealthStatus.READY:
             self._focus_browser_window(f"{state.name} 仍需人工处理")
         return self._serialize_platform_state(state)
 
@@ -309,33 +327,33 @@ class RPARuntime:
     def _refresh_service_status(self):
         states = list(self.platform_states.values())
         if not states:
-            self.status = "BOOTING"
+            self.status = ServiceStatus.BOOTING
             self.message = "未初始化平台"
             return
 
-        if all(item.status == "READY" for item in states):
-            if self.status != "READY":
+        if all(item.status == PlatformHealthStatus.READY for item in states):
+            if self.status != ServiceStatus.READY:
                 self._tile_after_login()
                 # 首次全部就绪：恢复崩溃前未完成的任务（只执行一次）。
                 # 恢复先于 self.status 置 READY，保证残留任务排在就绪后接的新单之前。
                 if not self._restored:
                     self._restore_pending_tasks()
                     self._restored = True
-            self.status = "READY"
+            self.status = ServiceStatus.READY
             self.message = "所有平台已就绪"
             return
 
-        if any(item.status == "WAIT_LOGIN" for item in states):
-            self.status = "WAIT_LOGIN"
+        if any(item.status == PlatformHealthStatus.WAIT_LOGIN for item in states):
+            self.status = ServiceStatus.WAIT_LOGIN
             self.message = "存在未登录平台"
             return
 
-        if any(item.status == "WAIT_MANUAL_VERIFY" for item in states):
-            self.status = "DEGRADED"
+        if any(item.status == PlatformHealthStatus.WAIT_MANUAL_VERIFY for item in states):
+            self.status = ServiceStatus.DEGRADED
             self.message = "存在待人工验证平台"
             return
 
-        self.status = "DEGRADED"
+        self.status = ServiceStatus.DEGRADED
         self.message = "存在异常平台"
 
     async def _wait_until_ready(self):
@@ -343,7 +361,7 @@ class RPARuntime:
         while True:
             unready = [
                 code for code, state in self.platform_states.items()
-                if state.status == "WAIT_LOGIN"
+                if state.status != PlatformHealthStatus.READY
             ]
             if not unready:
                 return
@@ -354,7 +372,7 @@ class RPARuntime:
         while True:
             task_id = await self.queue.get()
             record = self.tasks[task_id]
-            record.status = "RUNNING"
+            record.status = TaskStatus.RUNNING
             record.started_at = time.time()
             self.current_task_id = task_id
             try:
@@ -363,9 +381,13 @@ class RPARuntime:
                 # 置前浏览器窗口（nodriver 操作需要焦点）
                 self._focus_browser_window("开始执行采集任务")
                 assert self.service is not None
+                platform_versions = {
+                    code: state.version
+                    for code, state in self.platform_states.items()
+                }
                 result = await self.service.run_inquiry(record.request)
                 record.result = result
-                record.status = "COMPLETED"
+                record.status = TaskStatus.COMPLETED
                 # ★ 采集完成瞬间立刻打印 request + 纯采集耗时（不含详情窗口后台关闭等待）
                 elapsed = time.time() - record.started_at
                 log.info(
@@ -373,13 +395,13 @@ class RPARuntime:
                     _camelize_dict(asdict(record.request)),
                     elapsed,
                 )
-                self._apply_platform_results(result)
+                self._apply_platform_results(result, platform_versions)
             except Exception as exc:
                 log.exception("task failed: %s", task_id)
-                record.status = "FAILED"
+                record.status = TaskStatus.FAILED
                 record.error = str(exc)
-                self.status = "DEGRADED"
-                self.message = f"任务执行失败: {exc}"
+                # 任务失败属于任务链；服务状态由平台健康状态统一计算。
+                self._refresh_service_status()
             finally:
                 record.finished_at = time.time()
                 self.current_task_id = None
@@ -392,32 +414,46 @@ class RPARuntime:
     async def _keepalive_loop(self):
         while True:
             await asyncio.sleep(self.keepalive_interval)
-            if self.service is None or self.current_task_id is not None:
+            if (
+                self.service is None
+                or self.current_task_id is not None
+                or self._manual_confirmation_active
+            ):
                 continue
 
-            for code, adapter in self.adapter_map.items():
-                state = self.platform_states.get(code)
-                if state is None or state.status not in {"READY", "WAIT_LOGIN"}:
-                    continue
+            async with self._platform_check_lock:
+                for code, adapter in self.adapter_map.items():
+                    state = self.platform_states.get(code)
+                    if state is None or state.status not in {
+                        PlatformHealthStatus.READY,
+                        PlatformHealthStatus.WAIT_LOGIN,
+                    }:
+                        continue
 
-                session = self.service.sessions[code]
-                try:
-                    ready, message = await adapter.keepalive(session)
-                except Exception as exc:
-                    ready, message = False, f"保活异常: {exc}"
+                    session = self.service.sessions[code]
+                    try:
+                        ready, message = await adapter.keepalive(session)
+                    except Exception as exc:
+                        ready, message = False, f"保活异常: {exc}"
 
-                state.last_keepalive_at = time.time()
-                state.message = message
-                if ready:
-                    state.status = "READY"
-                    state.last_ready_at = time.time()
-                elif "验证" in message:
-                    state.status = "WAIT_MANUAL_VERIFY"
-                else:
-                    state.status = "WAIT_LOGIN"
+                    if ready:
+                        self._set_platform_health(
+                            code, PlatformHealthEvent.KEEPALIVE_READY, message
+                        )
+                    elif "验证" in message:
+                        self._set_platform_health(
+                            code, PlatformHealthEvent.KEEPALIVE_MANUAL_VERIFY, message
+                        )
+                    else:
+                        self._set_platform_health(
+                            code, PlatformHealthEvent.KEEPALIVE_LOGIN_REQUIRED, message
+                        )
 
-                if state.status in {"WAIT_LOGIN", "WAIT_MANUAL_VERIFY"}:
-                    self._focus_browser_window(f"{state.name} 状态变为 {state.status}")
+                    if state.status in {
+                        PlatformHealthStatus.WAIT_LOGIN,
+                        PlatformHealthStatus.WAIT_MANUAL_VERIFY,
+                    }:
+                        self._focus_browser_window(f"{state.name} 状态变为 {state.status}")
 
             self._refresh_service_status()
 
@@ -428,7 +464,10 @@ class RPARuntime:
             if self.current_task_id is not None:
                 continue  # 采集任务进行中，不打断
             for code, state in self.platform_states.items():
-                if state.status not in {"READY", "WAIT_LOGIN"}:
+                if state.status not in {
+                    PlatformHealthStatus.READY,
+                    PlatformHealthStatus.WAIT_LOGIN,
+                }:
                     continue
                 try:
                     session = self.service.sessions.get(code)
@@ -443,7 +482,11 @@ class RPARuntime:
             pending = [
                 state
                 for state in self.platform_states.values()
-                if state.status in {"WAIT_LOGIN", "WAIT_MANUAL_VERIFY"}
+                if state.status in {
+                    PlatformHealthStatus.WAIT_LOGIN,
+                    PlatformHealthStatus.WAIT_MANUAL_VERIFY,
+                    PlatformHealthStatus.ERROR,
+                }
             ]
             if not pending:
                 await asyncio.sleep(2)
@@ -455,41 +498,87 @@ class RPARuntime:
             lines.append("请在浏览器完成人工登录或验证后，回到终端按回车继续...")
             prompt = "\n".join(lines)
 
+            self._manual_confirmation_active = True
             try:
-                await asyncio.to_thread(input, prompt)
-            except EOFError:
-                log.warning("控制台不可交互，跳过回车确认流程")
-                return
+                async with self._platform_check_lock:
+                    try:
+                        await asyncio.to_thread(input, prompt)
+                    except EOFError:
+                        log.warning("控制台不可交互，跳过回车确认流程")
+                        return
 
-            for state in pending:
-                try:
-                    result = await self.confirm_platform_ready(state.code)
-                    log.info("平台确认结果: %s -> %s", state.name, result["status"])
-                except Exception as exc:
-                    log.warning("平台确认失败: %s -> %s", state.name, exc)
+                    for state in pending:
+                        try:
+                            current = self.platform_states.get(state.code)
+                            if current is None or current.status not in {
+                                PlatformHealthStatus.WAIT_LOGIN,
+                                PlatformHealthStatus.WAIT_MANUAL_VERIFY,
+                                PlatformHealthStatus.ERROR,
+                            }:
+                                continue
+                            result = await self._confirm_platform_ready(state.code)
+                            log.info("平台确认结果: %s -> %s", state.name, result["status"])
+                        except Exception as exc:
+                            log.warning("平台确认失败: %s -> %s", state.name, exc)
+            finally:
+                self._manual_confirmation_active = False
 
-    def _apply_platform_results(self, result: InquiryResult):
+    def _set_platform_health(
+        self,
+        code: str,
+        event: PlatformHealthEvent,
+        message: str,
+    ) -> None:
+        state = self.platform_states[code]
+        state.status = transition_platform_health(state.status, event)
+        state.message = message
+        state.version += 1
+        if state.status == PlatformHealthStatus.READY:
+            state.last_ready_at = time.time()
+
+    def _apply_platform_results(
+        self,
+        result: InquiryResult,
+        task_platform_versions: Optional[dict[str, int]] = None,
+    ):
+        """保存本次结果；只有明确的平台异常才更新健康状态。"""
         for item in result.platform_results:
             code = next((key for key, adapter in self.adapter_map.items() if adapter.name == item.name), None)
             if code is None or code not in self.platform_states:
                 continue
 
             state = self.platform_states[code]
-            if item.status in {"SUCCESS", "NO_DATA", "NO_MATCHING_AREA"}:
-                state.status = "READY"
-                state.message = item.reason or "READY"
-                state.last_ready_at = time.time()
-            elif item.status == "WAIT_MANUAL_VERIFY":
-                state.status = "WAIT_MANUAL_VERIFY"
-                state.message = item.reason or "等待人工验证"
-                self._focus_browser_window(f"{state.name} 需要人工验证")
-            elif item.status == "LOGIN_EXPIRED":
-                state.status = "WAIT_LOGIN"
-                state.message = item.reason or "登录已失效"
-                self._focus_browser_window(f"{state.name} 登录已失效")
-            else:
-                state.status = "ERROR"
-                state.message = item.reason or item.status
+            started_version = (
+                task_platform_versions.get(code)
+                if task_platform_versions is not None
+                else None
+            )
+            state_changed_after_start = (
+                started_version is not None and state.version != started_version
+            )
+            if item.status == PlatformResultStatus.WAIT_MANUAL_VERIFY:
+                if not state_changed_after_start:
+                    self._set_platform_health(
+                        code,
+                        PlatformHealthEvent.RESULT_MANUAL_VERIFY,
+                        item.reason or "等待人工验证",
+                    )
+                    self._focus_browser_window(f"{state.name} 需要人工验证")
+            elif item.status == PlatformResultStatus.LOGIN_EXPIRED:
+                if not state_changed_after_start:
+                    self._set_platform_health(
+                        code,
+                        PlatformHealthEvent.RESULT_LOGIN_EXPIRED,
+                        item.reason or "登录已失效",
+                    )
+                    self._focus_browser_window(f"{state.name} 登录已失效")
+            elif item.status not in {
+                PlatformResultStatus.SUCCESS,
+                PlatformResultStatus.NO_DATA,
+                PlatformResultStatus.NO_MATCHING_AREA,
+                PlatformResultStatus.ERROR,
+            }:
+                log.warning("未知平台结果状态，不更新平台健康状态: %s=%s", code, item.status)
 
         self._refresh_service_status()
 
@@ -533,13 +622,13 @@ class RPARuntime:
     def _serialize_platform_state(self, state: PlatformRuntimeState) -> dict:
         payload = _camelize_dict(asdict(state))
         payload["statusCode"] = state.status
-        payload["status"] = PLATFORM_STATUS_TEXT.get(state.status, state.status)
+        payload["status"] = PLATFORM_HEALTH_STATUS_TEXT.get(state.status, state.status)
         return payload
 
     def _serialize_platform_result(self, item) -> dict:
         payload = _camelize_dict(asdict(item))
         payload["statusCode"] = item.status
-        payload["status"] = PLATFORM_STATUS_TEXT.get(item.status, item.status)
+        payload["status"] = PLATFORM_RESULT_STATUS_TEXT.get(item.status, item.status)
         return payload
 
     def _focus_browser_window(self, reason: str):

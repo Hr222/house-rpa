@@ -21,7 +21,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # ─── 配置 ──────────────────────────────────────────────
 BASE_URL = "http://127.0.0.1:8000"
-INPUT_FILE = "C:/Users/Administrator/Desktop/房产评估汇总表_生成2.xlsx"
+INPUT_FILE = "C:/Users/Administrator/Desktop/房产评估汇总表_生成3.xlsx"
 OUTPUT_DIR = Path(__file__).parent / "results"
 POLL_INTERVAL = 6       # 轮询间隔秒数（>5 避免连续 429）
 MAX_WAIT = 600          # 单任务软等待阈值；超过后只报警，不判失败，继续阻塞等待

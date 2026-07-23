@@ -77,6 +77,12 @@ class PlatformAdapter(ABC):
         except Exception as exc:
             return False, f"页面不可用: {exc}"
 
+        blocked, reason = detect_block_with_common(
+            self.detect_block, page.target.url or "", html
+        )
+        if blocked:
+            return False, reason
+
         # 登录检测（双重：正向"退出"标识 + 反向"登录"a标签兜底）
         if self.requires_login and not self._is_logged_in(html):
             return False, "未检测到已登录标识（页面含登录链接或缺少'退出'）"
@@ -214,6 +220,16 @@ _GENERIC_BUSINESS_WORDS = (
     "在售", "小区均价", "挂牌", "property-content-info-comm-name",
 )
 
+# 所有平台共用的风控 URL 标识。平台适配器可以补充更精确的专属标识，
+# 但公共入口始终保留这组兜底规则。
+COMMON_RISK_URL_MARKERS = (
+    "/captcha",
+    "captcha",
+    "verifycode",
+    "antibot",
+    "antispam",
+)
+
 
 def is_generic_captcha_page(html: str) -> bool:
     """通用风控兜底：判断 HTML 是否为验证码拦截页（跨平台共性）。
@@ -231,6 +247,30 @@ def is_generic_captcha_page(html: str) -> bool:
     has_captcha = any(w in clean for w in _GENERIC_CAPTCHA_WORDS)
     has_business = any(w in html for w in _GENERIC_BUSINESS_WORDS)
     return has_captcha and not has_business
+
+
+def detect_common_block(url: str, html: str) -> tuple[bool, str]:
+    """检测跨平台通用风控标识。"""
+    url_lower = (url or "").lower()
+    if any(marker in url_lower for marker in COMMON_RISK_URL_MARKERS):
+        return True, "命中验证码拦截(公共URL标识)"
+    if is_generic_captcha_page(html):
+        return True, "命中验证码拦截(公共HTML标识)"
+    return False, ""
+
+
+def detect_block_with_common(detect_func, url: str, html: str) -> tuple[bool, str]:
+    """先执行平台专属规则，再执行 base.py 公共风控规则。"""
+    blocked, reason = detect_func(url, html)
+    if blocked:
+        return blocked, reason
+    return detect_common_block(url, html)
+
+
+def is_manual_verify_reason(reason: str) -> bool:
+    """判断就绪检测原因是否属于验证码或人工风控。"""
+    markers = (*_GENERIC_CAPTCHA_WORDS, "风控", "人机验证")
+    return any(marker in (reason or "") for marker in markers)
 
 
 def short_circuit_result(
@@ -327,6 +367,7 @@ def filter_snapshots_by_community(snapshots: list, community_name: str) -> list:
 
 
 LISTING_AREA_TOLERANCE = 1.0
+LISTING_AREA_FALLBACK_TOLERANCE = 10.0
 
 
 def listing_area_bounds(area: float, tolerance: float = LISTING_AREA_TOLERANCE) -> tuple[float, float]:
@@ -348,6 +389,27 @@ def filter_snapshots_by_area(
     ]
 
 
+def filter_snapshots_by_area_with_fallback(
+    snapshots: list[ListingSnapshot],
+    area: float,
+    tolerance: float = LISTING_AREA_TOLERANCE,
+    fallback_tolerance: float = LISTING_AREA_FALLBACK_TOLERANCE,
+) -> tuple[list[ListingSnapshot], float]:
+    """Use the strict area range first, then widen only when it has no hits."""
+    strict_matches = filter_snapshots_by_area(snapshots, area, tolerance)
+    if strict_matches or fallback_tolerance <= tolerance:
+        return strict_matches, tolerance
+
+    fallback_matches = filter_snapshots_by_area(
+        snapshots,
+        area,
+        fallback_tolerance,
+    )
+    if fallback_matches:
+        return fallback_matches, fallback_tolerance
+    return [], tolerance
+
+
 def listing_filter_summary(
     snapshots: list[ListingSnapshot],
     community_name: str,
@@ -356,13 +418,18 @@ def listing_filter_summary(
 ) -> str:
     """生成在售房源过滤日志，区分小区命中和面积命中。"""
     community_snapshots = filter_snapshots_by_community(snapshots, community_name)
-    area_snapshots = filter_snapshots_by_area(community_snapshots, area, tolerance)
-    area_min, area_max = listing_area_bounds(area, tolerance)
+    area_snapshots, applied_tolerance = filter_snapshots_by_area_with_fallback(
+        community_snapshots,
+        area,
+        tolerance,
+    )
+    area_min, area_max = listing_area_bounds(area, applied_tolerance)
     missing_area_count = sum(item.area is None for item in community_snapshots)
     return (
         f"原始 {len(snapshots)} 条 -> 命中小区 {len(community_snapshots)} 条 -> "
         f"命中面积 {len(area_snapshots)} 条 "
         f"(请求面积 {area:.2f}㎡, 范围 {area_min:.2f}~{area_max:.2f}㎡, "
+        f"匹配容差±{applied_tolerance:g}㎡, "
         f"面积缺失 {missing_area_count} 条)"
     )
 
@@ -378,7 +445,17 @@ def listing_no_data_reason(
     if not community_snapshots:
         return f"面积筛选后未匹配到小区: {community_name}"
 
-    area_min, area_max = listing_area_bounds(area, tolerance)
+    area_matches, applied_tolerance = filter_snapshots_by_area_with_fallback(
+        community_snapshots,
+        area,
+        tolerance,
+    )
+    area_min, area_max = listing_area_bounds(area, applied_tolerance)
+    if applied_tolerance > tolerance and area_matches:
+        return (
+            f"命中小区但无请求面积±{tolerance:g}㎡房源，已使用±{applied_tolerance:g}㎡兜底，"
+            f"命中 {len(area_matches)} 条"
+        )
     return (
         f"命中小区但无请求面积±{tolerance:g}㎡房源: "
         f"请求面积={area:.2f}㎡, 范围={area_min:.2f}~{area_max:.2f}㎡, "
@@ -394,9 +471,9 @@ def listing_no_data_status(
 ) -> str:
     """区分普通无数据与命中小区但面积不匹配。"""
     community_snapshots = filter_snapshots_by_community(snapshots, community_name)
-    if community_snapshots and not filter_snapshots_by_area(
+    if community_snapshots and not filter_snapshots_by_area_with_fallback(
         community_snapshots, area, tolerance
-    ):
+    )[0]:
         return NO_MATCHING_AREA
     return "NO_DATA"
 
@@ -407,10 +484,14 @@ def prepare_listing_data(
     area: Optional[float] = None,
     area_tolerance: float = LISTING_AREA_TOLERANCE,
 ) -> tuple[list[ListingSnapshot], list[float]]:
-    """过滤目标小区和请求面积 ±1㎡房源，并从同一批快照生成在售单价。"""
+    """过滤目标小区和面积房源，±1㎡无命中时兜底±10㎡。"""
     filtered = filter_snapshots_by_community(snapshots, community_name)
     if area is not None:
-        filtered = filter_snapshots_by_area(filtered, area, area_tolerance)
+        filtered, _ = filter_snapshots_by_area_with_fallback(
+            filtered,
+            area,
+            area_tolerance,
+        )
     quote_prices = [
         snapshot.unit_price
         for snapshot in filtered
@@ -438,11 +519,7 @@ async def wait_and_reload_after_block(tab, detect_func, label: str = "页面") -
         交给调用方走降级（放弃成交，用在售×折扣）。
     """
     def _check(url: str, html: str) -> tuple[bool, str]:
-        # 先用各平台精确检测，未命中再叠通用兜底
-        blocked, reason = detect_func(url, html)
-        if not blocked and is_generic_captcha_page(html):
-            blocked, reason = True, "命中验证码拦截(通用兜底)"
-        return blocked, reason
+        return detect_block_with_common(detect_func, url, html)
 
     await tab
     html = await tab.get_content()
