@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class _AlgorithmListing:
-    """Listing fields needed to apply the shared cross-platform dedup rules."""
+    """应用跨平台通用去重规则所需的房源字段。"""
 
     platform: str
     house_id: str
@@ -52,7 +52,7 @@ class _AlgorithmListing:
 def _algorithm_quote_price_lists(
     successful_results: list[PlatformResult],
 ) -> list[list[float]]:
-    """Build algorithm prices after the same-platform and cross-platform dedup."""
+    """完成同平台和跨平台去重后，构建算法价格列表。"""
     listings: list[_AlgorithmListing] = []
     fallback_price_lists: list[list[float]] = []
     for result in successful_results:
@@ -93,7 +93,7 @@ def _algorithm_quote_price_lists(
 
 
 def _reference_prices(result: PlatformResult) -> list[float]:
-    """Return price values from listings added outside the strict area range."""
+    """返回严格面积范围之外新增房源的价格值。"""
     if (
         result.listing_snapshots
         and result.reference_area_min is not None
@@ -108,8 +108,7 @@ def _reference_prices(result: PlatformResult) -> list[float]:
             and snapshot.unit_price is not None
             and snapshot.unit_price > 0
         ]
-    # Keep manually constructed PlatformResult values useful in tests and
-    # for older callers that did not persist listing snapshots.
+    # 兼容测试中手动构造的 PlatformResult，以及未持久化房源快照的旧调用方。
     return [price for price in result.quote_prices if price is not None and price > 0]
 
 
@@ -117,7 +116,7 @@ def _reference_contributors(
     platform_results: list[PlatformResult],
     selected_quote: Optional[float],
 ) -> list[PlatformResult]:
-    """Return weak-reference platforms that contribute to the selected peak."""
+    """返回对选定价格峰值有贡献的弱参考平台。"""
     if selected_quote is None or selected_quote <= 0:
         return []
     contributors = []
@@ -300,9 +299,8 @@ class RPAInquiryService:
 
         waiting = manual_verify_waiting_snapshot()
         if waiting:
-            # Normally gather cannot return until the platform waiters finish.
-            # Keep this guard explicit so a future background risk watcher cannot
-            # let aggregation run while manual verification is still pending.
+            # 通常 gather 要等平台等待任务结束后才能返回。
+            # 显式保留此保护，避免未来的后台风控监控器在人工确认仍未完成时执行汇总。
             log.warning("汇总前仍有平台等待人工风控处理: %s", ", ".join(waiting))
             while waiting:
                 await asyncio.sleep(0.2)

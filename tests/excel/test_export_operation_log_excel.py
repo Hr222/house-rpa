@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for historical operation-log analysis."""
+"""历史操作日志分析测试。"""
 
 from pathlib import Path
 

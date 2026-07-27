@@ -22,7 +22,7 @@ def _env_flag(name: str, default: str = "0") -> bool:
 
 
 def _env_positive_float(name: str, default: float) -> float:
-    """Read a positive float from the environment, falling back on errors."""
+    """从环境变量读取正浮点数，出错时使用默认值。"""
     value = os.getenv(name)
     if value is None:
         return default

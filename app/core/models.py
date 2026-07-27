@@ -91,7 +91,7 @@ class InquiryResult:
 
 @dataclass(frozen=True)
 class PriceCandidate:
-    """A significant listing-price peak selected by listing frequency."""
+    """按挂牌频次选出的显著价格峰值。"""
 
     quote_price: float
     final_price: float

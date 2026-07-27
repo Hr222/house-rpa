@@ -42,7 +42,7 @@ def _safe_json(resp):
 
 
 def _format_price_candidates(candidates: list[dict]) -> str:
-    """Format multi-peak candidates for console and Excel output."""
+    """格式化多峰候选值，供控制台和 Excel 输出。"""
     parts = []
     for candidate in candidates or []:
         quote_price = candidate.get("quotePrice")

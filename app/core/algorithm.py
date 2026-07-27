@@ -21,10 +21,11 @@ class Decision:
 class AlgorithmInput:
     quote_price_lists: list[list[float]]
     weighted_median_discount: float = 0.9
+    deal_price_lists: list[list[float]] = field(default_factory=list)
 
 
 class AlgorithmStrategy(Protocol):
-    """Stable extension point for future algorithm implementations."""
+    """为未来算法实现保留的稳定扩展点。"""
 
     def evaluate(self, inputs: AlgorithmInput) -> "AlgorithmEvaluation":
         ...
@@ -58,7 +59,7 @@ class _WeightedInterval:
 
 @dataclass(frozen=True)
 class WeightedMedianDiagnostic:
-    """Explain the best candidate cluster for user-facing diagnostics."""
+    """解释最佳候选价格簇，供用户侧诊断使用。"""
 
     prices: tuple[float, ...]
     center: float
@@ -69,7 +70,7 @@ class WeightedMedianDiagnostic:
 def _weighted_median(
     prices: Iterable[_WeightedPrice],
 ) -> Optional[float]:
-    """Return the weighted median of positive prices."""
+    """返回正数价格的加权中位数。"""
     ordered = sorted(prices, key=lambda item: item.price)
     if not ordered:
         return None
@@ -94,7 +95,7 @@ def _weighted_median(
 def _build_platform_weighted_prices(
     quote_price_lists: Iterable[Iterable[float]],
 ) -> list[_WeightedPrice]:
-    """Use one vote per valid listing; frequency is the business signal."""
+    """每条有效房源计一票；频次是业务信号。"""
     weighted_prices: list[_WeightedPrice] = []
     for quote_prices in quote_price_lists:
         valid_prices = [
@@ -124,7 +125,7 @@ def _mode_members(
     seed: float,
     max_relative_deviation: float,
 ) -> tuple[float, list[float]]:
-    """Find a local price mode and refine its center once."""
+    """查找局部价格众数，并对其中心值进行一次修正。"""
     members = [
         price
         for price in prices
@@ -145,7 +146,7 @@ def _find_price_modes(
     prices: list[float],
     max_relative_deviation: float = WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION,
 ) -> list[tuple[float, list[float]]]:
-    """Find frequency peaks without merging separated price populations."""
+    """查找频次峰值，不合并彼此分离的价格群体。"""
     if not prices:
         return []
 
@@ -180,12 +181,10 @@ def find_weighted_price_candidates(
     max_relative_deviation: float = WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION,
     quote_discount: float = 0.9,
 ) -> list[PriceCandidate]:
-    """Return significant listing-price peaks in ascending price order.
+    """按价格升序返回显著的挂牌单价峰值。
 
-    A small isolated peak is treated as an outlier only when it occurs less
-    than 60% as often as the strongest peak. A low price that appears often is
-    therefore retained as a real market segment instead of being discarded
-    merely because it is numerically extreme.
+    小的孤立峰值仅在其出现频次低于最强峰值的 60% 时才视为异常值。出现频次较高的低价
+    因此会作为真实市场区间保留，不会仅因数值偏低而被丢弃。
     """
     prices = [
         item.price
@@ -228,7 +227,7 @@ def _find_narrowest_weighted_interval(
     min_coverage: float = WEIGHTED_MEDIAN_MIN_COVERAGE,
     max_relative_deviation: float = WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION,
 ) -> Optional[_WeightedInterval]:
-    """Find a dense interval whose individual prices stay near its center."""
+    """查找一个密集区间，使其中每条价格都接近该区间的中心值。"""
     if (
         not prices
         or not 0 < min_coverage <= 1
@@ -285,7 +284,7 @@ def aggregate_weighted_median_quote(
     min_coverage: float = WEIGHTED_MEDIAN_MIN_COVERAGE,
     max_relative_deviation: float = WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION,
 ) -> Optional[float]:
-    """Return a median only when one significant price peak is clear."""
+    """仅在存在一个明确的显著价格峰值时返回中位数。"""
     candidates = find_weighted_price_candidates(
         quote_price_lists,
         max_relative_deviation=max_relative_deviation,
@@ -298,13 +297,11 @@ def diagnose_weighted_median_quote(
     min_coverage: float = WEIGHTED_MEDIAN_MIN_COVERAGE,
     max_relative_deviation: float = WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION,
 ) -> Optional[WeightedMedianDiagnostic]:
-    """Return the candidate cluster details used to explain a no-data result.
+    """返回用于解释无数据结果的候选价格簇详情。
 
-    The diagnostic first finds the widest cluster whose individual prices meet
-    the deviation limit. If that cluster still covers less than the required
-    weight, it is useful evidence that the data is present but insufficiently
-    concentrated. Otherwise it returns the closest cluster that reaches the
-    coverage target and reports which deviation requirement it misses.
+    诊断过程先查找每条价格都满足偏差限制的最宽价格簇。如果该价格簇覆盖的权重仍低于
+    要求，则说明数据存在但集中度不足。否则返回达到覆盖目标的最接近价格簇，并报告其
+    未满足的偏差要求。
     """
     weighted_prices = _build_platform_weighted_prices(quote_price_lists)
     if not weighted_prices or not 0 < min_coverage <= 1 or max_relative_deviation <= 0:
@@ -377,7 +374,7 @@ def decide_weighted_median(
     quote_avg: Optional[float],
     quote_discount: float = 0.9,
 ) -> Decision:
-    """Apply the listing discount to a weighted-median quote result."""
+    """对加权落点中位数询价结果应用挂牌折扣。"""
     if quote_avg is None:
         return Decision(final_price=None, branch="FAILED")
     return Decision(
@@ -386,8 +383,34 @@ def decide_weighted_median(
     )
 
 
+def _select_deal_price(
+    deal_price_lists: Iterable[Iterable[float]],
+    max_relative_deviation: float = WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION,
+) -> Optional[float]:
+    """Select target-area deal prices without applying the listing discount."""
+    valid_prices = [
+        float(price)
+        for price_list in deal_price_lists
+        for price in price_list
+        if price is not None and price > 0
+    ]
+    if not valid_prices:
+        return None
+    if len(valid_prices) == 1:
+        return valid_prices[0]
+
+    candidates = find_weighted_price_candidates(
+        [valid_prices],
+        max_relative_deviation=max_relative_deviation,
+        quote_discount=1.0,
+    )
+    if not candidates:
+        return None
+    return min(candidates, key=lambda candidate: candidate.quote_price).quote_price
+
+
 class WeightedMedianAlgorithm:
-    """Listing strategy based on frequency-ranked price modes."""
+    """基于频次排序价格众数的挂牌价策略。"""
 
     def evaluate(self, inputs: AlgorithmInput) -> AlgorithmEvaluation:
         candidates = find_weighted_price_candidates(
@@ -418,9 +441,16 @@ class WeightedMedianAlgorithm:
                 quote_avg,
                 inputs.weighted_median_discount,
             )
+        deal_avg = _select_deal_price(inputs.deal_price_lists)
+        if decision.final_price is not None and deal_avg is not None:
+            decision = Decision(
+                final_price=(decision.final_price + deal_avg) / 2,
+                branch="WEIGHTED_MEDIAN_COMBINED",
+            )
+
         return AlgorithmEvaluation(
             quote_avg=quote_avg,
-            deal_avg=None,
+            deal_avg=deal_avg,
             decision=decision,
             candidates=candidates,
         )
@@ -434,7 +464,7 @@ ALGORITHM_REGISTRY: dict[str, AlgorithmStrategy] = {
 
 
 def get_algorithm_strategy(algorithm_mode: str = "DEFAULT") -> AlgorithmStrategy:
-    """Resolve the registered strategy while keeping DEFAULT as the fallback."""
+    """解析已注册的策略，并将 DEFAULT 作为兜底策略。"""
     mode = str(algorithm_mode or "DEFAULT").upper()
     return ALGORITHM_REGISTRY.get(mode, ALGORITHM_REGISTRY["DEFAULT"])
 
@@ -445,11 +475,10 @@ def evaluate_algorithm(
     *,
     algorithm_mode: Optional[str] = None,
 ) -> AlgorithmEvaluation:
-    """Evaluate through the registered strategy, defaulting to DEFAULT.
+    """通过已注册的策略执行评估，默认使用 DEFAULT。
 
-    ``inputs=...`` is the current service-facing form. The optional legacy
-    positional form ``evaluate_algorithm(mode, inputs)`` remains useful for
-    the strategy extension point, while the HTTP API no longer exposes it.
+    ``inputs=...`` 是当前面向服务层的调用形式。可选的旧版位置参数形式
+    ``evaluate_algorithm(mode, inputs)`` 仍可用于策略扩展点，但 HTTP API 已不再暴露该形式。
     """
     if isinstance(inputs, AlgorithmInput):
         selected_inputs = inputs

@@ -721,7 +721,7 @@ def print_summary(
         elapsed=0,
     )
     return
-    print()  # dead code, keep for edit stability
+    print()  # 无实际作用，保留以维持编辑稳定性
     print("=" * 60)
     print("链家测试完成")
     print(f"打开首页 HTML: {open_file}")

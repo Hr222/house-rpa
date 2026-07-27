@@ -18,7 +18,7 @@ def persist_dir():
             yield Path(tmp)
 
 
-# ---- save + load -----------------------------------------------------------
+# ---- 保存 + 加载 -----------------------------------------------------------
 
 def test_save_and_load_single_task(persist_dir):
     save_task("task-1", {"community_name": "绿景虹湾", "area_min": 70, "area_max": 90})
@@ -43,7 +43,7 @@ def test_load_empty_dir_returns_empty_list(persist_dir):
     assert load_pending_tasks() == []
 
 
-# ---- delete ----------------------------------------------------------------
+# ---- 删除 ------------------------------------------------------------------
 
 def test_delete_removes_file(persist_dir):
     save_task("task-x", {"community_name": "测试"})
@@ -66,7 +66,7 @@ def test_delete_then_re_save(persist_dir):
     assert tasks[0]["x"] == 2
 
 
-# ---- corrupted file --------------------------------------------------------
+# ---- 文件损坏 --------------------------------------------------------------
 
 def test_load_skips_corrupted_json(persist_dir):
     (persist_dir / "bad.json").write_text("not valid json", encoding="utf-8")
@@ -76,7 +76,7 @@ def test_load_skips_corrupted_json(persist_dir):
     assert tasks[0]["task_id"] == "good"
 
 
-# ---- data integrity --------------------------------------------------------
+# ---- 数据完整性 ------------------------------------------------------------
 
 def test_saved_json_is_valid_utf8(persist_dir):
     save_task("zh", {"community_name": "春华四季园", "city": "深圳"})

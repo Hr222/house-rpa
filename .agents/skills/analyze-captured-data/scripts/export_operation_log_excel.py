@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Run the project's operation-log exporter from the analysis skill."""
+"""从分析 skill 运行项目的操作日志导出器。"""
 
 from __future__ import annotations
 
