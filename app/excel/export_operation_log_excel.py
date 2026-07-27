@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Export attached inquiry logs to an Excel workbook for debugging analysis."""
+"""将配套的询价日志导出为 Excel 工作簿，用于调试分析。"""
 
 from __future__ import annotations
 
@@ -171,7 +171,7 @@ class InquiryRecord:
 
 @dataclass(frozen=True)
 class EvaluationRow:
-    """One evaluation row used to explain the corresponding log result."""
+    """用于解释对应日志结果的一行评估数据。"""
 
     row_number: int
     city: str
@@ -182,7 +182,7 @@ class EvaluationRow:
 
 @dataclass
 class AnalysisRow:
-    """Comparison and attribution result shown in the analysis summary sheet."""
+    """分析汇总表中展示的对比和归因结果。"""
 
     evaluation: EvaluationRow
     record: Optional[InquiryRecord]
@@ -204,19 +204,19 @@ class AnalysisRow:
 
 
 def _listing_deduplication(record: InquiryRecord) -> ListingDeduplicationResult[ListingRow]:
-    """Apply same-platform and conservative cross-platform de-duplication."""
+    """执行同平台及保守的跨平台去重。"""
     return deduplicate_listings(record.listings)
 
 
 def _deduplicated_listing_rows(record: InquiryRecord) -> list[ListingRow]:
-    """Return rows that contribute to cross-platform price frequency."""
+    """返回参与跨平台价格频次统计的数据行。"""
     return list(_listing_deduplication(record).items)
 
 
 def _format_cross_platform_duplicate_text(
     result: ListingDeduplicationResult[ListingRow],
 ) -> str:
-    """Format duplicate groups for the workbook audit columns."""
+    """格式化重复房源组，写入工作簿审计列。"""
     parts: list[str] = []
     for group in result.cross_platform_groups:
         platforms = "/".join(str(getattr(item, "platform", "")) for item in group.members)
@@ -230,7 +230,7 @@ def _format_cross_platform_duplicate_text(
 
 
 def _listing_dedup_statuses(record: InquiryRecord) -> dict[int, str]:
-    """Describe rows removed from price frequency while retaining raw rows."""
+    """说明从价格频次统计中移除、但仍保留原始数据的行。"""
     result = _listing_deduplication(record)
     statuses: dict[int, str] = {}
     for group in result.cross_platform_groups:
@@ -248,7 +248,7 @@ def _listing_dedup_statuses(record: InquiryRecord) -> dict[int, str]:
 
 
 def _weighted_median_candidates_for_record(record: InquiryRecord):
-    """Rebuild weighted-median candidates from the record's deduplicated listings."""
+    """根据记录中的去重房源重新构建加权落点中位数候选值。"""
     listings = _deduplicated_listing_rows(record)
     prices = [
         float(listing.unit_price)
@@ -313,7 +313,7 @@ def _format_platform_reason(note: dict[str, str]) -> str:
 
 
 def _format_final_weak_reference_text(record: InquiryRecord) -> str:
-    """Format only the weak reference actually used by the final result."""
+    """仅格式化最终结果实际使用的弱参考信息。"""
     if not record.reference_code:
         return ""
     tolerance = to_float(record.reference_area_tolerance)
@@ -336,7 +336,7 @@ def _format_candidate_text(candidates) -> str:
 
 
 def read_evaluation_rows(path: Path) -> list[EvaluationRow]:
-    """Read evaluation prices from the first sheet of an evaluation workbook."""
+    """从评估工作簿的第一个工作表读取评估价格。"""
     workbook = load_workbook(path, data_only=True, read_only=True)
     try:
         sheet = workbook.active
@@ -394,7 +394,7 @@ def _match_record(
     records: list[InquiryRecord],
     unused_indexes: set[int],
 ) -> Optional[InquiryRecord]:
-    """Match one evaluation row without collapsing duplicate community names."""
+    """匹配一行评估数据，但不合并重复出现的小区名称。"""
     matches = []
     for index in unused_indexes:
         record = records[index]
@@ -418,7 +418,7 @@ def analyze_evaluation_rows(
     evaluation_rows: list[EvaluationRow],
     records: list[InquiryRecord],
 ) -> list[AnalysisRow]:
-    """Compare evaluation prices with raw peaks and final values."""
+    """将评估价格与原始峰值和最终值进行对比。"""
     unused_indexes = set(range(len(records)))
     analysis_rows: list[AnalysisRow] = []
     for evaluation in evaluation_rows:
@@ -606,31 +606,31 @@ def to_float(value: Optional[str]) -> Optional[float]:
 
 
 def display_algorithm_mode(mode: Optional[str]) -> str:
-    """Return the Chinese label used for an algorithm mode in Excel."""
+    """返回 Excel 中使用的算法模式中文标签。"""
     return ALGORITHM_MODE_TEXT.get(mode or "DEFAULT", "未知算法")
 
 
 def algorithm_description(mode: Optional[str]) -> str:
-    """Return the value-selection explanation used in the workbook note."""
+    """返回工作簿备注中使用的取值规则说明。"""
     return ALGORITHM_DESCRIPTIONS.get(mode or "DEFAULT", "未识别的算法取值规则。")
 
 
 def display_status(status: Optional[str]) -> str:
-    """Translate a status code at the Excel presentation boundary."""
+    """在 Excel 展示层将状态码转换为中文。"""
     if not status:
         return ""
     return OPERATION_STATUS_TEXT.get(str(status), "状态异常")
 
 
 def display_branch(branch: Optional[str]) -> str:
-    """Translate a decision branch code at the Excel presentation boundary."""
+    """在 Excel 展示层将决策分支码转换为中文。"""
     if not branch:
         return ""
     return BRANCH_TEXT.get(str(branch), "其他处理")
 
 
 def has_captured_data(record: InquiryRecord) -> bool:
-    """Whether the log contains evidence that a platform returned data."""
+    """判断日志中是否存在平台返回数据的证据。"""
     if record.listings or record.deals or record.quote_avg is not None or record.deal_avg is not None:
         return True
     return any(
@@ -642,7 +642,7 @@ def has_captured_data(record: InquiryRecord) -> bool:
 
 
 def calculation_no_data_description(mode: Optional[str]) -> str:
-    """Explain why collected data did not produce a final quote."""
+    """说明已采集数据为何未产生最终报价。"""
     return (
         "已抓到在售数据，但价格落点未同时满足至少60%权重覆盖和每条价格相对中心价偏差不超过10%的要求，"
         "无法形成明确落点，最终无可用报价。"
@@ -650,7 +650,7 @@ def calculation_no_data_description(mode: Optional[str]) -> str:
 
 
 def weighted_median_no_data_detail(record: InquiryRecord) -> str:
-    """Explain the weighted cluster coverage or deviation failure."""
+    """说明加权价格簇的覆盖率或偏差为何未达标。"""
     deduplicated_listings = _deduplicated_listing_rows(record)
     prices = []
     for listing in deduplicated_listings:
@@ -685,7 +685,7 @@ def weighted_median_no_data_detail(record: InquiryRecord) -> str:
 
 
 def weighted_median_candidates_detail(record: InquiryRecord) -> str:
-    """Explain current frequency-based candidates using all platforms together."""
+    """结合所有平台说明当前基于频次的候选价格。"""
     candidates = _weighted_median_candidates_for_record(record)
     if not candidates:
         return "没有足够的有效在售价格形成候选价格簇。"
@@ -717,7 +717,7 @@ def _diagnose_weighted_median_quote(
     min_coverage: float = 0.60,
     max_relative_deviation: float = 0.10,
 ) -> Optional[WeightedDiagnostic]:
-    """Diagnose weighted price clusters without importing the app package."""
+    """不导入 app 包，直接诊断加权价格簇。"""
     weighted_prices: list[tuple[float, float]] = []
     for group in price_groups:
         valid = [float(price) for price in group if price is not None and price > 0]
@@ -771,8 +771,7 @@ def _diagnose_weighted_median_quote(
                 max_relative_deviation=-negative_deviation,
             )
 
-    # No valid cluster reaches the target: show the narrowest target-sized
-    # interval so the workbook can explain the rejected data.
+    # 没有有效价格簇达到目标：展示最窄的目标大小区间，便于工作簿解释被拒绝的数据。
     closest: Optional[tuple[float, float, int, int, int, float]] = None
     for start in range(len(weighted_prices)):
         interval_weight = 0.0
@@ -1451,7 +1450,7 @@ def derive_output_path(
     output_path: Optional[Path],
     evaluation_excel_path: Optional[Path] = None,
 ) -> Path:
-    """Derive the paired analysis workbook path under the project results directory."""
+    """在项目 results 目录下推导配套分析工作簿路径。"""
     if output_path is not None:
         return output_path
     project_root = Path(__file__).resolve().parents[2]

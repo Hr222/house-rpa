@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Conservative same- and cross-platform listing deduplication helpers."""
+"""保守的同平台与跨平台房源去重工具。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class ListingDuplicateGroup(Generic[T]):
-    """A high-confidence cross-platform duplicate group."""
+    """高置信度的跨平台重复房源组。"""
 
     members: tuple[T, ...]
     reason: str
@@ -25,7 +25,7 @@ class ListingDuplicateGroup(Generic[T]):
 
 @dataclass(frozen=True)
 class ListingDeduplicationResult(Generic[T]):
-    """Result of the two-stage listing de-duplication process."""
+    """两阶段房源去重流程的结果。"""
 
     same_platform_items: tuple[T, ...]
     items: tuple[T, ...]
@@ -55,14 +55,14 @@ def _number(value: Any) -> float | None:
 
 
 def _normalized_text(value: Any) -> str:
-    """Normalize harmless punctuation/spacing differences between sites."""
+    """规范化不同网站之间无实际影响的标点和空格差异。"""
     text = _text(value).casefold()
     punctuation = r"[\s,\uFF0C\u3002.!\uFF01\u3001;\uFF1B:/\\|()\uFF08\uFF09\[\]\u3010\u3011_-]+"
     return re.sub(punctuation, "", text)
 
 
 def _layout_signature(value: Any) -> tuple[int, int] | None:
-    """Extract room/hall counts from Chinese or English layout text."""
+    """从中文或英文户型文本中提取室数和厅数。"""
     text = _text(value).casefold()
     if not text:
         return None
@@ -78,7 +78,7 @@ def _layout_signature(value: Any) -> tuple[int, int] | None:
 
 
 def _titles_match(left: Any, right: Any) -> bool:
-    """Match titles only after harmless spacing/punctuation normalization."""
+    """仅在完成无实际影响的空格和标点规范化后匹配标题。"""
     left_title = _normalized_text(left)
     right_title = _normalized_text(right)
     if not left_title or not right_title:
@@ -87,7 +87,7 @@ def _titles_match(left: Any, right: Any) -> bool:
 
 
 def listing_dedup_key(item: T) -> tuple[Any, ...] | None:
-    """Build a key for a definite duplicate within one platform."""
+    """为同平台内确定重复的房源构建键值。"""
     platform = _text(getattr(item, "platform", ""))
     platform_prefix: tuple[Any, ...] = ("platform", platform) if platform else ()
     house_id = _text(getattr(item, "house_id", ""))
@@ -116,7 +116,7 @@ def listing_dedup_key(item: T) -> tuple[Any, ...] | None:
 
 
 def deduplicate_same_platform(items: Iterable[T]) -> list[T]:
-    """Keep the first occurrence of definite duplicates in input order."""
+    """按输入顺序保留确定重复房源的首次出现项。"""
     result: list[T] = []
     seen: set[tuple[Any, ...]] = set()
     for item in items:
@@ -135,7 +135,7 @@ def _cross_platform_match(
     area_tolerance: float,
     unit_price_tolerance: float,
 ) -> bool:
-    """Return whether two rows are safe to treat as one listing."""
+    """返回两行数据是否可以安全视为同一套房源。"""
     left_platform = _normalized_text(getattr(left, "platform", ""))
     right_platform = _normalized_text(getattr(right, "platform", ""))
     if not left_platform or left_platform == right_platform:
@@ -162,8 +162,8 @@ def _cross_platform_match(
     if left_layout is not None and right_layout is not None:
         return left_layout == right_layout
 
-    # When either feed omits layout, use the normalized title as the fallback
-    # identity signal. This covers one missing layout and both missing layouts.
+    # 任一数据源缺少户型时，使用规范化标题作为身份判断的兜底信号。
+    # 这同时覆盖一方缺少户型和双方都缺少户型的情况。
     return _titles_match(
         getattr(left, "title", ""),
         getattr(right, "title", ""),
@@ -176,16 +176,15 @@ def deduplicate_cross_platform(
     area_tolerance: float = 0.5,
     unit_price_tolerance: float = 100.0,
 ) -> tuple[list[T], list[ListingDuplicateGroup[T]]]:
-    """Collapse only unambiguous duplicate groups spanning platforms."""
+    """仅合并跨平台的、无歧义的重复房源组。"""
     rows = list(items)
     matched_indexes: set[int] = set()
     representative_indexes: set[int] = set()
     groups: list[ListingDuplicateGroup[T]] = []
     components: list[list[int]] = []
 
-    # Compare each row with the group's first row only. This keeps the
-    # representative as the identity anchor and avoids treating two rows as
-    # directly equal merely because they happen to share another match.
+    # 每行数据只与房源组的首行比较。
+    # 这样可以将代表项作为身份锚点，避免两行数据仅因恰好共享另一条匹配项就被直接判定为相等。
     for index, row in enumerate(rows):
         compatible_components = []
         for component_index, component in enumerate(components):
@@ -204,7 +203,7 @@ def deduplicate_cross_platform(
             ):
                 compatible_components.append(component_index)
 
-        # Ambiguous matches are retained as separate listings.
+        # 有歧义的匹配保留为独立房源。
         if len(compatible_components) != 1:
             components.append([index])
             continue
@@ -244,7 +243,7 @@ def deduplicate_cross_platform(
 
 
 def deduplicate_listings(items: Iterable[T]) -> ListingDeduplicationResult[T]:
-    """Apply same-platform then conservative cross-platform de-duplication."""
+    """先执行同平台去重，再执行保守的跨平台去重。"""
     raw_items = list(items)
     same_platform_items = deduplicate_same_platform(raw_items)
     cross_platform_items, groups = deduplicate_cross_platform(same_platform_items)

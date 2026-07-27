@@ -77,8 +77,7 @@ class _ManualVerifyCoordinator:
     ) -> bool:
         lock = self._ensure_loop_state()
         async with lock:
-            # Another platform may have completed the shared verification while
-            # this platform was waiting for the terminal prompt.
+            # 其他平台可能已在当前平台等待终端提示期间完成了共享人工确认。
             if is_resolved is not None:
                 try:
                     if await is_resolved():
@@ -266,7 +265,7 @@ class PlatformAdapter(ABC):
         except Exception:
             current_url = ""
 
-        target_domain = urlparse(target_url).netloc   # e.g. "sz.ke.com"
+        target_domain = urlparse(target_url).netloc   # 例如 "sz.ke.com"
         current_domain = urlparse(current_url).netloc if current_url else ""
 
         if target_domain == current_domain:
@@ -541,7 +540,7 @@ def _quote_prices_from_snapshots(snapshots: list[ListingSnapshot]) -> list[float
 
 
 def _has_effective_price_peak(snapshots: list[ListingSnapshot]) -> bool:
-    """Return whether the current price algorithm finds a 3-listing peak."""
+    """返回当前价格算法是否找到了包含 3 条房源的价格峰值。"""
     quote_prices = _quote_prices_from_snapshots(snapshots)
     if not quote_prices:
         return False
@@ -555,7 +554,7 @@ def _area_tolerance_candidates(
     strict_tolerance: float,
     max_tolerance: float,
 ) -> list[float]:
-    """Return the smallest symmetric tolerances represented by nearby areas."""
+    """返回相邻面积所体现的最小对称容差。"""
     distances = {
         round(abs(snapshot.area - area), 10)
         for snapshot in snapshots
@@ -571,13 +570,11 @@ def select_snapshots_by_area_with_reference(
     tolerance: float = LISTING_AREA_TOLERANCE,
     max_tolerance: Optional[float] = None,
 ) -> tuple[list[ListingSnapshot], float, int]:
-    """Select the smallest area range that forms an effective price peak.
+    """选择能够形成有效价格峰值的最小面积范围。
 
-    The strict range is retained whenever it already contains an effective
-    peak. Otherwise, nearby symmetric ranges are tried in ascending order.
-    Expansion stops only when the existing price-mode algorithm retains a
-    peak with at least three listings. The third return value is the number of
-    price-bearing listings added beyond the strict range.
+    如果严格范围已经包含有效峰值，则保留严格范围；否则按升序依次尝试相邻的对称范围。
+    只有当现有价格众数算法保留了至少 3 条房源的峰值时才停止扩展。第三个返回值表示
+    严格范围之外新增的、带有价格的房源数量。
     """
     max_tolerance = (
         config.WEAK_AREA_MAX_TOLERANCE
@@ -623,7 +620,7 @@ def filter_snapshots_by_area_with_fallback(
     tolerance: float = LISTING_AREA_TOLERANCE,
     fallback_tolerance: Optional[float] = None,
 ) -> tuple[list[ListingSnapshot], float]:
-    """Keep the compatibility API while using the effective-peak search."""
+    """保留兼容性 API，同时使用有效峰值搜索逻辑。"""
     matches, applied_tolerance, _ = select_snapshots_by_area_with_reference(
         snapshots,
         area,
