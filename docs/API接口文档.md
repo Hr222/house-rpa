@@ -16,8 +16,8 @@
   - [`GET /inquiries/{taskId}` — 查询任务结果](#get-inquiriestaskid--查询任务结果兜底)
 - [结果回调](#结果回调)
 - [算法参数](#算法参数)
-  - [`GET /admin/algorithm/no-deal-discount`](#get-adminalgorithmno-deal-discount)
-  - [`PUT /admin/algorithm/no-deal-discount`](#put-adminalgorithmno-deal-discount)
+  - [`GET /admin/algorithm/weighted-median-discount`](#get-adminalgorithmweighted-median-discount)
+  - [`PUT /admin/algorithm/weighted-median-discount`](#put-adminalgorithmweighted-median-discount)
 - [任务状态码](#任务状态码)
 - [业务决策分支](#业务决策分支)
 
@@ -33,8 +33,8 @@
 | POST | `/admin/platforms/{code}/confirm-ready` | 确认平台就绪 |
 | POST | `/inquiries` | 创建询价任务 |
 | GET | `/inquiries/{taskId}` | 查询任务结果（兜底，受限流） |
-| GET | `/admin/algorithm/no-deal-discount` | 查询无成交折扣 |
-| PUT | `/admin/algorithm/no-deal-discount` | 更新无成交折扣 |
+| GET | `/admin/algorithm/weighted-median-discount` | 查询加权落点中位数折扣 |
+| PUT | `/admin/algorithm/weighted-median-discount` | 更新加权落点中位数折扣 |
 
 ---
 
@@ -149,7 +149,6 @@
 | `communityName` | string | ✅ | 小区名称 |
 | `area` | float | ✅ | 精确面积（㎡），如 `89.5`。系统自动匹配各平台面积档位 |
 | `city` | string | ✅ | 城市名（如 `深圳`、`广州`、`东莞`） |
-| `algorithmMode` | string | | 算法模式：`"default"`（成交+在售）、`"quote_only"`（纯在售）或 `"weighted_median"`（加权落点中位数），默认 `"default"` |
 | `requestId` | string | | 请求标识，用于幂等；不填则由服务生成 `taskId` |
 
 **请求示例：**
@@ -159,7 +158,6 @@
   "city": "深圳",
   "communityName": "绿景虹湾",
   "area": 89.5,
-  "algorithmMode": "default",
   "requestId": "order-001"
 }
 ```
@@ -212,22 +210,28 @@
     "finalPrice": 71086.50,
     "success": true,
     "statusCode": "COMPLETED",
-    "branchCode": "TAKE_LOWER",
-    "branch": "差异在阈值内，取较低值"
+    "branchCode": "WEIGHTED_MEDIAN",
+    "branch": "主要价格落点中位数折扣"
   }
 }
 ```
 
 | 字段 | 说明 |
 |------|------|
-| `quoteAvg` | 在售均价（元/㎡），所有成功平台累加平均 |
-| `dealAvg` | 成交均价（元/㎡），所有成功平台累加平均 |
+| `quoteAvg` | 主要价格落点中位数（元/㎡） |
+| `dealAvg` | 兼容字段，当前算法不参与决策 |
 | `finalPrice` | 最终建议单价（元/㎡） |
 | `success` | 本次询价是否得到可用结果；`NO_DATA` 时为 `false` |
 | `statusCode` | 任务状态码；完成态固定为 `COMPLETED` |
-| `branchCode` | 决策分支：`TAKE_LOWER` / `DEAL_ONLY` / `QUOTE_DISCOUNT` / `QUOTE_ONLY` / `NO_DATA` / `FAILED` |
-| `branch` | 分支说明文本；部分分支当前直接返回分支码本身 |
+| `branchCode` | 决策分支：`WEIGHTED_MEDIAN` / `WEIGHTED_MEDIAN_MULTI` / `NO_DATA` / `NO_MATCHING_AREA` / `FAILED` |
+| `branch` | 分支说明中文文案；未登记的分支才回退为分支码 |
 | `note` | 可选，补充说明；例如所有平台都不支持该城市时返回 `"不支持该城市"` |
+| `referenceCode` | 可选；最终选中的价格峰实际使用面积弱参考时为 `WEAK_AREA_REFERENCE` |
+| `referenceAreaTolerance` | 可选；弱参考实际使用的请求面积对称容差，单位㎡ |
+| `referenceAreaMin` / `referenceAreaMax` | 可选；弱参考实际使用的面积范围，单位㎡ |
+| `referenceListingCount` | 可选；额外补充进入弱参考的房源数量 |
+
+弱参考不是新的状态码或决策分支。公开询价响应不会返回 `platformResults`；平台级弱参考字段仅保留在运行时内部结果、操作日志和 Excel 分析数据中。最终公开结果只有在选中的价格峰确实包含该平台补充数据时才输出顶层弱参考字段。最大面积容差默认 `20㎡`，可通过环境配置 `RPA_WEAK_AREA_MAX_TOLERANCE` 调整，当前暂不提供 API 修改入口。
 
 **响应 200（已完成但无数据）：**
 
@@ -242,7 +246,7 @@
     "success": false,
     "statusCode": "COMPLETED",
     "branchCode": "NO_DATA",
-    "branch": "NO_DATA",
+    "branch": "无可用数据",
     "note": "不支持该城市"
   }
 }
@@ -283,7 +287,7 @@
 
 ## 多峰结果
 
-当 `algorithmMode` 为 `weighted_median` 且识别到多个频率接近的价格峰时，任务仍视为成功完成，
+当识别到多个频率接近的价格峰时，任务仍视为成功完成，
 服务选择最低价格峰的中位数作为 `quoteAvg` 和 `finalPrice`，且不打折；结果中的 `candidates` 仍保留全部峰值用于审计展示：
 
 | 字段 | 说明 |
@@ -313,8 +317,8 @@
   "quoteAvg": 85635.00,
   "dealAvg": 71086.50,
   "finalPrice": 71086.50,
-  "branchCode": "TAKE_LOWER",
-  "branch": "差异在阈值内，取较低值"
+  "branchCode": "WEIGHTED_MEDIAN",
+  "branch": "主要价格落点中位数折扣"
 }
 ```
 
@@ -336,9 +340,9 @@
 
 ## 算法参数
 
-### `GET /admin/algorithm/no-deal-discount` — 查询无成交折扣
+### `GET /admin/algorithm/weighted-median-discount` — 查询加权落点中位数折扣
 
-当所有平台都没有成交记录时，在售均价乘以该折扣作为最终价。
+单峰结果将主要价格落点中位数乘以该折扣作为最终价，多峰结果直接返回最低价格峰中位数。
 
 **响应：**
 
@@ -347,7 +351,7 @@
   "code": "OK",
   "message": "查询成功",
   "data": {
-    "noDealDiscount": 0.9,
+    "weightedMedianDiscount": 0.9,
     "isDefault": true
   }
 }
@@ -355,10 +359,10 @@
 
 | 字段 | 说明 |
 |------|------|
-| `noDealDiscount` | 当前折扣值，默认 `0.9` |
+| `weightedMedianDiscount` | 当前加权落点中位数折扣值，默认 `0.9` |
 | `isDefault` | 是否为默认值（未被人为修改过） |
 
-### `PUT /admin/algorithm/no-deal-discount` — 更新无成交折扣
+### `PUT /admin/algorithm/weighted-median-discount` — 更新加权落点中位数折扣
 
 运行时动态调整折扣系数，立即生效并持久化，重启后自动恢复。
 
@@ -366,7 +370,7 @@
 
 ```json
 {
-  "noDealDiscount": 0.85
+  "weightedMedianDiscount": 0.85
 }
 ```
 
@@ -380,57 +384,7 @@
 {
   "code": "OK",
   "message": "参数已更新",
-  "data": { "noDealDiscount": 0.85 }
-}
-```
-
-**响应 400：** 值不在 `(0, 1)` 区间
-
-### `GET /admin/algorithm/quote-only-discount` — 查询纯在售折扣
-
-纯在售算法（`algorithmMode="quote_only"`）会将聚合后的在售均价乘以该折扣作为最终价。
-
-**响应：**
-
-```json
-{
-  "code": "OK",
-  "message": "查询成功",
-  "data": {
-    "quoteOnlyDiscount": 0.9,
-    "isDefault": true
-  }
-}
-```
-
-| 字段 | 说明 |
-|------|------|
-| `quoteOnlyDiscount` | 当前纯在售折扣值，默认 `0.9` |
-| `isDefault` | 是否为默认值（未被人为修改过） |
-
-### `PUT /admin/algorithm/quote-only-discount` — 更新纯在售折扣
-
-运行时动态调整纯在售算法折扣系数，立即生效并持久化，重启后自动恢复。
-
-**请求体：**
-
-```json
-{
-  "quoteOnlyDiscount": 0.85
-}
-```
-
-| 约束 | 值 |
-|------|-----|
-| 有效范围 | `(0, 1)`，不包含 0 和 1 |
-
-**响应：**
-
-```json
-{
-  "code": "OK",
-  "message": "参数已更新",
-  "data": { "quoteOnlyDiscount": 0.85 }
+  "data": { "weightedMedianDiscount": 0.85 }
 }
 ```
 
@@ -451,11 +405,8 @@
 
 | branchCode | 条件 | 说明 |
 |------------|------|------|
-| `TAKE_LOWER` | 在售均价与成交均价差值 ≤ 10% | 取两者中较低值 |
-| `DEAL_ONLY` | 差值 > 10%，或只有成交价 | 只取成交均价 |
-| `QUOTE_DISCOUNT` | 无成交数据 | 在售均价 × `noDealDiscount` |
-| `QUOTE_ONLY` | `algorithmMode="quote_only"` 且有在售数据 | 在售均价 × `quoteOnlyDiscount` |
-| `WEIGHTED_MEDIAN` | `algorithmMode="weighted_median"` 且存在明确主要价格落点 | 主要价格峰中位数 × `quoteOnlyDiscount` |
-| `WEIGHTED_MEDIAN_MULTI` | `algorithmMode="weighted_median"` 且存在多个频率接近的价格峰 | 取最低价格峰中位数直接返回，不打折；同时保留 `candidates` |
+| `WEIGHTED_MEDIAN` | 存在明确主要价格落点 | 主要价格峰中位数 × `weightedMedianDiscount` |
+| `WEIGHTED_MEDIAN_MULTI` | 存在多个频率接近的价格峰 | 取最低价格峰中位数直接返回，不打折；同时保留 `candidates` |
 | `NO_DATA` | 全平台无可用在售数据，或该城市所有平台都不支持 | 任务已完成，但无可用报价 |
+| `NO_MATCHING_AREA` | 全平台均未命中请求面积 | 任务已完成，但无匹配面积房源 |
 | `FAILED` | 无在售也无成交 | 无法计算 |

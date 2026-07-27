@@ -14,6 +14,7 @@ from app.platforms.base import (
     listing_no_data_status,
     deduplicate_same_platform,
     prepare_listing_data,
+    prepare_listing_data_with_reference,
 )
 
 
@@ -177,10 +178,12 @@ def test_filter_snapshots_by_area_uses_request_area_delta():
     assert [item.house_id for item in filtered] == ["min", "mid", "max"]
 
 
-def test_filter_snapshots_by_area_falls_back_to_ten_when_strict_has_no_hit():
+def test_filter_snapshots_by_area_uses_smallest_range_with_three_listing_peak():
     snapshots = [
-        ListingSnapshot(house_id="fallback", area=109.0),
-        ListingSnapshot(house_id="outside", area=111.0),
+        ListingSnapshot(house_id="strict", area=100.0, unit_price=50000.0),
+        ListingSnapshot(house_id="near", area=102.0, unit_price=50000.0),
+        ListingSnapshot(house_id="farthest", area=103.0, unit_price=50000.0),
+        ListingSnapshot(house_id="outside", area=111.0, unit_price=50000.0),
     ]
 
     filtered, applied_tolerance = filter_snapshots_by_area_with_fallback(
@@ -188,8 +191,87 @@ def test_filter_snapshots_by_area_falls_back_to_ten_when_strict_has_no_hit():
         100.0,
     )
 
-    assert [item.house_id for item in filtered] == ["fallback"]
-    assert applied_tolerance == 10.0
+    assert [item.house_id for item in filtered] == ["strict", "near", "farthest"]
+    assert applied_tolerance == 3.0
+
+
+def test_prepare_listing_data_marks_weak_area_reference():
+    snapshots = [
+        ListingSnapshot(
+            house_id="strict",
+            community_name="target",
+            area=100.0,
+            unit_price=50000.0,
+        ),
+        ListingSnapshot(
+            house_id="near",
+            community_name="target",
+            area=102.0,
+            unit_price=50000.0,
+        ),
+        ListingSnapshot(
+            house_id="farthest",
+            community_name="target",
+            area=103.0,
+            unit_price=50000.0,
+        ),
+    ]
+
+    filtered, quote_prices, reference = prepare_listing_data_with_reference(
+        snapshots,
+        "target",
+        100.0,
+    )
+
+    assert [item.house_id for item in filtered] == ["strict", "near", "farthest"]
+    assert quote_prices == [50000.0, 50000.0, 50000.0]
+    assert reference == {
+        "reference_code": "WEAK_AREA_REFERENCE",
+        "reference_area_tolerance": 3.0,
+        "reference_area_min": 97.0,
+        "reference_area_max": 103.0,
+        "reference_listing_count": 2,
+    }
+
+
+def test_area_count_three_without_peak_keeps_expanding():
+    snapshots = [
+        ListingSnapshot(house_id="one", area=100.0, unit_price=50000.0),
+        ListingSnapshot(house_id="two", area=100.5, unit_price=60000.0),
+        ListingSnapshot(house_id="three", area=101.0, unit_price=70000.0),
+        ListingSnapshot(house_id="peak-one", area=102.0, unit_price=80000.0),
+        ListingSnapshot(house_id="peak-two", area=103.0, unit_price=80000.0),
+        ListingSnapshot(house_id="peak-three", area=104.0, unit_price=80000.0),
+    ]
+
+    filtered, applied_tolerance = filter_snapshots_by_area_with_fallback(
+        snapshots,
+        100.0,
+    )
+
+    assert [item.house_id for item in filtered] == [item.house_id for item in snapshots]
+    assert applied_tolerance == 4.0
+
+
+def test_area_reference_does_not_use_single_listing_within_maximum():
+    snapshots = [
+        ListingSnapshot(
+            house_id="near",
+            community_name="target",
+            area=109.0,
+            unit_price=50000.0,
+        ),
+    ]
+
+    filtered, quote_prices, reference = prepare_listing_data_with_reference(
+        snapshots,
+        "target",
+        100.0,
+    )
+
+    assert filtered == []
+    assert quote_prices == []
+    assert reference == {}
 
 
 def test_filter_snapshots_by_area_does_not_widen_when_strict_has_hit():

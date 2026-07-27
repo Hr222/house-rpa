@@ -29,14 +29,14 @@ description: Analyze real-estate capture evaluation workbooks together with deta
      输出默认写入项目 `results/`，并以评估文件名生成 `<评估文件名>_分析.xlsx`。
 4. Excel 中多峰行如果显示 `N/A` 或仍显示旧版“打折后候选”，不得直接当作当前结果；必须从日志按当前算法重新计算。
 5. 按“城市 + 小区 + 请求面积”匹配 Excel 行和日志记录。相同小区出现多行时，使用面积和出现顺序消歧，不要用只按小区名称覆盖的字典。
-6. 同平台重复房源按项目既有去重规则处理；跨平台暂不擅自去重，也不要按平台重新赋权。算法分析使用所有平台汇集后的价格频率。
+6. 同平台先按现有规则去重；跨平台再按“小区、报价、面积、户型”四个维度做保守去重；有户型时要求户型一致，户型有缺失时要求标题标准化后完全相同；每条只与重复组代表房源比较，不因其他成员的匹配关系链式扩散；不按平台重新赋权。生产服务与 Excel 分析必须调用同一套去重规则，不能各自实现近似逻辑。
 
 ## 必须提取的字段
 
 对每条有数据记录提取：
 
 - `eval_price`：Excel 中的评估单价。
-- `raw_prices`：日志中的挂牌单价明细（必要时先同平台去重）。
+- `raw_prices`：日志中的挂牌单价明细，重建频率前先执行同平台去重，再执行保守的跨平台去重。
 - `peaks`：按当前频率算法识别的有效价格峰、峰中位数、数量、频率、范围。
 - `raw_peak_price`：单峰时的主峰；多峰时记录每个有效峰，并记录当前规则选择的最低峰。
 - `final_price`：当前算法最终输出值。
@@ -93,6 +93,7 @@ description: Analyze real-estate capture evaluation workbooks together with deta
 
 - 评估文件为 `results/评估对比_20260724_173024.xlsx` 时，日志明细分析文件必须输出为 `results/评估对比_20260724_173024_分析.xlsx`。
 - Skill 自带入口脚本为 `.agents/skills/analyze-captured-data/scripts/export_operation_log_excel.py`；它调用项目中的唯一实现 `app/excel/export_operation_log_excel.py`，避免 Skill 与项目代码出现两份实现。
+- 输出工作簿的第一张表为 `分析汇总`，必须同时展示评估价、选中主峰、所有候选峰、原始主峰偏差、最终偏差和分析结论；不能只输出最低峰数值。
 - 不要再使用 `export_log_info.xlsx` 或把分析文件输出到日志目录。
 - `-o/--output` 仅用于用户明确指定其他输出路径时覆盖默认路径。
 

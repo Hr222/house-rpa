@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from app.core.status import PlatformResultStatus
+
 
 @dataclass(slots=True)
 class InquiryRequest:
@@ -15,7 +17,6 @@ class InquiryRequest:
     area: float
     city: str = "深圳"
     request_id: Optional[str] = None
-    algorithm_mode: str = "default"  # "default" 现有算法 / "quote_only" 纯在售算法
 
 
 @dataclass
@@ -41,7 +42,7 @@ class ListingSnapshot:
 class PlatformResult:
     """单平台采集结果。"""
     name: str
-    status: str  # SUCCESS / NO_DATA / NO_MATCHING_AREA / LOGIN_EXPIRED / WAIT_MANUAL_VERIFY / ERROR
+    status: PlatformResultStatus
     community_avg_price: Optional[float] = None   # 详情页小区均价(元/㎡) = P_quote
     quote_prices: List[float] = field(default_factory=list)   # 在售单价列表
     deal_prices: List[float] = field(default_factory=list)    # 成交单价列表(筛选后)
@@ -51,6 +52,11 @@ class PlatformResult:
     detail_url: Optional[str] = None
     elapsed_seconds: Optional[float] = None
     listing_snapshots: List[ListingSnapshot] = field(default_factory=list)
+    reference_code: Optional[str] = None
+    reference_area_tolerance: Optional[float] = None
+    reference_area_min: Optional[float] = None
+    reference_area_max: Optional[float] = None
+    reference_listing_count: Optional[int] = None
     deal_source: str = ""   # 成交来源说明: "成交记录" / "挂牌均价顶替" / "小区均价顶替" / "无"
 
 
@@ -69,13 +75,18 @@ class InquiryResult:
     """询价最终结果。"""
     success: bool
     final_price: Optional[float] = None    # 最终建议单价(元/㎡)
-    branch: str = "FAILED"                  # TAKE_LOWER / DEAL_ONLY / QUOTE_DISCOUNT / NO_DATA / NO_MATCHING_AREA / FAILED
+    branch: str = "FAILED"                  # WEIGHTED_MEDIAN / WEIGHTED_MEDIAN_MULTI / NO_DATA / NO_MATCHING_AREA / FAILED
     note: Optional[str] = None              # 失败/无数据时的说明
     quote_avg: Optional[float] = None
     deal_avg: Optional[float] = None
     platform: Optional[PlatformResult] = None
     platform_results: List[PlatformResult] = field(default_factory=list)
     candidates: List["PriceCandidate"] = field(default_factory=list)
+    reference_code: Optional[str] = None
+    reference_area_tolerance: Optional[float] = None
+    reference_area_min: Optional[float] = None
+    reference_area_max: Optional[float] = None
+    reference_listing_count: Optional[int] = None
 
 
 @dataclass(frozen=True)

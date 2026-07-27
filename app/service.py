@@ -5,10 +5,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Awaitable, Callable, Iterable, Optional
 
 from app.core import config
-from app.core.algorithm import AlgorithmInput, evaluate_algorithm
+from app.core.algorithm import (
+    AlgorithmInput,
+    WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION,
+    evaluate_algorithm,
+)
 from app.core.models import (
     InquiryRequest,
     InquiryResult,
@@ -16,37 +21,137 @@ from app.core.models import (
     PlatformSession,
     PriceCandidate,
 )
+from app.core.status import PlatformResultStatus
 from app.platforms.base import (
+    LISTING_AREA_TOLERANCE,
     PlatformAdapter,
     manual_verify_events_snapshot,
     manual_verify_waiting_snapshot,
     reset_manual_verify_events,
 )
 from app.core.price_utils import format_price, round_price
+from app.utils.listing_dedup import deduplicate_listings
 
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class _AlgorithmListing:
+    """Listing fields needed to apply the shared cross-platform dedup rules."""
+
+    platform: str
+    house_id: str
+    community_name: Optional[str]
+    title: Optional[str]
+    area: Optional[float]
+    layout: Optional[str]
+    unit_price: Optional[float]
+    total_price: Optional[float]
+
+
+def _algorithm_quote_price_lists(
+    successful_results: list[PlatformResult],
+) -> list[list[float]]:
+    """Build algorithm prices after the same-platform and cross-platform dedup."""
+    listings: list[_AlgorithmListing] = []
+    fallback_price_lists: list[list[float]] = []
+    for result in successful_results:
+        snapshots = [
+            snapshot
+            for snapshot in result.listing_snapshots
+            if snapshot.unit_price is not None and snapshot.unit_price > 0
+        ]
+        if not snapshots:
+            fallback_price_lists.append(result.quote_prices)
+            continue
+        listings.extend(
+            _AlgorithmListing(
+                platform=result.name,
+                house_id=snapshot.house_id or "",
+                community_name=snapshot.community_name,
+                title=snapshot.title,
+                area=snapshot.area,
+                layout=snapshot.layout,
+                unit_price=snapshot.unit_price,
+                total_price=snapshot.total_price,
+            )
+            for snapshot in snapshots
+        )
+
+    if not listings:
+        return fallback_price_lists
+
+    deduplication = deduplicate_listings(listings)
+    deduplicated_prices = [
+        listing.unit_price
+        for listing in deduplication.items
+        if listing.unit_price is not None and listing.unit_price > 0
+    ]
+    price_lists = [deduplicated_prices]
+    price_lists.extend(fallback_price_lists)
+    return price_lists
+
+
+def _reference_prices(result: PlatformResult) -> list[float]:
+    """Return price values from listings added outside the strict area range."""
+    if (
+        result.listing_snapshots
+        and result.reference_area_min is not None
+        and result.reference_area_max is not None
+    ):
+        request_area = (result.reference_area_min + result.reference_area_max) / 2
+        return [
+            snapshot.unit_price
+            for snapshot in result.listing_snapshots
+            if snapshot.area is not None
+            and abs(snapshot.area - request_area) > LISTING_AREA_TOLERANCE
+            and snapshot.unit_price is not None
+            and snapshot.unit_price > 0
+        ]
+    # Keep manually constructed PlatformResult values useful in tests and
+    # for older callers that did not persist listing snapshots.
+    return [price for price in result.quote_prices if price is not None and price > 0]
+
+
+def _reference_contributors(
+    platform_results: list[PlatformResult],
+    selected_quote: Optional[float],
+) -> list[PlatformResult]:
+    """Return weak-reference platforms that contribute to the selected peak."""
+    if selected_quote is None or selected_quote <= 0:
+        return []
+    contributors = []
+    for result in platform_results:
+        if not result.reference_code:
+            continue
+        if (
+            result.reference_area_min is None
+            or result.reference_area_max is None
+            or result.reference_listing_count is None
+        ):
+            continue
+        if any(
+            price is not None
+            and price > 0
+            and abs(price - selected_quote) / selected_quote
+            <= WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION
+            for price in _reference_prices(result)
+        ):
+            contributors.append(result)
+    return contributors
+
+
 def build_inquiry_result(
     platform_results: list[PlatformResult],
-    algorithm_mode: str = "default",
 ) -> InquiryResult:
-    """所有平台累加平均后计算最终价。无数据(空列表)的平台不参与。
-
-    algorithm_mode:
-        "default"    — 现有算法（成交+在售，via decide()）
-        "quote_only" — 纯在售算法（只用在售均价打折，via decide_quote_only()）
-    """
-    successful_results = [r for r in platform_results if r.status == "SUCCESS"]
+    """使用唯一的加权落点中位数算法计算最终价。"""
+    successful_results = [
+        r for r in platform_results if r.status == PlatformResultStatus.SUCCESS
+    ]
     evaluation = evaluate_algorithm(
-        algorithm_mode=algorithm_mode,
         inputs=AlgorithmInput(
-            quote_price_lists=[r.quote_prices for r in successful_results],
-            community_avg_prices=[r.community_avg_price for r in successful_results],
-            deal_price_lists=[r.deal_prices for r in successful_results],
-            diff_threshold=config.DEAL_DIFF_THRESHOLD,
-            no_deal_discount=config.get_no_deal_discount(),
-            quote_only_discount=config.get_quote_only_discount(),
+            quote_price_lists=_algorithm_quote_price_lists(successful_results),
+            weighted_median_discount=config.get_weighted_median_discount(),
         ),
     )
 
@@ -61,20 +166,47 @@ def build_inquiry_result(
         )
         for candidate in evaluation.candidates
     ]
+    references = _reference_contributors(successful_results, evaluation.quote_avg)
+    reference = {}
+    reference_tolerances = [
+        result.reference_area_tolerance
+        for result in references
+        if result.reference_area_tolerance is not None
+    ]
+    reference_mins = [
+        result.reference_area_min
+        for result in references
+        if result.reference_area_min is not None
+    ]
+    reference_maxes = [
+        result.reference_area_max
+        for result in references
+        if result.reference_area_max is not None
+    ]
+    if references and reference_mins and reference_maxes:
+        reference = {
+            "reference_code": "WEAK_AREA_REFERENCE",
+            "reference_area_tolerance": max(reference_tolerances or [0.0]),
+            "reference_area_min": min(reference_mins),
+            "reference_area_max": max(reference_maxes),
+            "reference_listing_count": sum(
+                result.reference_listing_count or 0 for result in references
+            ),
+        }
 
     if evaluation.quote_avg is None:
         # 全部平台都不支持该城市时，返回简洁提示
         all_city_unsupported = (
             len(platform_results) > 0
             and all(
-                r.status == "NO_DATA" and "不支持城市" in (r.reason or "")
+                r.status == PlatformResultStatus.NO_DATA and "不支持城市" in (r.reason or "")
                 for r in platform_results
             )
         )
         if all_city_unsupported:
             note = "不支持该城市"
         elif platform_results and all(
-            r.status == "NO_MATCHING_AREA" for r in platform_results
+            r.status == PlatformResultStatus.NO_MATCHING_AREA for r in platform_results
         ):
             note = "; ".join(
                 f"{r.name}: {r.reason}" for r in platform_results if r.reason
@@ -104,6 +236,7 @@ def build_inquiry_result(
         platform=None,
         platform_results=platform_results,
         candidates=rounded_candidates if len(rounded_candidates) > 1 else [],
+        **reference,
     )
 
 
@@ -156,7 +289,7 @@ class RPAInquiryService:
                 log.exception("%s 采集异常", adapter.name)
                 return PlatformResult(
                     name=adapter.name,
-                    status="ERROR",
+                    status=PlatformResultStatus.ERROR,
                     reason=str(exc),
                     request_id=request.request_id,
                 )
@@ -189,17 +322,29 @@ class RPAInquiryService:
                 summary,
             )
 
-        inquiry_result = build_inquiry_result(platform_results, request.algorithm_mode)
+        inquiry_result = build_inquiry_result(platform_results)
         self._log_inquiry_result(inquiry_result)
         return inquiry_result
 
     def _log_inquiry_result(self, inquiry_result: InquiryResult):
+        if inquiry_result.reference_code:
+            log.info(
+                "finalWeakReference: referenceCode=%s referenceAreaTolerance=%.2f "
+                "referenceAreaMin=%.2f referenceAreaMax=%.2f referenceListingCount=%d",
+                inquiry_result.reference_code,
+                inquiry_result.reference_area_tolerance or 0.0,
+                inquiry_result.reference_area_min or 0.0,
+                inquiry_result.reference_area_max or 0.0,
+                inquiry_result.reference_listing_count or 0,
+            )
+        log.info("finalBranch: branchCode=%s", inquiry_result.branch)
+
         for platform_result in inquiry_result.platform_results:
             # 在售房源
             if platform_result.listing_snapshots:
                 for item in platform_result.listing_snapshots:
                     log.info(
-                        "%s: {小区名称: %s, 标题: %s, 面积: %s平米, 几房几厅: %s, 售价: %s元/平, 总价: %s万}",
+                        "%s: {小区名称: %s, 标题: %s, 面积: %s平米, 几房几厅: %s, 售价: %s元/平, 总价: %s万, 房源编号: %s}",
                         platform_result.name,
                         item.community_name or "",
                         item.title or "",
@@ -207,6 +352,7 @@ class RPAInquiryService:
                         item.layout or "",
                         item.unit_price if item.unit_price is not None else "",
                         item.total_price if item.total_price is not None else "",
+                        item.house_id or "",
                     )
             else:
                 log.info(
@@ -214,6 +360,19 @@ class RPAInquiryService:
                     platform_result.name,
                     platform_result.status,
                     platform_result.reason or "",
+                )
+
+            if platform_result.reference_code:
+                log.info(
+                    "%s弱参考: referenceCode=%s referenceAreaTolerance=%.2f "
+                    "referenceAreaMin=%.2f referenceAreaMax=%.2f "
+                    "referenceListingCount=%d",
+                    platform_result.name,
+                    platform_result.reference_code,
+                    platform_result.reference_area_tolerance or 0.0,
+                    platform_result.reference_area_min or 0.0,
+                    platform_result.reference_area_max or 0.0,
+                    platform_result.reference_listing_count or 0,
                 )
 
             # 成交记录

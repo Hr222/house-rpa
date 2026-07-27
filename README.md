@@ -101,36 +101,9 @@
 - **链家 / 房天下**：严格面积区间 + 近半年（6 个月）筛选后取均价。
 - **安居客 / 乐有家**：无成交记录，用平台挂牌均价顶替 `deal_prices`。
 
-### 最终取值
+### 最终取值：加权落点中位数
 
-代码位置：`app/core/algorithm.py:decide()`
-
-- 若 `quoteAvg` 和 `dealAvg` 都存在：
-  - 先计算差值比例：`|quoteAvg - dealAvg| / dealAvg`
-  - 若差值比例 `<= 10%`，取较低值。（`TAKE_LOWER`）
-  - 若差值比例 `> 10%`，只取 `dealAvg`。（`DEAL_ONLY`）
-- 若没有 `dealAvg`，取 `quoteAvg * noDealDiscount`（默认 0.9）。（`QUOTE_DISCOUNT`）
-- 若没有 `quoteAvg` 但有 `dealAvg`，直接取 `dealAvg`。（`DEAL_ONLY`）
-- 都没有：`FAILED`。
-
-其中 `noDealDiscount` 可通过 API 动态调整（见 [11. API 约定](#11-api-约定)）。
-
-### 纯在售算法（`quote_only` 模式）
-
-通过 API 请求体 `"algorithmMode": "quote_only"` 切换到此模式。
-
-代码位置：`app/core/algorithm.py:decide_quote_only()`
-
-- 聚合所有平台在售均价 → `quote_avg`
-- 最终单价 = `quote_avg × quoteOnlyDiscount`（默认 0.9）
-- branch：`QUOTE_ONLY`
-- 无在售数据：`NO_DATA`
-
-其中 `quoteOnlyDiscount` 可通过 API 动态调整（见 [11. API 约定](#11-api-约定)）。
-
-### 加权落点中位数算法（`weighted_median` 模式）
-
-通过 API 请求体 `"algorithmMode": "weighted_median"` 切换到此模式。
+代码位置：`app/core/algorithm.py:WeightedMedianAlgorithm`。系统固定使用这一套算法，不再通过请求参数切换算法。
 
 代码位置：`app/core/algorithm.py:WeightedMedianAlgorithm`
 
@@ -138,9 +111,9 @@
 - 寻找覆盖至少 60% 总权重的主要价格区间，并以区间加权中位数作为中心。
 - 主要区间内每条在售价格相对中心价的偏差不超过 10% 时，才认为存在明确落点；区间外价格作为偏离点排除。
 - 在主要区间内计算加权中位数作为 `quote_avg`。
-- 同一平台内的确定重复房源先去重后计票；跨平台重复房源暂不合并，避免在缺少全局房源 ID 时误删真实房源。
+- 同一平台内先按稳定房源编号或完整字段去重；再按小区、报价、面积和户型等条件保守合并明确的跨平台重复房源。生产算法与日志分析使用同一套规则。
 - 多峰时选择最低价格峰的中位数直接返回，不乘在售折扣；单峰仍按原规则打折。
-- 最终单价 = `quote_avg × quoteOnlyDiscount`，branch 为 `WEIGHTED_MEDIAN`。
+- 最终单价 = `quote_avg × weightedMedianDiscount`，branch 为 `WEIGHTED_MEDIAN`。
 - 50/50 双峰且无法形成明确主要区间时，不人为计算两个区间之间的中间价。
 
 ## 5. 架构分层
@@ -234,9 +207,7 @@ jeethink-rpa/
 - 调试开关（`DEBUG_MODE`）
 - 浏览器路径、API 监听地址
 - 风控参数（保活间隔、详情页停留时间等）
-- 算法参数：
-  - `DEAL_DIFF_THRESHOLD = 0.10` — 差值阈值
-  - `get_no_deal_discount()` / `set_no_deal_discount()` — 无成交折扣，支持弱持久化
+- 算法参数：`get_weighted_median_discount()` / `set_weighted_median_discount()` — 加权落点中位数折扣，支持弱持久化
 
 ### `app/core/models.py`
 
@@ -249,10 +220,9 @@ jeethink-rpa/
 
 ### `app/core/algorithm.py`
 
-纯函数，无 IO，所有平台共用。三套算法可通过 `algorithmMode` 切换：
-- `decide(quote_avg, deal_avg, diff_threshold, no_deal_discount)` — 4 条决策分支，默认算法
-- `decide_quote_only(quote_avg, quote_discount)` — 纯在售算法，仅在售均价打折输出
+纯函数，无 IO，所有平台共用。算法策略接口和注册表继续保留，当前只注册加权落点中位数算法：
 - `aggregate_weighted_median_quote(...)` — 按平台等权寻找主要在售价格落点并计算加权中位数
+- `evaluate_algorithm(AlgorithmInput(...))` — 固定使用加权落点中位数并返回最终价格和结果分支
 
 ### `app/api.py`
 
@@ -266,10 +236,8 @@ FastAPI 入口。接口清单：
 | POST | `/admin/platforms/{code}/confirm-ready` | 确认平台就绪 |
 | POST | `/inquiries` | 创建询价任务 |
 | GET | `/inquiries/{taskId}` | 查询任务结果 |
-| GET | `/admin/algorithm/no-deal-discount` | 查询无成交折扣 |
-| PUT | `/admin/algorithm/no-deal-discount` | 更新无成交折扣 |
-| GET | `/admin/algorithm/quote-only-discount` | 查询纯在售折扣 |
-| PUT | `/admin/algorithm/quote-only-discount` | 更新纯在售折扣 |
+| GET | `/admin/algorithm/weighted-median-discount` | 查询加权落点中位数折扣 |
+| PUT | `/admin/algorithm/weighted-median-discount` | 更新加权落点中位数折扣 |
 
 ### `app/runtime.py`
 
@@ -290,7 +258,7 @@ FastAPI 入口。接口清单：
 
 平台调度与结果汇总层。
 
-- `build_inquiry_result()` — 把所有 `SUCCESS` 平台的在售均价、成交单价跨平台累加平均后，根据 `algorithm_mode` 选择调用 `decide()` 或 `decide_quote_only()` 算最终价。
+- `build_inquiry_result()` — 汇总所有 `SUCCESS` 平台的在售数据，固定调用加权落点中位数算法计算最终价。
 - `RPAInquiryService` — 管理各平台 session，执行 `run_inquiry()`。
 
 ### `app/platforms/base.py`
@@ -382,9 +350,7 @@ FastAPI 入口。接口清单：
 | `PAGE_LINGER_SECONDS` | `3.5` | 结果页滚动停留 |
 | `CALLBACK_URL` | `None` | 结果回调基址（`RPA_CALLBACK_URL`）。配置后任务结束主动 POST 推送，为空则不推送，客户端走 GET 兜底 |
 | `GET_INQUIRY_MIN_INTERVAL` | `10` | GET 查询限流：同一 taskId 两次查询最小间隔秒数（`RPA_GET_MIN_INTERVAL`） |
-| `DEAL_DIFF_THRESHOLD` | `0.10` | 差值阈值 |
-| `get_no_deal_discount()` | `0.9` | 无成交折扣（可运行时更新，弱持久化） |
-| `get_quote_only_discount()` | `0.9` | 纯在售折扣（可运行时更新，弱持久化） |
+| `get_weighted_median_discount()` | `0.9` | 加权落点中位数折扣（可运行时更新，弱持久化） |
 
 ### 平台常量
 
@@ -469,8 +435,7 @@ python test_inquiry.py
   "city": "深圳",
   "communityName": "绿景虹湾",
   "area": 89.5,
-  "requestId": "demo-001",
-  "algorithmMode": "default"
+  "requestId": "demo-001"
 }
 ```
 
@@ -479,7 +444,6 @@ python test_inquiry.py
 | `city` | string | 是 | 城市名（如 深圳、广州、东莞） |
 | `communityName` | string | 是 | 小区名称 |
 | `area` | number | 是 | 精确面积（㎡） |
-| `algorithmMode` | string | 否 | 算法模式，`"default"`（成交+在售）、`"quote_only"`（纯在售）或 `"weighted_median"`（加权落点中位数），默认 `"default"` |
 | `requestId` | string | 否 | 自定义任务 ID，不传则自动生成 |
 
 返回：
@@ -511,8 +475,8 @@ python test_inquiry.py
   "quoteAvg": 85635.00,
   "dealAvg": 71086.50,
   "finalPrice": 71086.50,
-  "branchCode": "TAKE_LOWER",
-  "branch": "差异在阈值内，取较低值"
+  "branchCode": "WEIGHTED_MEDIAN",
+  "branch": "主要价格落点中位数折扣"
 }
 ```
 
@@ -560,30 +524,28 @@ python test_inquiry.py
 - `dealAvg`：成交均价（元/平）。各平台筛选规则不同，见 [4. 业务取值规则](#4-业务取值规则)。
 - `finalPrice`：最终建议单价（元/平）。
 
-### 查询无成交折扣
+### 查询和更新加权落点中位数折扣
 
-`GET /admin/algorithm/no-deal-discount`
+`GET /admin/algorithm/weighted-median-discount`
 
 ```json
 {
   "code": "OK",
   "message": "查询成功",
   "data": {
-    "noDealDiscount": 0.9,
+    "weightedMedianDiscount": 0.9,
     "isDefault": true
   }
 }
 ```
 
-### 更新无成交折扣
-
-`PUT /admin/algorithm/no-deal-discount`
+`PUT /admin/algorithm/weighted-median-discount`
 
 请求体：
 
 ```json
 {
-  "noDealDiscount": 0.85
+  "weightedMedianDiscount": 0.85
 }
 ```
 
@@ -593,47 +555,7 @@ python test_inquiry.py
 {
   "code": "OK",
   "message": "参数已更新",
-  "data": { "noDealDiscount": 0.85 }
-}
-```
-
-- 值必须在 `(0, 1)` 区间，否则返回 400。
-- 更新后立即持久化到 `persist/runtime.json`，重启后自动恢复。
-
-### 查询纯在售折扣
-
-`GET /admin/algorithm/quote-only-discount`
-
-```json
-{
-  "code": "OK",
-  "message": "查询成功",
-  "data": {
-    "quoteOnlyDiscount": 0.9,
-    "isDefault": true
-  }
-}
-```
-
-### 更新纯在售折扣
-
-`PUT /admin/algorithm/quote-only-discount`
-
-请求体：
-
-```json
-{
-  "quoteOnlyDiscount": 0.85
-}
-```
-
-返回：
-
-```json
-{
-  "code": "OK",
-  "message": "参数已更新",
-  "data": { "quoteOnlyDiscount": 0.85 }
+  "data": { "weightedMedianDiscount": 0.85 }
 }
 ```
 
@@ -665,7 +587,7 @@ python test_inquiry.py
 
 ### 算法参数持久化
 
-- `noDealDiscount` / `quoteOnlyDiscount` 通过 `PUT /admin/algorithm/...` 更新时，同步写入 `persist/runtime.json`。
+- `weightedMedianDiscount` 通过 `PUT /admin/algorithm/weighted-median-discount` 更新时，同步写入 `persist/runtime.json`。
 - 启动时自动读取，文件不存在则使用默认值（`0.9`）。
 - 这是**弱持久化**：仅保证重启不丢失，不做分布式一致性等强保证。
 
@@ -714,7 +636,7 @@ persist/                  # 项目根目录下
 - 平台需要人工前置登录。
 - 命中平台人机验证时，仍需要人工介入。
 - 任务串行执行；每个平台分配独立浏览器实例，采集时多平台并行（`asyncio.gather`）。
-- 服务层把所有 `SUCCESS` 平台的在售均价、成交单价**跨平台累加平均**后，再走 `decide()` 算最终价（不再是取第一个 `SUCCESS` 平台）。
+- 服务层汇总所有 `SUCCESS` 平台的在售数据，再走加权落点中位数算法计算最终价。
 - 各平台均有独立 HTML 解析器（`parsers/<code>.py`），与 adapter 的浏览器操作分离。
 - **多城市支持**：API 入参 `city` 为必填字段，当前覆盖广东省 21 个地级市。各平台城市覆盖数不同（见 [§2](#2-已接入平台及差异)），不支持某城市的平台自动跳过询价只做保活刷新，全部平台都不支持时返回 `NO_DATA`。城市切换导航在薄壳层完成（`base.py:ensure_city_navigated`），adapter 内 `reset_to_start_page` 只做同城刷新。
 

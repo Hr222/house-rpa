@@ -19,9 +19,7 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 - Python 3.14,nodriver(反检测浏览器库,**非 selenium/playwright**)。
 - 分层:`api → runtime → service → platform adapter → parser/algorithm`。
 - 平台适配器统一继承 `app/platforms/base.py:PlatformAdapter`。
-- 最终取值走 `app/core/algorithm.py`，**纯函数，所有平台共用**，两套算法可切换：
-  - `decide(quote_avg, deal_avg)` — 默认「成交+在售」综合决策（4 条分支）
-  - `decide_quote_only(quote_avg)` — 「纯在售」，只看在售均价打折输出
+- 最终取值走 `app/core/algorithm.py`，**纯函数，所有平台共用**；保留算法策略接口和注册表，当前只注册 `DEFAULT` 加权落点中位数算法。
 - 多城市支持:`app/platforms/city_map.py` 维护 5 平台 × 广东 21 城 URL 前缀映射,
   各 adapter `collect()` / `reset_to_start_page()` 接收 `city` 参数,
   薄壳在采集前调 `check_city_support()` + `ensure_city_navigated()` 确保城市正确。
@@ -30,11 +28,11 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 
 > 这是本模块最重要的约束,优先级高于一切技术优化建议。
 
-**业务流程是定死的。没有用户的明确指令,AI 不得擅自:**
+**业务流程是固定的。没有用户的明确指令,AI 不得擅自:**
 - 增删采集步骤(如自作主张加循环检测、删掉某步)
 - 改变步骤顺序
 - 修改 `service.py` / `core/models.py` / `runtime.py` / `api.py`（除非用户明确授权本次修改）
-- 改变 `decide()` / `decide_quote_only()` 的决策规则或阈值（新增算法函数不算擅改，但需用户明确指令）
+- 改变加权落点中位数算法的决策规则或阈值（新增算法函数不算擅改，但需用户明确指令）
 
 **平台差异 ≠ 改流程。** 某平台因特性"略过"某步(如安居客无成交→不点详情),
 是平台适配,不是流程变更。代码注释里必须写清楚"为什么略过"。
@@ -74,8 +72,7 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
    - `app/platforms/<code>.py` — 薄壳适配器,委托给 adapter
 6. **注册两处**:`app/platforms/__init__.py` 导出 + `app/registry.py` 追加。
 7. **不改核心层**:`core/models` / `core/algorithm` / `service` / `runtime` / `api` 一行不改；若用户明确授权修改既有运行时状态管理，才可按本次指令调整 `runtime.py`，不得借机改变采集流程或算法。
-8. **算法模式可选**:`InquiryRequest.algorithm_mode` 支持 `"default"`（成交+在售）和 `"quote_only"`（纯在售），
-   由 API 入参控制，默认 `"default"`。新平台采集流程与现有一致，无需因算法模式不同而改动。
+8. **算法模式固定**：API 不再接收 `algorithmMode`；内部统一使用 `DEFAULT` 表示当前唯一注册的加权落点中位数算法。算法策略接口和注册表保留，未来新增算法时再按明确需求注册。新平台采集流程与现有一致。
 
 ## 5. 平台特性差异记录
 
@@ -98,13 +95,13 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 - 小区名匹配统一走 `community_name_match()`,匹配输入只允许请求小区名和抓取快照的 `ListingSnapshot.community_name`;禁止读取整页 HTML、房源标题或搜索词参与匹配,也禁止通过硬编码规则绕过通用匹配机制。
 
 ### 安居客特殊处理(已落地,勿改)
-- **无成交记录**:业务上把**挂牌均价顶替 `deal_prices`**,让 `decide()` 正常走对比逻辑。
+- **无成交记录**:业务上把**挂牌均价顶替 `deal_prices`**，保留平台结果结构兼容性；当前加权落点中位数算法不使用成交数据。
   代码在 `ajk` adapter `_do_collect`,注释已标明。
 - **无分页**:滚动到底即可(`_scroll_to_bottom`)。
 - **不点详情**:挂牌均价在结果页社区卡片就有(`parse_community_avg_price`)。
 
 ### 乐有家特殊处理(已落地,勿改)
-- 与安居客同理:**无成交记录**,业务上用**小区均价顶替 `deal_prices`**。
+- 与安居客同理:**无成交记录**，业务上用**小区均价顶替 `deal_prices`**；当前加权落点中位数算法不使用成交数据。
 - 搜索走 URL 参数(`/esf/?c={小区名}`),不走输入框回车。
 
 ### 多城市支持(已落地)
@@ -133,7 +130,7 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 
 | 文件 | 职责 | 改动频率 |
 |---|---|---|
-| `app/core/algorithm.py` | 最终取值决策(纯函数，两套算法: decide/decide_quote_only) | 极低,业务规则锁定 |
+| `app/core/algorithm.py` | 最终取值决策(纯函数，加权落点中位数算法) | 极低,业务规则锁定 |
 | `app/core/status.py` | 集中定义服务、平台健康、平台结果、任务状态及平台健康转移事件 | 低 |
 | `docs/系统架构与运行时状态.md` | 系统分层、状态模型、并发协调、风控边界和排错入口 | 低 |
 | `app/service.py` | 平台调度+汇总 | 低 |

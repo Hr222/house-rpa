@@ -101,7 +101,7 @@ def parse_community_avg_price(html: str) -> Optional[float]:
       </div>
 
     注意：安居客无成交记录，业务上把挂牌均价当作 deal_prices 的替代，
-    让 decide() 正常按"在售均价 vs 成交均价"对比出最终价。
+    保留平台无成交记录时的业务数据兼容字段。
     """
     m = re.search(
         r'community-info-detail-price-money[^>]*>\s*<em[^>]*>\s*([\d,]+)\s*</em>\s*元\s*/?\s*㎡',

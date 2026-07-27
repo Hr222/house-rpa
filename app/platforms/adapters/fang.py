@@ -24,6 +24,7 @@ import time
 from typing import Optional
 
 from app.core import config
+from app.core.status import PlatformResultStatus
 from app.utils.debug_utils import dump_html
 from app.core.models import ListingSnapshot, PlatformResult
 from app.parsers import fang as parsers
@@ -40,7 +41,7 @@ from app.platforms.base import (
     listing_filter_summary,
     listing_no_data_reason,
     listing_no_data_status,
-    prepare_listing_data,
+    prepare_listing_data_with_reference,
     check_empty_listing_page,
 )
 
@@ -598,7 +599,7 @@ async def collect(
         log.exception("采集异常")
         return PlatformResult(
             name="房天下",
-            status="ERROR",
+            status=PlatformResultStatus.ERROR,
             reason=str(exc),
             request_id=request_id,
             elapsed_seconds=round(time.time() - start, 2),
@@ -636,14 +637,14 @@ async def _do_collect(
         # 判风控/登录
         if _is_login_url(keyword_url):
             return short_circuit_result(
-                "房天下", "LOGIN_EXPIRED", "搜索后进入登录页",
+                "房天下", PlatformResultStatus.LOGIN_EXPIRED, "搜索后进入登录页",
                 request_id, started_at,
             )
 
         # 无数据短路：检查结果列表是否存在
         if '<dl class="clearfix' not in keyword_html:
             return short_circuit_result(
-                "房天下", "NO_DATA", "关键词搜索无在售房源",
+                "房天下", PlatformResultStatus.NO_DATA, "关键词搜索无在售房源",
                 request_id, started_at,
             )
 
@@ -651,7 +652,7 @@ async def _do_collect(
         keyword_snaps = parsers.parse_listing_snapshots(keyword_html)
         if not has_matching_community_snapshots(keyword_snaps, community_name):
             return short_circuit_result(
-                "房天下", "NO_DATA", f"关键词搜索未匹配到小区: {community_name}",
+                "房天下", PlatformResultStatus.NO_DATA, f"关键词搜索未匹配到小区: {community_name}",
                 request_id, started_at,
             )
 
@@ -662,7 +663,7 @@ async def _do_collect(
         area_html = await wait_and_reload_after_block(main_page, detect_block, "面积筛选后")
         if area_range is None:
             return short_circuit_result(
-                "房天下", "NO_DATA", "该面积区间无在售房源（档位已禁用）",
+                "房天下", PlatformResultStatus.NO_DATA, "该面积区间无在售房源（档位已禁用）",
                 request_id, started_at,
             )
 
@@ -682,7 +683,7 @@ async def _do_collect(
 
         # 两次都失败
         return short_circuit_result(
-            "房天下", "ERROR",
+            "房天下", PlatformResultStatus.ERROR,
             f"面积筛选后小区限定丢失（页数 {keyword_pages}→{area_pages}，重试2次无效）",
             request_id, started_at,
         )
@@ -694,7 +695,7 @@ async def _do_collect(
     first_page_snapshots = parsers.parse_listing_snapshots(area_html)
     if not has_matching_community_snapshots(first_page_snapshots, community_name):
         return short_circuit_result(
-            "房天下", "NO_DATA", f"面积筛选后未匹配到小区: {community_name}",
+            "房天下", PlatformResultStatus.NO_DATA, f"面积筛选后未匹配到小区: {community_name}",
             request_id, started_at,
         )
 
@@ -723,7 +724,9 @@ async def _do_collect(
     log.info("分页采集完成: 每页 %s", page_counts)
 
     # 7. 返回前防御校验，确保在售价格与房源明细来自同一批目标小区数据
-    snapshots, quote_prices = prepare_listing_data(collected_snapshots, community_name, area)
+    snapshots, quote_prices, reference = prepare_listing_data_with_reference(
+        collected_snapshots, community_name, area
+    )
     log.info(
         "房天下在售房源最终校验: %s",
         listing_filter_summary(collected_snapshots, community_name, area),
@@ -736,7 +739,7 @@ async def _do_collect(
         )
     if not quote_prices:
         return short_circuit_result(
-            "房天下", "NO_DATA", "面积结果页未抓到在售单价",
+            "房天下", PlatformResultStatus.NO_DATA, "面积结果页未抓到在售单价",
             request_id, started_at,
         )
     quote_avg = sum(quote_prices) / len(quote_prices)
@@ -762,7 +765,7 @@ async def _do_collect(
 
     return PlatformResult(
         name="房天下",
-        status="SUCCESS",
+        status=PlatformResultStatus.SUCCESS,
         community_avg_price=None,
         quote_prices=quote_prices,
         deal_prices=deal_prices,
@@ -772,4 +775,5 @@ async def _do_collect(
         detail_url=None,
         elapsed_seconds=round(time.time() - started_at, 2),
         listing_snapshots=snapshots,
+        **reference,
     )

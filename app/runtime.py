@@ -17,6 +17,11 @@ import nodriver as uc
 from app.core import config
 from app.core.models import InquiryRequest, InquiryResult, PlatformSession
 from app.core.status import (
+    BRANCH_TEXT,
+    PLATFORM_HEALTH_STATUS_TEXT,
+    PLATFORM_RESULT_STATUS_TEXT,
+    SERVICE_STATUS_TEXT,
+    TASK_STATUS_TEXT,
     PlatformHealthEvent,
     PlatformHealthStatus,
     PlatformResultStatus,
@@ -39,52 +44,6 @@ from app.utils.window_control import ensure_browser_foreground, tile_browser_win
 
 log = logging.getLogger(__name__)
 
-SERVICE_STATUS_TEXT = {
-    "BOOTING": "启动中",
-    "WAIT_LOGIN": "等待登录",
-    "READY": "已就绪",
-    "DEGRADED": "部分降级",
-    "STOPPING": "已停止",
-}
-
-TASK_STATUS_TEXT = {
-    "QUEUED": "排队中",
-    "RUNNING": "执行中",
-    "COMPLETED": "已完成",
-    "FAILED": "失败",
-}
-
-PLATFORM_HEALTH_STATUS_TEXT = {
-    "INIT": "初始化中",
-    "WAIT_LOGIN": "等待登录",
-    "READY": "已就绪",
-    "WAIT_MANUAL_VERIFY": "等待人工验证",
-    "ERROR": "平台异常",
-}
-
-PLATFORM_RESULT_STATUS_TEXT = {
-    "SUCCESS": "成功",
-    "NO_DATA": "无数据",
-    "NO_MATCHING_AREA": "面积不匹配",
-    "WAIT_MANUAL_VERIFY": "等待人工验证",
-    "LOGIN_EXPIRED": "登录已失效",
-    "ERROR": "本次采集异常",
-}
-
-BRANCH_TEXT = {
-    "TAKE_LOWER": "差异在阈值内，取较低值",
-    "DEAL_ONLY": "仅采用成交均价",
-    "QUOTE_DISCOUNT": "无成交，报价打折",
-    "NO_MATCHING_AREA": "无匹配面积房源",
-    "FAILED": "无可用结果",
-}
-
-
-BRANCH_TEXT.update({
-    "WEIGHTED_MEDIAN": "\u4e3b\u8981\u4ef7\u683c\u843d\u70b9\u4e2d\u4f4d\u6570\u6298\u6263",
-    "WEIGHTED_MEDIAN_MULTI": "\u591a\u4e2a\u9ad8\u9891\u4ef7\u683c\u843d\u70b9\uff0c\u53d6\u6700\u4f4e\u4ef7\u683c\u5cf0\u4e2d\u4f4d\u6570\uff0c\u4e0d\u6253\u6298",
-})
-
 
 def _to_lower_camel(name: str) -> str:
     parts = name.split("_")
@@ -103,12 +62,24 @@ def _camelize_dict(data: dict) -> dict:
     return _camelize(data)
 
 
+def _reference_payload(result: InquiryResult) -> dict:
+    if not result.reference_code:
+        return {}
+    return {
+        "referenceCode": result.reference_code,
+        "referenceAreaTolerance": result.reference_area_tolerance,
+        "referenceAreaMin": result.reference_area_min,
+        "referenceAreaMax": result.reference_area_max,
+        "referenceListingCount": result.reference_listing_count,
+    }
+
+
 @dataclass(slots=True)
 class PlatformRuntimeState:
     code: str
     name: str
     start_url: str
-    status: str
+    status: PlatformHealthStatus
     message: str
     version: int = 0
     last_ready_at: Optional[float] = None
@@ -119,7 +90,7 @@ class PlatformRuntimeState:
 class InquiryTaskRecord:
     task_id: str
     request: InquiryRequest
-    status: str = TaskStatus.QUEUED
+    status: TaskStatus = TaskStatus.QUEUED
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
@@ -251,7 +222,7 @@ class RPARuntime:
         self.message = "已停止"
 
     def is_ready(self) -> bool:
-        return self.status == "READY"
+        return self.status == ServiceStatus.READY
 
     def snapshot(self) -> dict:
         return {
@@ -472,7 +443,12 @@ class RPARuntime:
             )
             await wait_and_reload_after_block(page, adapter.detect_block, "汇总前")
 
-    def _on_manual_verify_state(self, context: str, state: str, reason: str) -> None:
+    def _on_manual_verify_state(
+        self,
+        context: str,
+        state: str | PlatformHealthStatus,
+        reason: str,
+    ) -> None:
         """将采集适配器发现的风控即时同步到 Runtime 健康状态。"""
         match = re.search(r"\(([^)]+)\)/", context)
         code = match.group(1) if match else None
@@ -480,18 +456,18 @@ class RPARuntime:
             log.debug("无法从风控上下文定位平台: %s", context)
             return
 
-        if state == "WAIT_MANUAL_VERIFY":
+        if state == PlatformHealthStatus.WAIT_MANUAL_VERIFY:
             event = PlatformHealthEvent.RESULT_MANUAL_VERIFY
-        elif state == "WAIT_LOGIN":
+        elif state == PlatformHealthStatus.WAIT_LOGIN:
             event = PlatformHealthEvent.RESULT_LOGIN_EXPIRED
-        elif state == "READY":
+        elif state == PlatformHealthStatus.READY:
             event = PlatformHealthEvent.READY_CHECK_PASSED
         else:
             return
 
         self._set_platform_health(code, event, reason)
         self._refresh_service_status()
-        if state != "READY":
+        if state != PlatformHealthStatus.READY:
             self._focus_browser_window(f"{self.platform_states[code].name} {reason}", code)
 
     async def _keepalive_loop(self):
@@ -613,7 +589,7 @@ class RPARuntime:
         message: str,
     ) -> None:
         state = self.platform_states[code]
-        state.status = transition_platform_health(state.status, event)
+        state.status = transition_platform_health(event)
         state.message = message
         state.version += 1
         if state.status == PlatformHealthStatus.READY:
@@ -695,6 +671,9 @@ class RPARuntime:
                 ]
                 result_payload["candidates"] = candidates
                 result_payload["data"]["candidates"] = candidates
+            reference = _reference_payload(record.result)
+            result_payload.update(reference)
+            result_payload["data"].update(reference)
 
         return {
             "taskId": record.task_id,
@@ -760,7 +739,7 @@ class RPARuntime:
             "status": TASK_STATUS_TEXT.get(record.status, record.status),
             "success": record.result is not None and record.result.success,
         }
-        if record.status == "COMPLETED" and record.result is not None:
+        if record.status == TaskStatus.COMPLETED and record.result is not None:
             payload["quoteAvg"] = record.result.quote_avg
             payload["dealAvg"] = record.result.deal_avg
             payload["finalPrice"] = record.result.final_price
@@ -772,7 +751,8 @@ class RPARuntime:
                 ]
             if record.result.note:
                 payload["note"] = record.result.note
-        elif record.status == "FAILED":
+            payload.update(_reference_payload(record.result))
+        elif record.status == TaskStatus.FAILED:
             payload["error"] = record.error
         return payload
 
