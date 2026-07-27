@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -23,7 +24,13 @@ from app.core.status import (
     TaskStatus,
     transition_platform_health,
 )
-from app.platforms.base import is_manual_verify_reason
+from app.platforms.base import (
+    detect_block_with_common,
+    is_manual_verify_reason,
+    set_manual_verify_lock,
+    set_manual_verify_state_callback,
+    wait_and_reload_after_block,
+)
 from app.registry import build_default_adapters
 from app.service import RPAInquiryService
 from app.utils.task_store import delete_task, save_task, load_pending_tasks
@@ -71,6 +78,12 @@ BRANCH_TEXT = {
     "NO_MATCHING_AREA": "无匹配面积房源",
     "FAILED": "无可用结果",
 }
+
+
+BRANCH_TEXT.update({
+    "WEIGHTED_MEDIAN": "\u4e3b\u8981\u4ef7\u683c\u843d\u70b9\u4e2d\u4f4d\u6570\u6298\u6263",
+    "WEIGHTED_MEDIAN_MULTI": "\u591a\u4e2a\u9ad8\u9891\u4ef7\u683c\u843d\u70b9\uff0c\u53d6\u6700\u4f4e\u4ef7\u683c\u5cf0\u4e2d\u4f4d\u6570\uff0c\u4e0d\u6253\u6298",
+})
 
 
 def _to_lower_camel(name: str) -> str:
@@ -151,6 +164,8 @@ class RPARuntime:
         self.heartbeat_task: Optional[asyncio.Task] = None
         self.console_confirmation_task: Optional[asyncio.Task] = None
         self._platform_check_lock = asyncio.Lock()
+        set_manual_verify_lock(self._platform_check_lock)
+        set_manual_verify_state_callback(self._on_manual_verify_state)
         self._manual_confirmation_active = False
         self.current_task_id: Optional[str] = None
         self.status = ServiceStatus.BOOTING
@@ -230,6 +245,8 @@ class RPARuntime:
         self.heartbeat_task = None
         self.console_confirmation_task = None
         self.current_task_id = None
+        set_manual_verify_state_callback(None)
+        set_manual_verify_lock(None)
         self.status = ServiceStatus.STOPPING
         self.message = "已停止"
 
@@ -306,7 +323,7 @@ class RPARuntime:
             self._set_platform_health(code, PlatformHealthEvent.READY_CHECK_FAILED, message)
         self._refresh_service_status()
         if state.status != PlatformHealthStatus.READY:
-            self._focus_browser_window(f"{state.name} 仍需人工处理")
+            self._focus_browser_window(f"{state.name} 仍需人工处理", code)
         return self._serialize_platform_state(state)
 
     def _tile_after_login(self):
@@ -385,7 +402,10 @@ class RPARuntime:
                     code: state.version
                     for code, state in self.platform_states.items()
                 }
-                result = await self.service.run_inquiry(record.request)
+                result = await self.service.run_inquiry(
+                    record.request,
+                    before_aggregate=self._check_platform_risk_before_aggregation,
+                )
                 record.result = result
                 record.status = TaskStatus.COMPLETED
                 # ★ 采集完成瞬间立刻打印 request + 纯采集耗时（不含详情窗口后台关闭等待）
@@ -410,6 +430,69 @@ class RPARuntime:
                 delete_task(task_id)
                 # 主动推送结果给客户端（配置了 CALLBACK_URL 才生效）
                 await self._notify_callback(record)
+
+    async def _check_platform_risk_before_aggregation(self) -> None:
+        """汇总前检查常驻主页面，风险解除前不允许构造跨平台结果。"""
+        if self.service is None:
+            return
+
+        blocked_platforms = []
+        async with self._platform_check_lock:
+            for code, adapter in self.adapter_map.items():
+                state = self.platform_states.get(code)
+                session = self.service.sessions.get(code)
+                if (
+                    state is None
+                    or state.status != PlatformHealthStatus.READY
+                    or session is None
+                ):
+                    continue
+                try:
+                    await session.page
+                    html = await session.page.get_content()
+                    url = session.page.target.url or ""
+                    blocked, reason = detect_block_with_common(
+                        adapter.detect_block,
+                        url,
+                        html,
+                    )
+                except Exception as exc:
+                    log.debug("汇总前风控巡检跳过平台: %s: %s", code, exc)
+                    continue
+                if blocked:
+                    blocked_platforms.append((code, adapter, session.page, reason, url))
+
+        for code, adapter, page, reason, url in blocked_platforms:
+            log.warning(
+                "[汇总前风控] %s(%s) 命中 %s，当前 URL=%s；等待人工处理后继续汇总",
+                self.platform_states[code].name,
+                code,
+                reason,
+                url,
+            )
+            await wait_and_reload_after_block(page, adapter.detect_block, "汇总前")
+
+    def _on_manual_verify_state(self, context: str, state: str, reason: str) -> None:
+        """将采集适配器发现的风控即时同步到 Runtime 健康状态。"""
+        match = re.search(r"\(([^)]+)\)/", context)
+        code = match.group(1) if match else None
+        if code not in self.platform_states:
+            log.debug("无法从风控上下文定位平台: %s", context)
+            return
+
+        if state == "WAIT_MANUAL_VERIFY":
+            event = PlatformHealthEvent.RESULT_MANUAL_VERIFY
+        elif state == "WAIT_LOGIN":
+            event = PlatformHealthEvent.RESULT_LOGIN_EXPIRED
+        elif state == "READY":
+            event = PlatformHealthEvent.READY_CHECK_PASSED
+        else:
+            return
+
+        self._set_platform_health(code, event, reason)
+        self._refresh_service_status()
+        if state != "READY":
+            self._focus_browser_window(f"{self.platform_states[code].name} {reason}", code)
 
     async def _keepalive_loop(self):
         while True:
@@ -453,7 +536,7 @@ class RPARuntime:
                         PlatformHealthStatus.WAIT_LOGIN,
                         PlatformHealthStatus.WAIT_MANUAL_VERIFY,
                     }:
-                        self._focus_browser_window(f"{state.name} 状态变为 {state.status}")
+                        self._focus_browser_window(f"{state.name} 状态变为 {state.status}", code)
 
             self._refresh_service_status()
 
@@ -563,7 +646,7 @@ class RPARuntime:
                         PlatformHealthEvent.RESULT_MANUAL_VERIFY,
                         item.reason or "等待人工验证",
                     )
-                    self._focus_browser_window(f"{state.name} 需要人工验证")
+                    self._focus_browser_window(f"{state.name} 需要人工验证", code)
             elif item.status == PlatformResultStatus.LOGIN_EXPIRED:
                 if not state_changed_after_start:
                     self._set_platform_health(
@@ -571,7 +654,7 @@ class RPARuntime:
                         PlatformHealthEvent.RESULT_LOGIN_EXPIRED,
                         item.reason or "登录已失效",
                     )
-                    self._focus_browser_window(f"{state.name} 登录已失效")
+                    self._focus_browser_window(f"{state.name} 登录已失效", code)
             elif item.status not in {
                 PlatformResultStatus.SUCCESS,
                 PlatformResultStatus.NO_DATA,
@@ -606,6 +689,12 @@ class RPARuntime:
                     "finalPrice": record.result.final_price,
                 },
             }
+            if record.result.candidates:
+                candidates = [
+                    _camelize(asdict(item)) for item in record.result.candidates
+                ]
+                result_payload["candidates"] = candidates
+                result_payload["data"]["candidates"] = candidates
 
         return {
             "taskId": record.task_id,
@@ -631,11 +720,16 @@ class RPARuntime:
         payload["status"] = PLATFORM_RESULT_STATUS_TEXT.get(item.status, item.status)
         return payload
 
-    def _focus_browser_window(self, reason: str):
-        if not self.browser_pid:
+    def _focus_browser_window(self, reason: str, code: Optional[str] = None):
+        browser = self.browsers.get(code) if code else None
+        browser_pid = getattr(getattr(browser, "_process", None), "pid", None)
+        if browser_pid is None:
+            browser_pid = self.browser_pid
+        if not browser_pid:
             return
-        log.info("尝试将浏览器置前: %s", reason)
-        ensure_browser_foreground(self.browser_pid)
+        platform_label = f"[{code}] " if code else ""
+        log.info("尝试将浏览器置前: %s%s", platform_label, reason)
+        ensure_browser_foreground(browser_pid)
 
     def _restore_pending_tasks(self):
         """启动时恢复崩溃前未完成的任务（持久化兜底）。
@@ -672,6 +766,10 @@ class RPARuntime:
             payload["finalPrice"] = record.result.final_price
             payload["branchCode"] = record.result.branch
             payload["branch"] = BRANCH_TEXT.get(record.result.branch, record.result.branch)
+            if record.result.candidates:
+                payload["candidates"] = [
+                    _camelize(asdict(item)) for item in record.result.candidates
+                ]
             if record.result.note:
                 payload["note"] = record.result.note
         elif record.status == "FAILED":

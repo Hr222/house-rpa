@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ast
 import re
+import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +15,15 @@ from typing import Optional
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+
+# 支持 `python app/excel/export_operation_log_excel.py ...` 直接执行。
+# 否则 sys.path 只有 app/excel，可能误导入虚拟环境中的同名第三方 app 包。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app.core.algorithm import find_weighted_price_candidates
+from app.utils.listing_dedup import deduplicate_same_platform
 
 U_QUERY_CITY = "\u67e5\u8be2\u57ce\u5e02"
 U_COMMUNITY = "\u5c0f\u533a"
@@ -66,13 +76,65 @@ U_RPAREN = "\uff09"
 U_TOTAL_PREFIX = "\uff08\u5171"
 U_TOTAL_SUFFIX = "\u6761\uff09"
 U_LOG_INCOMPLETE = "\u65e5\u5fd7\u4e2d\u672a\u89e3\u6790\u5230\u5b8c\u6574\u7ed3\u679c"
+U_NO_USABLE_DATA = "\u672a\u6293\u53d6\u5230\u53ef\u7528\u4e8e\u8ba1\u7b97\u7684\u6709\u6548\u6570\u636e\uff0c\u6700\u7ec8\u65e0\u53ef\u7528\u62a5\u4ef7"
 U_STATUS_SUCCESS = "SUCCESS"
 U_PINGMI_LABEL = "\u5e73\u7c73"
 U_FAILED = "FAILED"
 U_QUOTE_ONLY = "QUOTE_ONLY"
+U_WEIGHTED_MEDIAN = "WEIGHTED_MEDIAN"
 U_QUOTE_DISCOUNT = "QUOTE_DISCOUNT"
 U_DEAL_ONLY = "DEAL_ONLY"
 U_TAKE_LOWER = "TAKE_LOWER"
+
+# Excel 展示用中文。上面的 U_* 常量同时参与日志解析，不能直接改名或改值。
+D_REQUEST_ID = "请求编号"
+D_ALGORITHM_MODE = "算法模式"
+D_STARTED = "开始时间"
+D_FINISHED = "完成时间"
+D_ELAPSED = "耗时(秒)"
+D_RESULT = "结果"
+D_QUOTE = "在售均价"
+D_DEAL = "成交均价"
+D_FINAL = "最终取值"
+D_BRANCH = "决策分支"
+D_BRANCH_TEXT = "分支说明"
+D_CANDIDATES = "当前算法候选"
+
+ALGORITHM_MODE_TEXT = {
+    "default": "默认算法",
+    "quote_only": "纯在售算法",
+    "weighted_median": "加权落点中位数算法",
+}
+STATUS_TEXT = {
+    "SUCCESS": "成功",
+    "NO_DATA": "无数据",
+    "NO_MATCHING_AREA": "无匹配面积",
+    "WAIT_MANUAL_VERIFY": "等待人工验证",
+    "LOGIN_EXPIRED": "登录已失效",
+    "ERROR": "采集异常",
+    "FAILED": "失败",
+}
+BRANCH_TEXT = {
+    "TAKE_LOWER": "差异在阈值内，取较低值",
+    "DEAL_ONLY": "仅取成交均价",
+    "QUOTE_DISCOUNT": "无成交，取在售均价折扣",
+    "QUOTE_ONLY": "纯在售均价折扣",
+    "WEIGHTED_MEDIAN": "主要价格落点加权中位数折扣",
+    "WEIGHTED_MEDIAN_MULTI": "多个高频价格落点，取最低价格峰中位数，不打折",
+    "NO_DATA": "无可用数据",
+    "FAILED": "处理失败",
+}
+ALGORITHM_DESCRIPTIONS = {
+    "default": (
+        "默认算法：有在售和成交均价时，差异不超过10%取较低值；差异超过10%取成交均价；"
+        "无成交时取在售均价×无成交折扣；无在售时取成交均价。"
+    ),
+    "quote_only": "纯在售算法：汇总在售价格取中位数，再乘在售折扣（默认0.9）。",
+    "weighted_median": (
+        "加权落点中位数算法：汇集所有平台的有效房源落点，每条房源按出现次数计票；低频孤立峰过滤，"
+        "主峰明确时返回一个中位数并打折，多峰时选择最低价格峰中位数直接返回，不打折。"
+    ),
+}
 
 ENCODINGS = ("utf-8", "utf-8-sig", "gb18030")
 INVALID_SHEET_CHARS = set('[]:*?/\\')
@@ -111,12 +173,25 @@ class InquiryRecord:
     quote_avg: Optional[float] = None
     deal_avg: Optional[float] = None
     final_price: Optional[float] = None
+    final_price_logged: bool = False
     success: bool = False
     branch_code: Optional[str] = None
     branch_text: Optional[str] = None
     listings: list[ListingRow] = field(default_factory=list)
     deals: list[DealRow] = field(default_factory=list)
     platform_notes: dict[str, dict[str, str]] = field(default_factory=dict)
+
+
+def _deduplicated_listing_rows(record: InquiryRecord) -> list[ListingRow]:
+    """Deduplicate historical log rows independently for each platform."""
+    grouped: dict[str, list[ListingRow]] = defaultdict(list)
+    for listing in record.listings:
+        grouped[listing.platform].append(listing)
+
+    deduplicated: list[ListingRow] = []
+    for rows in grouped.values():
+        deduplicated.extend(deduplicate_same_platform(rows))
+    return deduplicated
 
 
 PREFIX_RE = re.compile(r"^(?P<ts>\S+ \S+) \[(?P<level>\w+)\] (?P<logger>[^ ]+) - (?P<msg>.*)$")
@@ -188,11 +263,220 @@ def to_float(value: Optional[str]) -> Optional[float]:
         return None
 
 
+def display_algorithm_mode(mode: Optional[str]) -> str:
+    """Return the Chinese label used for an algorithm mode in Excel."""
+    return ALGORITHM_MODE_TEXT.get(mode or "default", "未知算法")
+
+
+def algorithm_description(mode: Optional[str]) -> str:
+    """Return the value-selection explanation used in the workbook note."""
+    return ALGORITHM_DESCRIPTIONS.get(mode or "default", "未识别的算法取值规则。")
+
+
+def display_status(status: Optional[str]) -> str:
+    """Translate a status code at the Excel presentation boundary."""
+    if not status:
+        return ""
+    return STATUS_TEXT.get(str(status), "状态异常")
+
+
+def display_branch(branch: Optional[str]) -> str:
+    """Translate a decision branch code at the Excel presentation boundary."""
+    if not branch:
+        return ""
+    return BRANCH_TEXT.get(str(branch), "其他处理")
+
+
+def has_captured_data(record: InquiryRecord) -> bool:
+    """Whether the log contains evidence that a platform returned data."""
+    if record.listings or record.deals or record.quote_avg is not None or record.deal_avg is not None:
+        return True
+    return any(
+        note.get("status") == U_STATUS_SUCCESS
+        or note.get("deal_source")
+        or note.get("deal_prices_text")
+        for note in record.platform_notes.values()
+    )
+
+
+def calculation_no_data_description(mode: Optional[str]) -> str:
+    """Explain why collected data did not produce a final quote."""
+    if mode == "weighted_median":
+        return (
+            "已抓到在售数据，但价格落点未同时满足至少60%权重覆盖和每条价格相对中心价偏差不超过10%的要求，"
+            "无法形成明确落点，最终无可用报价。"
+        )
+    if mode == "quote_only":
+        return "已抓到平台数据，但没有可用于中位数计算的有效在售价格，最终无可用报价。"
+    return "已抓到平台数据，但在售或成交价格无法形成可用计算结果，最终无可用报价。"
+
+
+def weighted_median_no_data_detail(record: InquiryRecord) -> str:
+    """Explain the weighted cluster coverage or deviation failure."""
+    price_groups: dict[str, list[float]] = defaultdict(list)
+    for listing in record.listings:
+        if listing.unit_price is not None and listing.unit_price > 0:
+            price_groups[listing.platform].append(float(listing.unit_price))
+
+    diagnostic = _diagnose_weighted_median_quote(list(price_groups.values()))
+    if diagnostic is None:
+        return "没有足够的有效在售价格形成候选价格簇。"
+
+    unique_prices = sorted(set(diagnostic.prices))
+    if len(unique_prices) <= 6:
+        price_text = "、".join(f"{price:.0f}" for price in unique_prices)
+        candidate_text = f"候选价格为 {price_text}"
+    else:
+        candidate_text = (
+            f"候选价格范围为 {unique_prices[0]:.0f}～{unique_prices[-1]:.0f}"
+            f"（共{len(diagnostic.prices)}条）"
+        )
+
+    coverage_text = f"覆盖{diagnostic.coverage * 100:.2f}%权重"
+    deviation_text = f"最大单条偏差{diagnostic.max_relative_deviation * 100:.2f}%"
+    if diagnostic.coverage < 0.60:
+        return (
+            f"{candidate_text}，中心价约{diagnostic.center:.0f}，{coverage_text}，低于60%权重要求；"
+            f"虽然{deviation_text}不超过10%，但覆盖不足，最终无可用报价。"
+        )
+    return (
+        f"最接近的60%权重候选价格簇{candidate_text}，中心价约{diagnostic.center:.0f}，"
+        f"{coverage_text}，但{deviation_text}超过10%，最终无可用报价。"
+    )
+
+
+def weighted_median_candidates_detail(record: InquiryRecord) -> str:
+    """Explain current frequency-based candidates using all platforms together."""
+    listings = _deduplicated_listing_rows(record)
+    prices = [
+        float(listing.unit_price)
+        for listing in listings
+        if listing.unit_price is not None and listing.unit_price > 0
+    ]
+    candidates = find_weighted_price_candidates([prices])
+    if not candidates:
+        return "没有足够的有效在售价格形成候选价格簇。"
+
+    parts = [
+        (
+            f"中位数{candidate.quote_price:.0f}，"
+            f"{'直接返回' if len(candidates) > 1 else '折后' }"
+            f"{candidate.quote_price if len(candidates) > 1 else candidate.final_price:.0f}，"
+            f"{candidate.count}条，占{candidate.frequency * 100:.2f}%"
+        )
+        for candidate in candidates
+    ]
+    if len(candidates) > 1:
+        return "检测到多个高频价格落点，分别输出候选：" + "；".join(parts)
+    return "检测到明确主峰：" + parts[0]
+
+
+@dataclass(frozen=True)
+class WeightedDiagnostic:
+    prices: tuple[float, ...]
+    center: float
+    coverage: float
+    max_relative_deviation: float
+
+
+def _diagnose_weighted_median_quote(
+    price_groups: list[list[float]],
+    min_coverage: float = 0.60,
+    max_relative_deviation: float = 0.10,
+) -> Optional[WeightedDiagnostic]:
+    """Diagnose weighted price clusters without importing the app package."""
+    weighted_prices: list[tuple[float, float]] = []
+    for group in price_groups:
+        valid = [float(price) for price in group if price is not None and price > 0]
+        if valid:
+            weight = 1.0 / len(valid)
+            weighted_prices.extend((price, weight) for price in valid)
+    weighted_prices.sort(key=lambda item: item[0])
+    if not weighted_prices:
+        return None
+
+    total_weight = sum(weight for _, weight in weighted_prices)
+    target_weight = total_weight * min_coverage
+
+    def weighted_median(items: list[tuple[float, float]]) -> Optional[float]:
+        if not items:
+            return None
+        half = sum(weight for _, weight in items) / 2
+        cumulative = 0.0
+        for index, (price, weight) in enumerate(items):
+            cumulative += weight
+            if cumulative > half:
+                return price
+            if abs(cumulative - half) <= 1e-12 and index + 1 < len(items):
+                return (price + items[index + 1][0]) / 2
+        return items[-1][0]
+
+    best_valid: Optional[tuple[float, float, int, int, int, float]] = None
+    for start in range(len(weighted_prices)):
+        interval_weight = 0.0
+        for end in range(start, len(weighted_prices)):
+            interval_weight += weighted_prices[end][1]
+            selected = weighted_prices[start : end + 1]
+            center = weighted_median(selected)
+            if center is None or center <= 0:
+                continue
+            deviation = max(abs(price - center) / center for price, _ in selected)
+            if deviation > max_relative_deviation:
+                continue
+            candidate = (interval_weight, -deviation, -(end - start), start, end, center)
+            if best_valid is None or candidate > best_valid:
+                best_valid = candidate
+
+    if best_valid is not None:
+        interval_weight, negative_deviation, _, start, end, center = best_valid
+        if interval_weight < target_weight:
+            selected = weighted_prices[start : end + 1]
+            return WeightedDiagnostic(
+                prices=tuple(price for price, _ in selected),
+                center=center,
+                coverage=interval_weight / total_weight,
+                max_relative_deviation=-negative_deviation,
+            )
+
+    # No valid cluster reaches the target: show the narrowest target-sized
+    # interval so the workbook can explain the rejected data.
+    closest: Optional[tuple[float, float, int, int, int, float]] = None
+    for start in range(len(weighted_prices)):
+        interval_weight = 0.0
+        for end in range(start, len(weighted_prices)):
+            interval_weight += weighted_prices[end][1]
+            if interval_weight < target_weight:
+                continue
+            selected = weighted_prices[start : end + 1]
+            center = weighted_median(selected)
+            if center is None or center <= 0:
+                continue
+            deviation = max(abs(price - center) / center for price, _ in selected)
+            candidate = (deviation, -interval_weight, end - start, start, end, center)
+            if closest is None or candidate < closest:
+                closest = candidate
+            break
+    if closest is None:
+        return None
+    deviation, negative_weight, _, start, end, center = closest
+    selected = weighted_prices[start : end + 1]
+    return WeightedDiagnostic(
+        prices=tuple(price for price, _ in selected),
+        center=center,
+        coverage=(-negative_weight) / total_weight,
+        max_relative_deviation=deviation,
+    )
+
+
 def infer_branch(quote_avg: Optional[float], deal_avg: Optional[float], algorithm_mode: str) -> tuple[str, str]:
     if algorithm_mode == "quote_only":
         if quote_avg is None:
             return U_FAILED, "\u65e0\u5728\u552e\u6570\u636e"
         return U_QUOTE_ONLY, "\u4ec5\u6309\u5728\u552e\u5747\u4ef7\u6253\u6298"
+    if algorithm_mode == "weighted_median":
+        if quote_avg is None:
+            return U_FAILED, "\u6ca1\u6709\u660e\u786e\u7684\u4ef7\u683c\u843d\u70b9"
+        return U_WEIGHTED_MEDIAN, "\u4e3b\u8981\u4ef7\u683c\u843d\u70b9\u52a0\u6743\u4e2d\u4f4d\u6570\u6253\u6298"
     if quote_avg is None and deal_avg is None:
         return U_FAILED, "\u65e0\u53ef\u7528\u7ed3\u679c"
     if deal_avg is None:
@@ -206,6 +490,31 @@ def infer_branch(quote_avg: Optional[float], deal_avg: Optional[float], algorith
 
 
 def finalize_record(record: InquiryRecord) -> None:
+    if record.algorithm_mode == "weighted_median":
+        listings = _deduplicated_listing_rows(record)
+        prices = [
+            float(listing.unit_price)
+            for listing in listings
+            if listing.unit_price is not None and listing.unit_price > 0
+        ]
+        candidates = find_weighted_price_candidates([prices])
+        if len(candidates) == 1:
+            candidate = candidates[0]
+            record.quote_avg = candidate.quote_price
+            record.final_price = candidate.final_price
+            record.success = True
+            record.branch_code = U_WEIGHTED_MEDIAN
+            record.branch_text = BRANCH_TEXT[U_WEIGHTED_MEDIAN]
+            return
+        if len(candidates) > 1:
+            selected = min(candidates, key=lambda candidate: candidate.quote_price)
+            record.quote_avg = selected.quote_price
+            record.final_price = selected.quote_price
+            record.success = True
+            record.branch_code = "WEIGHTED_MEDIAN_MULTI"
+            record.branch_text = BRANCH_TEXT[record.branch_code]
+            return
+
     record.success = record.final_price is not None
     record.branch_code, record.branch_text = infer_branch(record.quote_avg, record.deal_avg, record.algorithm_mode)
 
@@ -321,6 +630,7 @@ def parse_records(lines: list[str]) -> list[InquiryRecord]:
                     current.deal_avg = value
                 else:
                     current.final_price = value
+                    current.final_price_logged = True
                 continue
 
         if logger == "app.runtime":
@@ -399,14 +709,52 @@ def build_workbook(records: list[InquiryRecord]) -> Workbook:
         title.alignment = center
         title.border = border
 
-        write_row(ws, 3, [U_CITY, U_REQUEST_AREA, U_REQUEST_ID, U_ALGO], header=True)
-        write_row(ws, 4, [record.city, record.area, record.request_id or "", record.algorithm_mode or ""])
-        write_row(ws, 5, [U_STARTED, U_FINISHED, U_ELAPSED, U_SUCCESS], header=True)
-        write_row(ws, 6, [record.started_at, record.finished_at or "", record.elapsed_seconds, record.success])
-        write_row(ws, 7, [U_QUOTE, U_DEALV, U_FINAL, U_BRANCH], header=True)
-        write_row(ws, 8, [record.quote_avg, record.deal_avg, record.final_price, record.branch_code or ""])
-        write_row(ws, 9, [U_BRANCH_TEXT, U_NOTE, "", ""], header=True)
-        write_row(ws, 10, [record.branch_text or "", "" if record.success else U_LOG_INCOMPLETE, "", ""])
+        write_row(ws, 3, [U_CITY, U_REQUEST_AREA, D_REQUEST_ID, D_ALGORITHM_MODE], header=True)
+        write_row(
+            ws,
+            4,
+            [record.city, record.area, record.request_id or "", display_algorithm_mode(record.algorithm_mode)],
+        )
+        write_row(ws, 5, [D_STARTED, D_FINISHED, D_ELAPSED, D_RESULT], header=True)
+        write_row(
+            ws,
+            6,
+            [
+                record.started_at,
+                record.finished_at or "",
+                record.elapsed_seconds,
+                U_SUCCESS if record.success else "未完成",
+            ],
+        )
+        write_row(ws, 7, [D_QUOTE, D_DEAL, D_FINAL, D_BRANCH], header=True)
+        write_row(ws, 8, [record.quote_avg, record.deal_avg, record.final_price, display_branch(record.branch_code)])
+        write_row(ws, 9, [D_BRANCH_TEXT, U_NOTE, "", ""], header=True)
+        note_text = algorithm_description(record.algorithm_mode)
+        if not record.success:
+            if record.final_price_logged:
+                if has_captured_data(record):
+                    if record.algorithm_mode == "weighted_median":
+                        detail = weighted_median_candidates_detail(record)
+                    else:
+                        detail = calculation_no_data_description(record.algorithm_mode)
+                    note_text = f"{note_text}；{detail}"
+                else:
+                    note_text = f"{note_text}；{U_NO_USABLE_DATA}。"
+            else:
+                note_text = f"{note_text}；{U_LOG_INCOMPLETE}"
+        write_row(ws, 10, [record.branch_text or display_branch(record.branch_code), note_text, "", ""])
+        current_candidates = (
+            weighted_median_candidates_detail(record)
+            if record.algorithm_mode == "weighted_median"
+            else ""
+        )
+        if record.algorithm_mode == "weighted_median":
+            deduplicated_count = len(_deduplicated_listing_rows(record))
+            current_candidates = (
+                f"\u540c\u5e73\u53f0\u53bb\u91cd: {len(record.listings)} -> "
+                f"{deduplicated_count}; {current_candidates}"
+            )
+        write_row(ws, 11, [D_CANDIDATES, current_candidates, "", ""])
 
         ws.merge_cells("A12:I12")
         listing_section = ws["A12"]
@@ -452,7 +800,7 @@ def build_workbook(records: list[InquiryRecord]) -> Workbook:
                         row_index,
                         [
                             platform,
-                            note.get("status", U_STATUS_SUCCESS),
+                            display_status(note.get("status", U_STATUS_SUCCESS)),
                             note.get("reason", ""),
                             listing.community_name,
                             listing.title,
@@ -464,7 +812,21 @@ def build_workbook(records: list[InquiryRecord]) -> Workbook:
                     )
                     row_index += 1
             else:
-                write_row(ws, row_index, [platform, note.get("status", ""), note.get("reason", ""), "", "", "", "", "", ""])
+                write_row(
+                    ws,
+                    row_index,
+                    [
+                        platform,
+                        display_status(note.get("status", "")),
+                        note.get("reason", ""),
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                    ],
+                )
                 row_index += 1
 
         row_index += 1
@@ -528,7 +890,7 @@ def build_workbook(records: list[InquiryRecord]) -> Workbook:
 def derive_output_path(log_path: Path, output_path: Optional[Path]) -> Path:
     if output_path is not None:
         return output_path
-    return log_path.with_name("评估对比_20260723_165310_详细数据.xlsx")
+    return log_path.with_name("export_log_info.xlsx")
 
 
 def save_workbook(workbook: Workbook, path: Path) -> Path:
@@ -557,15 +919,23 @@ def main() -> int:
     workbook = build_workbook(records)
     output_path = derive_output_path(args.log_path, args.output)
     actual_path = save_workbook(workbook, output_path)
-    complete_count = sum(1 for record in records if record.final_price is not None)
+    complete_count = sum(
+        1
+        for record in records
+        if record.final_price is not None or record.branch_code == "WEIGHTED_MEDIAN_MULTI"
+    )
     incomplete_count = len(records) - complete_count
     total_listings = sum(len(record.listings) for record in records)
+    total_deduplicated_listings = sum(
+        len(_deduplicated_listing_rows(record)) for record in records
+    )
     total_deals = sum(len(record.deals) for record in records)
     print(f"saved_to={actual_path}")
     print(f"records={len(records)}")
     print(f"complete={complete_count}")
     print(f"incomplete={incomplete_count}")
     print(f"listings={total_listings}")
+    print(f"deduplicated_listings={total_deduplicated_listings}")
     print(f"deals={total_deals}")
     return 0
 

@@ -1,0 +1,6 @@
+interface:
+  display_name: "抓取数据评估分析"
+  short_description: "对比评估Excel与详细日志，区分原始数据偏差和算法偏差"
+  default_prompt: "Use $analyze-captured-data to analyze the evaluation workbook and detailed capture log, separating source-data mismatch from algorithm errors."
+policy:
+  allow_implicit_invocation: true

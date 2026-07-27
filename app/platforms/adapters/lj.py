@@ -361,7 +361,7 @@ async def _collect_listing_pages(page, total_pages: int, community_name: str = "
                 log.warning("第 %d 页无法翻页，停止翻页保数据正确", page_no)
                 break
 
-            # 翻页后风控兜底（检测→等人回车→重取，最多2次；不重新点页码避免再触发验证码）
+            # 翻页后风控兜底（检测→等人回车→重取，直到页面恢复）
             await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页")
         else:
             await human_linger(page, page_no)
@@ -628,7 +628,7 @@ async def _do_collect(
 
     # 4. 面积筛选（动态读取页面档位，点击对应区间链接）
     area_range = await click_area_segment(main_page, area, parsers.parse_area_segments, "lj")
-    # 面积筛选后风控兜底（检测→等人回车→重取，最多2次；和详情/翻页统一）
+    # 面积筛选后风控兜底（检测→等人回车→重取，直到页面恢复）
     area_html = await wait_and_reload_after_block(main_page, detect_block, "面积筛选后")
     area_url = main_page.target.url or ""
     await _dump(main_page, "lj_after_area")
@@ -678,7 +678,7 @@ async def _do_collect(
     deal_clicked = False
     deal_tab2 = None  # 成交记录标签页引用
     if detail_clicked and detail_tab is not None:
-        # 详情页风控兜底（检测→等人回车→重取，最多 2 次）
+        # 详情页风控兜底（检测→等人回车→重取，直到页面恢复）
         detail_html = await wait_and_reload_after_block(detail_tab, detect_block, "详情页")
         await _dump(detail_tab, "lj_detail")
 
@@ -695,7 +695,7 @@ async def _do_collect(
                 deal_tab2 = await _wait_for_new_tab(browser, old_tab_ids, "/chengjiao/")
                 if deal_tab2 is not None:
                     deal_clicked = True
-                    # 成交页风控兜底（最多 2 次人工）
+                    # 成交页风控兜底（等待页面恢复后继续）
                     first_deal_html = await wait_and_reload_after_block(deal_tab2, detect_block, "成交页")
                     await _dump(deal_tab2, "lj_deal")
 

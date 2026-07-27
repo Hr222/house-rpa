@@ -58,11 +58,12 @@ def _is_captcha_url(url: str) -> bool:
 
 
 def _is_captcha_html(html: str) -> bool:
+    """只识别真实人机验证提示，排除详情页正常的短信验证码表单。"""
     markers = (
-        "请输入验证码",
         "验证后继续访问",
         "请完成验证",
         "滑动验证",
+        "访问过于频繁",
     )
     return any(marker in html for marker in markers)
 
@@ -284,7 +285,7 @@ async def _collect_listing_pages(page, total_pages: int, community_name: str = "
                 log.warning("第 %d 页页码按钮未找到，停止翻页", page_no)
                 break
 
-            # 翻页后风控兜底（检测→等人回车→重取，最多 2 次；不重新点页码避免再触发验证码）
+            # 翻页后风控兜底（检测→等人回车→重取，直到页面恢复）
             await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页")
 
         await human_linger(page, page_no)
@@ -416,8 +417,8 @@ async def _navigate_and_parse_deals(detail_tab, main_page, area_min: float, area
     deal_record_dicts: list = []
     try:
         await detail_tab
+        detail_html = await wait_and_reload_after_block(detail_tab, detect_block, "详情页")
         await _dump(detail_tab, "fang_detail")
-        detail_html = await detail_tab.get_content()
         deal_url = parsers.find_deal_link(detail_html)
         if deal_url:
             log.info("导航到成交页: %s", deal_url)
@@ -429,7 +430,7 @@ async def _navigate_and_parse_deals(detail_tab, main_page, area_min: float, area
             return deal_prices, deal_record_dicts
 
         await _dump(detail_tab, "fang_deal")
-        # 成交页风控兜底（检测→等人回车→重取，最多 2 次）
+        # 成交页风控兜底（检测→等人回车→重取，直到页面恢复）
         deal_html = await wait_and_reload_after_block(detail_tab, detect_block, "成交页")
 
         all_deals = parsers.parse_deal_records(deal_html)
@@ -627,15 +628,12 @@ async def _do_collect(
     for attempt in (1, 2):
         # 搜索小区
         keyword_html = await _search_community(main_page, community_name)
+        # 搜索后统一走 base.py 风控等待，恢复后再继续解析结果页。
+        keyword_html = await wait_and_reload_after_block(main_page, detect_block, "搜索后")
         await _dump(main_page, "fang_keyword_result")
         keyword_url = main_page.target.url or ""
 
         # 判风控/登录
-        if _is_captcha_url(keyword_url) or _is_captcha_html(keyword_html):
-            return short_circuit_result(
-                "房天下", "WAIT_MANUAL_VERIFY", "搜索后命中验证码拦截",
-                request_id, started_at,
-            )
         if _is_login_url(keyword_url):
             return short_circuit_result(
                 "房天下", "LOGIN_EXPIRED", "搜索后进入登录页",
@@ -660,13 +658,8 @@ async def _do_collect(
         # 面积筛选
         area_range = await click_area_segment(main_page, area, parsers.parse_area_segments, "fang")
         await _dump(main_page, "fang_after_area")
-        area_url = main_page.target.url or ""
-        area_html = await main_page.get_content()
-        if _is_captcha_url(area_url) or _is_captcha_html(area_html):
-            return short_circuit_result(
-                "房天下", "WAIT_MANUAL_VERIFY", "面积筛选后命中验证码拦截",
-                request_id, started_at,
-            )
+        # 面积筛选后统一等待页面恢复，禁止风控 HTML 进入房源解析。
+        area_html = await wait_and_reload_after_block(main_page, detect_block, "面积筛选后")
         if area_range is None:
             return short_circuit_result(
                 "房天下", "NO_DATA", "该面积区间无在售房源（档位已禁用）",

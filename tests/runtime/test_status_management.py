@@ -133,3 +133,58 @@ def test_ready_check_captcha_enters_manual_verify_state():
 
     assert runtime.platform_states["ke"].status == PlatformHealthStatus.WAIT_MANUAL_VERIFY
     assert runtime.status == ServiceStatus.DEGRADED
+
+
+def test_aggregation_risk_probe_waits_for_main_page_recovery(monkeypatch):
+    class FakeTab:
+        def __init__(self):
+            self.target = type("Target", (), {"url": "https://hip.ke.com/captcha"})()
+            self.reads = 0
+
+        def __await__(self):
+            async def ready():
+                return self
+
+            return ready().__await__()
+
+        async def get_content(self):
+            self.reads += 1
+            if self.reads <= 2:
+                return "<html><title>CAPTCHA</title></html>"
+            self.target.url = "https://hip.ke.com/list"
+            return "<html><body>正常房源</body></html>"
+
+    class FakeAdapter:
+        code = "ke"
+        name = "贝壳"
+
+        def detect_block(self, url, html):
+            return ("captcha" in url, "命中验证码拦截" if "captcha" in url else "")
+
+    class FakeService:
+        sessions = {"ke": type("Session", (), {"page": FakeTab()})()}
+
+    runtime = RPARuntime(adapters=[FakeAdapter()])
+    runtime.service = FakeService()
+    runtime.browsers = {"ke": type("Browser", (), {"tabs": [FakeTab()]})()}
+    runtime.platform_states = {
+        "ke": PlatformRuntimeState(
+            code="ke",
+            name="贝壳",
+            start_url="x",
+            status=PlatformHealthStatus.READY,
+            message="已就绪",
+        ),
+    }
+    runtime._refresh_service_status()
+
+    monkeypatch.setattr("builtins.input", lambda prompt: None)
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("app.platforms.base.asyncio.sleep", no_sleep)
+    asyncio.run(runtime._check_platform_risk_before_aggregation())
+
+    assert runtime.platform_states["ke"].status == PlatformHealthStatus.READY
+    assert runtime.status == ServiceStatus.READY

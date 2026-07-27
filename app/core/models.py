@@ -75,3 +75,16 @@ class InquiryResult:
     deal_avg: Optional[float] = None
     platform: Optional[PlatformResult] = None
     platform_results: List[PlatformResult] = field(default_factory=list)
+    candidates: List["PriceCandidate"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PriceCandidate:
+    """A significant listing-price peak selected by listing frequency."""
+
+    quote_price: float
+    final_price: float
+    count: int
+    frequency: float
+    min_price: float
+    max_price: float

@@ -335,7 +335,7 @@ async def _collect_listing_pages(page, total_pages: int, community_name: str = "
                 log.warning("第 %d 页无法翻页，停止翻页保数据正确", page_no)
                 break
 
-            # 翻页后风控兜底（检测→等人回车→重取，最多2次；不重新点页码避免再触发验证码）
+            # 翻页后风控兜底（检测→等人回车→重取，直到页面恢复）
             await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页")
 
         await human_linger(page, page_no)
@@ -711,7 +711,7 @@ async def _do_collect(
             listing_snapshots=listing_snapshots,
         )
 
-    # 详情页风控兜底（检测→等人回车→重取，最多 2 次）
+    # 详情页风控兜底（检测→等人回车→重取，直到页面恢复）
     detail_html = await wait_and_reload_after_block(detail_tab, detect_block, "详情页")
     await _dump(detail_tab, "ke_detail")
 
@@ -724,7 +724,7 @@ async def _do_collect(
     )
     log.info("[11] 小区均价=%s 成交单价=%d条", community_avg_price, len(filtered_deal_prices))
 
-    # 详情页经 2 次人工仍未取得任何成交/均价：同样降级，不整单失败
+    # 详情页恢复后仍未取得任何成交/均价：降级为仅用在售均价，不整单失败
     if community_avg_price is None and not filtered_deal_prices:
         log.warning("[11] 详情页未抓到均价和成交，降级为仅用在售均价")
         if detail_tab is not main_page:

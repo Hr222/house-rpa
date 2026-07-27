@@ -4,16 +4,114 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import random
 import re
 import time
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from app.core.models import InquiryRequest, ListingSnapshot, PlatformResult, PlatformSession
+from app.utils.listing_dedup import deduplicate_same_platform
 
 log = logging.getLogger(__name__)
+
+
+_PLATFORM_NAMES = {
+    "ajk": "安居客",
+    "fang": "房天下",
+    "ke": "贝壳",
+    "lj": "链家",
+    "lyj": "乐有家",
+}
+
+
+class _ManualVerifyCoordinator:
+    """协调并行平台的人工风控确认，避免多个协程同时读取终端输入。"""
+
+    def __init__(self):
+        self._loop = None
+        self._lock: asyncio.Lock | None = None
+        self._shared_lock: asyncio.Lock | None = None
+        self._waiting: dict[str, int] = {}
+        self._events: dict[str, str] = {}
+
+    def set_shared_lock(self, lock: asyncio.Lock | None) -> None:
+        """让 Runtime 的平台检查锁同时保护采集期间的人工确认。"""
+        self._shared_lock = lock
+        self._loop = None
+        self._lock = None
+
+    def _ensure_loop_state(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop:
+            self._loop = loop
+            self._lock = self._shared_lock or asyncio.Lock()
+            self._waiting = {}
+            self._events = {}
+        assert self._lock is not None
+        return self._lock
+
+    def snapshot(self) -> tuple[str, ...]:
+        return tuple(sorted(self._waiting))
+
+    def reset_events(self) -> None:
+        self._events = {}
+
+    def events_snapshot(self) -> tuple[tuple[str, str], ...]:
+        return tuple(sorted(self._events.items()))
+
+    def mark_event(self, context: str, status: str) -> None:
+        self._events[context] = status
+
+    async def wait(
+        self,
+        context: str,
+        *,
+        attempt: int,
+        is_resolved: Optional[Callable[[], Awaitable[bool]]] = None,
+    ) -> bool:
+        lock = self._ensure_loop_state()
+        async with lock:
+            # Another platform may have completed the shared verification while
+            # this platform was waiting for the terminal prompt.
+            if is_resolved is not None:
+                try:
+                    if await is_resolved():
+                        self._events[context] = "RESOLVED"
+                        log.info("[风控恢复] %s 已由其他人工确认解除", context)
+                        return False
+                except Exception as exc:
+                    log.debug("风控恢复复检失败，继续等待人工: %s: %s", context, exc)
+
+            self._waiting[context] = attempt
+            self._events[context] = "WAITING"
+            waiting = ", ".join(self._waiting)
+            log.warning(
+                "[风控等待] %s 命中验证码/登录拦截，等待人工处理（第 %d 次）；当前等待: %s",
+                context,
+                attempt,
+                waiting,
+            )
+            prompt = (
+                f"\n⚠ [风控暂停] {context} 已被拦截，请在浏览器完成人工处理后，"
+                "回到终端按回车继续...\n"
+            )
+            try:
+                await asyncio.to_thread(input, prompt)
+            except Exception:
+                self._events[context] = "ERROR"
+                raise
+            finally:
+                self._waiting.pop(context, None)
+            self._events[context] = "RESOLVED"
+            log.info("[风控继续] %s 已收到人工确认，恢复采集", context)
+            return True
+
+
+_MANUAL_VERIFY_COORDINATOR = _ManualVerifyCoordinator()
+_MANUAL_VERIFY_STATE_CALLBACK = None
 
 NO_MATCHING_AREA = "NO_MATCHING_AREA"
 
@@ -194,17 +292,60 @@ async def human_linger(page, page_no: int, linger_seconds: float = None):
     await asyncio.sleep(secs)
 
 
-async def wait_for_manual_unblock():
+def _risk_context(detect_func, label: str) -> str:
+    """从平台检测函数推导可读的风控上下文。"""
+    owner = getattr(detect_func, "__self__", None)
+    code = getattr(owner, "code", None)
+    if not code:
+        module = getattr(detect_func, "__module__", "")
+        code = module.rsplit(".", 1)[-1] if module else "unknown"
+    name = _PLATFORM_NAMES.get(code, code)
+    return f"{name}({code})/{label}"
+
+
+def manual_verify_waiting_snapshot() -> tuple[str, ...]:
+    """返回当前等待人工风控处理的平台上下文。"""
+    return _MANUAL_VERIFY_COORDINATOR.snapshot()
+
+
+def reset_manual_verify_events() -> None:
+    """清空本次询价之前残留的人工风控事件。"""
+    _MANUAL_VERIFY_COORDINATOR.reset_events()
+
+
+def set_manual_verify_lock(lock: asyncio.Lock | None) -> None:
+    """配置人工风控等待使用的 Runtime 平台检查锁。"""
+    _MANUAL_VERIFY_COORDINATOR.set_shared_lock(lock)
+
+
+def set_manual_verify_state_callback(callback) -> None:
+    """配置采集期间风控状态变化的运行时回调。"""
+    global _MANUAL_VERIFY_STATE_CALLBACK
+    _MANUAL_VERIFY_STATE_CALLBACK = callback
+
+
+def manual_verify_events_snapshot() -> tuple[tuple[str, str], ...]:
+    """返回本次进程内已记录的人工风控事件。"""
+    return _MANUAL_VERIFY_COORDINATOR.events_snapshot()
+
+
+async def wait_for_manual_unblock(
+    context: str = "页面",
+    *,
+    attempt: int = 1,
+    is_resolved: Optional[Callable[[], Awaitable[bool]]] = None,
+):
     """被风控 / 登录拦截时，暂停等待人工处理。
 
-    这是所有平台共用的行为（终端提示 + 等回车），不需要各平台各自实现。
+    这是所有平台共用的行为（终端提示 + 等回车）。并行采集时只允许一个
+    平台占用终端输入，其他平台仍可继续执行，最终汇总由 gather 等待所有
+    平台协程结束。
     """
-    import asyncio
-    prompt = (
-        "\n⚠ 检测到风控 / 登录拦截，请在浏览器完成人工处理后，"
-        "回到终端按回车继续...\n"
+    return await _MANUAL_VERIFY_COORDINATOR.wait(
+        context,
+        attempt=attempt,
+        is_resolved=is_resolved,
     )
-    await asyncio.to_thread(input, prompt)
 
 
 # 跨平台验证码页共性的可见话术（剥离 script/style 后的正文）
@@ -423,6 +564,7 @@ def listing_filter_summary(
         area,
         tolerance,
     )
+    deduplicated_snapshots = deduplicate_same_platform(area_snapshots)
     area_min, area_max = listing_area_bounds(area, applied_tolerance)
     missing_area_count = sum(item.area is None for item in community_snapshots)
     return (
@@ -431,6 +573,8 @@ def listing_filter_summary(
         f"(请求面积 {area:.2f}㎡, 范围 {area_min:.2f}~{area_max:.2f}㎡, "
         f"匹配容差±{applied_tolerance:g}㎡, "
         f"面积缺失 {missing_area_count} 条)"
+    ) + (
+        f" -> \u540c\u5e73\u53f0\u53bb\u91cd\u540e {len(deduplicated_snapshots)} \u6761"
     )
 
 
@@ -492,6 +636,7 @@ def prepare_listing_data(
             area,
             area_tolerance,
         )
+    filtered = deduplicate_same_platform(filtered)
     quote_prices = [
         snapshot.unit_price
         for snapshot in filtered
@@ -501,7 +646,7 @@ def prepare_listing_data(
 
 
 async def wait_and_reload_after_block(tab, detect_func, label: str = "页面") -> str:
-    """详情/成交页被风控时的统一处理：检测 → 等人回车 → 重取，最多 2 次。
+    """页面被风控时的统一处理：检测 → 等人回车 → 重取，直到恢复。
 
     各 adapter 在打开详情/成交 tab 后调用本函数，替代各自手写的
     「detect_block → wait_for_manual_unblock → await tab → sleep → get_content」。
@@ -515,27 +660,63 @@ async def wait_and_reload_after_block(tab, detect_func, label: str = "页面") -
         label: 日志里的页面名称（如 "详情页" / "成交页"）。
 
     Returns:
-        重取后的 html。若 2 次人工后仍被风控，返回最后一次的 html，
-        交给调用方走降级（放弃成交，用在售×折扣）。
+        页面恢复后的 html。风控未解除前不会返回，避免调用方解析风控页面。
     """
     def _check(url: str, html: str) -> tuple[bool, str]:
         return detect_block_with_common(detect_func, url, html)
 
+    async def _notify_state(state: str, reason: str) -> None:
+        callback = _MANUAL_VERIFY_STATE_CALLBACK
+        if callback is None:
+            return
+        result = callback(_risk_context(detect_func, label), state, reason)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _activate_blocked_tab() -> None:
+        """将实际被拦截的详情/成交标签页切到前台，避免人工处理错页面。"""
+        activate = getattr(tab, "activate", None)
+        if activate is None:
+            return
+        try:
+            await activate()
+        except Exception as exc:
+            log.debug("风控标签页激活失败(%s): %s", label, exc)
+
     await tab
     html = await tab.get_content()
-    for attempt in (1, 2):
+    context = _risk_context(detect_func, label)
+
+    async def _is_resolved() -> bool:
+        nonlocal html
+        await tab
+        html = await tab.get_content()
+        blocked, _ = _check(tab.target.url or "", html)
+        return not blocked
+
+    attempt = 1
+    state_notified = False
+    while True:
         blocked, reason = _check(tab.target.url or "", html)
         if not blocked:
+            if state_notified:
+                await _notify_state("READY", "页面已恢复")
             return html
-        log.warning("%s被拦截(%s)，等待人工处理（第 %d 次）", label, reason, attempt)
-        await wait_for_manual_unblock()
+        await _activate_blocked_tab()
+        await _notify_state(
+            "WAIT_MANUAL_VERIFY" if is_manual_verify_reason(reason) else "WAIT_LOGIN",
+            reason,
+        )
+        state_notified = True
+        await wait_for_manual_unblock(
+            context,
+            attempt=attempt,
+            is_resolved=_is_resolved,
+        )
         await tab
         await asyncio.sleep(3)
         html = await tab.get_content()
-    # 2 次仍未解除，返回当前 html，调用方自行判断是否降级
-    blocked, reason = _check(tab.target.url or "", html)
-    if blocked:
-        log.warning("%s经 2 次人工仍未解除风控(%s)，将走降级", label, reason)
+        attempt += 1
     return html
 
 

@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 
-from app.core.models import PlatformResult
+import asyncio
+
+import app.service as service_module
+from app.core.models import InquiryRequest, PlatformResult
+from app.service import RPAInquiryService
 from app.service import build_inquiry_result
 
 
@@ -98,6 +102,62 @@ def test_build_inquiry_result_quote_only_no_quote():
     assert result.branch == "NO_DATA"
 
 
+def test_build_inquiry_result_weighted_median():
+    result = build_inquiry_result(
+        [
+            PlatformResult(
+                name="平台A",
+                status="SUCCESS",
+                quote_prices=[50000.0, 51000.0, 52000.0],
+            ),
+            PlatformResult(
+                name="平台B",
+                status="SUCCESS",
+                quote_prices=[50500.0, 51500.0],
+            ),
+            PlatformResult(
+                name="平台C",
+                status="SUCCESS",
+                quote_prices=[80000.0],
+            ),
+        ],
+        algorithm_mode="weighted_median",
+    )
+
+    assert result.success is True
+    assert result.quote_avg == 51000.0
+    assert result.deal_avg is None
+    assert result.final_price == 45900.0
+    assert result.branch == "WEIGHTED_MEDIAN"
+
+
+def test_build_inquiry_result_weighted_median_returns_multiple_candidates():
+    result = build_inquiry_result(
+        [
+            PlatformResult(
+                name="平台A",
+                status="SUCCESS",
+                quote_prices=[20000.0] * 6,
+            ),
+            PlatformResult(
+                name="平台B",
+                status="SUCCESS",
+                quote_prices=[40000.0] * 6,
+            ),
+        ],
+        algorithm_mode="weighted_median",
+    )
+
+    assert result.success is True
+    assert result.quote_avg == 20000.0
+    assert result.final_price == 20000.0
+    assert result.branch == "WEIGHTED_MEDIAN_MULTI"
+    assert [candidate.final_price for candidate in result.candidates] == [
+        20000.0,
+        40000.0,
+    ]
+
+
 def test_build_inquiry_result_distinguishes_area_mismatch():
     """所有平台命中小区但面积不匹配时，使用独立分支枚举。"""
     result = build_inquiry_result(
@@ -119,3 +179,57 @@ def test_build_inquiry_result_distinguishes_area_mismatch():
     assert result.success is False
     assert result.final_price is None
     assert result.branch == "NO_MATCHING_AREA"
+
+
+def test_run_inquiry_checks_risk_before_aggregation(monkeypatch):
+    events = []
+
+    class FakePage:
+        async def activate(self):
+            return None
+
+    class FakeAdapter:
+        def __init__(self, code):
+            self.code = code
+            self.name = code
+
+        async def collect(self, browser, session, request):
+            events.append(f"collect:{self.code}")
+            await asyncio.sleep(0)
+            return PlatformResult(
+                name=self.name,
+                status="SUCCESS",
+                community_avg_price=100.0,
+                deal_prices=[100.0],
+            )
+
+    adapters = [FakeAdapter("a"), FakeAdapter("b")]
+    service = RPAInquiryService({"a": object(), "b": object()}, adapters)
+    service.sessions = {
+        adapter.code: type("Session", (), {"page": FakePage()})()
+        for adapter in adapters
+    }
+
+    original_build = service_module.build_inquiry_result
+
+    def tracked_build(results, algorithm_mode="default"):
+        events.append("aggregate")
+        return original_build(results, algorithm_mode)
+
+    monkeypatch.setattr(service_module, "build_inquiry_result", tracked_build)
+
+    async def before_aggregate():
+        events.append("risk-check")
+
+    asyncio.run(
+        service.run_inquiry(
+            InquiryRequest(community_name="小区", area=80),
+            before_aggregate=before_aggregate,
+        )
+    )
+
+    assert events[:2] == ["collect:a", "collect:b"] or events[:2] == [
+        "collect:b",
+        "collect:a",
+    ]
+    assert events[-2:] == ["risk-check", "aggregate"]

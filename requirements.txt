@@ -4,3 +4,5 @@ nodriver
 beautifulsoup4
 pytest
 httpx
+
+openpyxl

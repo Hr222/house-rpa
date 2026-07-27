@@ -375,15 +375,12 @@ async def _do_collect(
 
     # 2. 搜索小区
     keyword_html = await _search_community(main_page, community_name)
+    # 搜索后统一走 base.py 风控等待，恢复后再继续解析结果页。
+    keyword_html = await wait_and_reload_after_block(main_page, detect_block, "搜索后")
     await _dump(main_page, "ajk_keyword_result")
     keyword_url = main_page.target.url or ""
 
     # 3. 判风控/登录
-    if _is_captcha_url(keyword_url) or _is_captcha_html(keyword_html):
-        return short_circuit_result(
-            "安居客", "WAIT_MANUAL_VERIFY", "搜索后命中验证码拦截",
-            request_id, started_at,
-        )
     if _is_login_url(keyword_url):
         return short_circuit_result(
             "安居客", "LOGIN_EXPIRED", "搜索后进入登录页",
@@ -408,13 +405,8 @@ async def _do_collect(
     area_range = await click_area_segment(main_page, area, parsers.parse_area_segments, "ajk")
     await _dump(main_page, "ajk_after_area")
 
-    area_url = main_page.target.url or ""
-    area_html = await main_page.get_content()
-    if _is_captcha_url(area_url) or _is_captcha_html(area_html):
-        return short_circuit_result(
-            "安居客", "WAIT_MANUAL_VERIFY", "面积筛选后命中验证码拦截",
-            request_id, started_at,
-        )
+    # 面积筛选后统一等待页面恢复，禁止风控 HTML 进入房源解析。
+    area_html = await wait_and_reload_after_block(main_page, detect_block, "面积筛选后")
     if area_range is None:
         return short_circuit_result(
             "安居客", "NO_DATA", "该面积区间无在售房源（档位已禁用）",
@@ -423,7 +415,7 @@ async def _do_collect(
 
     # 5. 滚动到底（安居客无分页，单页全展示）
     await _scroll_to_bottom(main_page)
-    area_html = await main_page.get_content()
+    area_html = await wait_and_reload_after_block(main_page, detect_block, "滚动到底后")
 
     # 6. 解析在售房源
     parsed_snapshots = parsers.parse_listing_snapshots(area_html)
