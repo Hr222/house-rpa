@@ -268,7 +268,7 @@ async def _collect_listing_pages(page, total_pages: int, community_name: str = "
             await _click_page_number(page, page_no)
 
         await human_linger(page, 0)
-        page_html = await page.get_content()
+        page_html = await wait_and_reload_after_block(page, detect_block, f"第 {page_no} 页")
         await _dump(page, f"lyj_area_page_{page_no}")
 
         page_snapshots = parsers.parse_listing_snapshots(page_html)
@@ -406,15 +406,12 @@ async def _do_collect(
 
     # 2. 搜索小区
     keyword_html = await _search_community(main_page, community_name, city)
+    # 搜索后统一走 base.py 风控等待，恢复后再继续解析结果页。
+    keyword_html = await wait_and_reload_after_block(main_page, detect_block, "搜索后")
     await _dump(main_page, "lyj_keyword_result")
     keyword_url = main_page.target.url or ""
 
     # 3. 判风控/登录/无数据
-    if _is_captcha_url(keyword_url) or _is_captcha_html(keyword_html):
-        return short_circuit_result(
-            "乐有家", "WAIT_MANUAL_VERIFY", "搜索后命中验证码拦截",
-            request_id, started_at,
-        )
     if _is_login_url(keyword_url):
         return short_circuit_result(
             "乐有家", "LOGIN_EXPIRED", "搜索后进入登录页",
@@ -439,13 +436,8 @@ async def _do_collect(
     area_range = await click_area_segment(main_page, area, parsers.parse_area_segments, "lyj")
     await _dump(main_page, "lyj_after_area")
 
-    area_url = main_page.target.url or ""
-    area_html = await main_page.get_content()
-    if _is_captcha_url(area_url) or _is_captcha_html(area_html):
-        return short_circuit_result(
-            "乐有家", "WAIT_MANUAL_VERIFY", "面积筛选后命中验证码拦截",
-            request_id, started_at,
-        )
+    # 面积筛选后统一等待页面恢复，禁止风控 HTML 进入房源解析。
+    area_html = await wait_and_reload_after_block(main_page, detect_block, "面积筛选后")
 
     area_min, area_max = area_range if area_range else (area * 0.8, area * 1.2)
     log.info("[4] 面积筛选区间: %.0f~%.0f (来自档位匹配)", area_min, area_max)

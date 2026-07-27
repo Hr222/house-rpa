@@ -149,7 +149,7 @@
 | `communityName` | string | ✅ | 小区名称 |
 | `area` | float | ✅ | 精确面积（㎡），如 `89.5`。系统自动匹配各平台面积档位 |
 | `city` | string | ✅ | 城市名（如 `深圳`、`广州`、`东莞`） |
-| `algorithmMode` | string | | 算法模式：`"default"`（成交+在售）或 `"quote_only"`（纯在售），默认 `"default"` |
+| `algorithmMode` | string | | 算法模式：`"default"`（成交+在售）、`"quote_only"`（纯在售）或 `"weighted_median"`（加权落点中位数），默认 `"default"` |
 | `requestId` | string | | 请求标识，用于幂等；不填则由服务生成 `taskId` |
 
 **请求示例：**
@@ -280,6 +280,21 @@
 **响应 404：** 未找到对应任务
 
 ---
+
+## 多峰结果
+
+当 `algorithmMode` 为 `weighted_median` 且识别到多个频率接近的价格峰时，任务仍视为成功完成，
+服务选择最低价格峰的中位数作为 `quoteAvg` 和 `finalPrice`，且不打折；结果中的 `candidates` 仍保留全部峰值用于审计展示：
+
+| 字段 | 说明 |
+|------|------|
+| `quotePrice` | 该价格峰的房源落点中位数（元/㎡） |
+| `finalPrice` | 单峰为按在售折扣计算后的价格；多峰为该峰中位数直接返回的价格（元/㎡） |
+| `count` | 落入该价格峰的房源数量 |
+| `frequency` | 该峰占全部有效房源的比例 |
+| `minPrice` / `maxPrice` | 该价格峰的落点范围 |
+
+多峰时服务会直接选择最低价格峰的中位数作为 `quoteAvg` 和 `finalPrice`，不再打折；`candidates` 仍保留全部价格峰供审计展示。客户端不应再次平均或强行合并候选。
 
 ## 结果回调
 
@@ -440,5 +455,7 @@
 | `DEAL_ONLY` | 差值 > 10%，或只有成交价 | 只取成交均价 |
 | `QUOTE_DISCOUNT` | 无成交数据 | 在售均价 × `noDealDiscount` |
 | `QUOTE_ONLY` | `algorithmMode="quote_only"` 且有在售数据 | 在售均价 × `quoteOnlyDiscount` |
+| `WEIGHTED_MEDIAN` | `algorithmMode="weighted_median"` 且存在明确主要价格落点 | 主要价格峰中位数 × `quoteOnlyDiscount` |
+| `WEIGHTED_MEDIAN_MULTI` | `algorithmMode="weighted_median"` 且存在多个频率接近的价格峰 | 取最低价格峰中位数直接返回，不打折；同时保留 `candidates` |
 | `NO_DATA` | 全平台无可用在售数据，或该城市所有平台都不支持 | 任务已完成，但无可用报价 |
 | `FAILED` | 无在售也无成交 | 无法计算 |

@@ -5,12 +5,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Iterable, Optional
+from typing import Awaitable, Callable, Iterable, Optional
 
 from app.core import config
 from app.core.algorithm import AlgorithmInput, evaluate_algorithm
-from app.core.models import InquiryRequest, InquiryResult, PlatformResult, PlatformSession
-from app.platforms.base import PlatformAdapter
+from app.core.models import (
+    InquiryRequest,
+    InquiryResult,
+    PlatformResult,
+    PlatformSession,
+    PriceCandidate,
+)
+from app.platforms.base import (
+    PlatformAdapter,
+    manual_verify_events_snapshot,
+    manual_verify_waiting_snapshot,
+    reset_manual_verify_events,
+)
 from app.core.price_utils import format_price, round_price
 
 log = logging.getLogger(__name__)
@@ -38,6 +49,18 @@ def build_inquiry_result(
             quote_only_discount=config.get_quote_only_discount(),
         ),
     )
+
+    rounded_candidates = [
+        PriceCandidate(
+            quote_price=round_price(candidate.quote_price),
+            final_price=round_price(candidate.final_price),
+            count=candidate.count,
+            frequency=round(candidate.frequency, 6),
+            min_price=round_price(candidate.min_price),
+            max_price=round_price(candidate.max_price),
+        )
+        for candidate in evaluation.candidates
+    ]
 
     if evaluation.quote_avg is None:
         # 全部平台都不支持该城市时，返回简洁提示
@@ -71,10 +94,16 @@ def build_inquiry_result(
         success=evaluation.decision.final_price is not None,
         final_price=round_price(evaluation.decision.final_price),
         branch=evaluation.decision.branch,
+        note=(
+            "\u68c0\u6d4b\u5230\u591a\u4e2a\u9ad8\u9891\u4ef7\u683c\u843d\u70b9\uff0c\u53d6\u6700\u4f4e\u4ef7\u683c\u5cf0\u4e2d\u4f4d\u6570\uff0c\u4e0d\u6253\u6298"
+            if evaluation.decision.branch == "WEIGHTED_MEDIAN_MULTI"
+            else None
+        ),
         quote_avg=round_price(evaluation.quote_avg),
         deal_avg=round_price(evaluation.deal_avg),
         platform=None,
         platform_results=platform_results,
+        candidates=rounded_candidates if len(rounded_candidates) > 1 else [],
     )
 
 
@@ -102,7 +131,9 @@ class RPAInquiryService:
         self,
         request: InquiryRequest,
         platform_codes: Optional[list[str]] = None,
+        before_aggregate: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> InquiryResult:
+        reset_manual_verify_events()
         log.info(
             "查询城市: %s, 小区: %s, 面积: %.1f㎡",
             request.city,
@@ -133,6 +164,30 @@ class RPAInquiryService:
         platform_results: list[PlatformResult] = await asyncio.gather(
             *[_collect_one(a) for a in adapters], return_exceptions=True
         )
+
+        waiting = manual_verify_waiting_snapshot()
+        if waiting:
+            # Normally gather cannot return until the platform waiters finish.
+            # Keep this guard explicit so a future background risk watcher cannot
+            # let aggregation run while manual verification is still pending.
+            log.warning("汇总前仍有平台等待人工风控处理: %s", ", ".join(waiting))
+            while waiting:
+                await asyncio.sleep(0.2)
+                waiting = manual_verify_waiting_snapshot()
+
+        if before_aggregate is not None:
+            await before_aggregate()
+
+        log.info("所有平台采集协程已完成，人工风控等待已清空，开始汇总")
+
+        risk_events = manual_verify_events_snapshot()
+        if risk_events:
+            summary = "; ".join(f"{context}={status}" for context, status in risk_events)
+            log.warning(
+                "[本次询价风控汇总] request_id=%s: %s",
+                request.request_id,
+                summary,
+            )
 
         inquiry_result = build_inquiry_result(platform_results, request.algorithm_mode)
         self._log_inquiry_result(inquiry_result)

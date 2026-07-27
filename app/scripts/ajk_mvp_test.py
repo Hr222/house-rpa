@@ -739,9 +739,9 @@ def cli():
     )
     parser.add_argument(
         "--algorithm-mode",
-        choices=("default", "quote_only"),
+        choices=("default", "quote_only", "weighted_median"),
         default="default",
-        help="算法模式：default=成交+在售，quote_only=仅在售均价打折。",
+        help="算法模式：default=成交+在售，quote_only=仅在售均价打折，weighted_median=加权落点中位数。",
     )
     args = parser.parse_args()
     uc.loop().run_until_complete(

@@ -128,6 +128,21 @@
 
 其中 `quoteOnlyDiscount` 可通过 API 动态调整（见 [11. API 约定](#11-api-约定)）。
 
+### 加权落点中位数算法（`weighted_median` 模式）
+
+通过 API 请求体 `"algorithmMode": "weighted_median"` 切换到此模式。
+
+代码位置：`app/core/algorithm.py:WeightedMedianAlgorithm`
+
+- 每个平台总权重相等，平台内每条有效在售价格按数量分配权重。
+- 寻找覆盖至少 60% 总权重的主要价格区间，并以区间加权中位数作为中心。
+- 主要区间内每条在售价格相对中心价的偏差不超过 10% 时，才认为存在明确落点；区间外价格作为偏离点排除。
+- 在主要区间内计算加权中位数作为 `quote_avg`。
+- 同一平台内的确定重复房源先去重后计票；跨平台重复房源暂不合并，避免在缺少全局房源 ID 时误删真实房源。
+- 多峰时选择最低价格峰的中位数直接返回，不乘在售折扣；单峰仍按原规则打折。
+- 最终单价 = `quote_avg × quoteOnlyDiscount`，branch 为 `WEIGHTED_MEDIAN`。
+- 50/50 双峰且无法形成明确主要区间时，不人为计算两个区间之间的中间价。
+
 ## 5. 架构分层
 
 整体分为 5 层：
@@ -234,9 +249,10 @@ jeethink-rpa/
 
 ### `app/core/algorithm.py`
 
-纯函数，无 IO，所有平台共用。两套算法可通过 `algorithmMode` 切换：
+纯函数，无 IO，所有平台共用。三套算法可通过 `algorithmMode` 切换：
 - `decide(quote_avg, deal_avg, diff_threshold, no_deal_discount)` — 4 条决策分支，默认算法
 - `decide_quote_only(quote_avg, quote_discount)` — 纯在售算法，仅在售均价打折输出
+- `aggregate_weighted_median_quote(...)` — 按平台等权寻找主要在售价格落点并计算加权中位数
 
 ### `app/api.py`
 
@@ -463,7 +479,7 @@ python test_inquiry.py
 | `city` | string | 是 | 城市名（如 深圳、广州、东莞） |
 | `communityName` | string | 是 | 小区名称 |
 | `area` | number | 是 | 精确面积（㎡） |
-| `algorithmMode` | string | 否 | 算法模式，`"default"`（成交+在售）或 `"quote_only"`（纯在售），默认 `"default"` |
+| `algorithmMode` | string | 否 | 算法模式，`"default"`（成交+在售）、`"quote_only"`（纯在售）或 `"weighted_median"`（加权落点中位数），默认 `"default"` |
 | `requestId` | string | 否 | 自定义任务 ID，不传则自动生成 |
 
 返回：

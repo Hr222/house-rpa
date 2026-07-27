@@ -12,6 +12,7 @@ from app.platforms.base import (
     listing_filter_summary,
     listing_no_data_reason,
     listing_no_data_status,
+    deduplicate_same_platform,
     prepare_listing_data,
 )
 
@@ -107,6 +108,56 @@ def test_prepare_listing_data_preserves_snapshots_without_house_ids():
 
     assert len(filtered) == 2
     assert quote_prices == [65000.0, 67000.0]
+
+
+def test_prepare_listing_data_deduplicates_complete_same_platform_rows():
+    snapshots = [
+        ListingSnapshot(
+            house_id="",
+            community_name="target",
+            title="same listing",
+            area=100.0,
+            layout="3 rooms 2 halls",
+            unit_price=50000.0,
+            total_price=500.0,
+        ),
+        ListingSnapshot(
+            house_id="",
+            community_name="target",
+            title="same listing",
+            area=100.0,
+            layout="3 rooms 2 halls",
+            unit_price=50000.0,
+            total_price=500.0,
+        ),
+        ListingSnapshot(
+            house_id="",
+            community_name="target",
+            title="different listing",
+            area=100.0,
+            layout="3 rooms 2 halls",
+            unit_price=50000.0,
+            total_price=500.0,
+        ),
+    ]
+
+    filtered, quote_prices = prepare_listing_data(snapshots, "target", 100.0)
+
+    assert len(filtered) == 2
+    assert quote_prices == [50000.0, 50000.0]
+
+
+def test_same_platform_dedup_prefers_stable_house_id():
+    snapshots = [
+        ListingSnapshot(house_id="house-1", community_name="target", unit_price=50000.0),
+        ListingSnapshot(house_id="house-1", community_name="target", unit_price=51000.0),
+        ListingSnapshot(house_id="house-2", community_name="target", unit_price=50000.0),
+    ]
+
+    deduplicated = deduplicate_same_platform(snapshots)
+
+    assert [item.house_id for item in deduplicated] == ["house-1", "house-2"]
+    assert [item.unit_price for item in deduplicated] == [50000.0, 50000.0]
 
 
 def test_filter_snapshots_by_area_uses_request_area_delta():

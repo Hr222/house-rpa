@@ -22,6 +22,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 # ─── 配置 ──────────────────────────────────────────────
 BASE_URL = "http://127.0.0.1:8000"
 INPUT_FILE = "C:/Users/Administrator/Desktop/房产评估汇总表_生成3.xlsx"
+ALGORITHM_MODE = "weighted_median"
 OUTPUT_DIR = Path(__file__).parent / "results"
 POLL_INTERVAL = 6       # 轮询间隔秒数（>5 避免连续 429）
 MAX_WAIT = 600          # 单任务软等待阈值；超过后只报警，不判失败，继续阻塞等待
@@ -39,6 +40,26 @@ def _safe_json(resp):
         return resp.json()
     except Exception:
         return {}
+
+
+def _format_price_candidates(candidates: list[dict]) -> str:
+    """Format multi-peak candidates for console and Excel output."""
+    parts = []
+    for candidate in candidates or []:
+        quote_price = candidate.get("quotePrice")
+        final_price = candidate.get("finalPrice")
+        count = candidate.get("count", 0)
+        frequency = candidate.get("frequency")
+        if quote_price is None:
+            continue
+        frequency_text = ""
+        if frequency is not None:
+            frequency_text = f", {float(frequency) * 100:.2f}%"
+        final_text = "N/A" if final_price is None else f"{float(final_price):,.2f}"
+        parts.append(
+            f"{float(quote_price):,.2f} -> {final_text} ({count} listings{frequency_text})"
+        )
+    return "; ".join(parts)
 
 
 def _http(method: str, path: str, **kwargs):
@@ -111,7 +132,7 @@ def _create_inquiry_task(city: str, community: str, area: float) -> str | None:
                     "city": city,
                     "communityName": community,
                     "area": area,
-                    "algorithmMode": "quote_only",
+                    "algorithmMode": ALGORITHM_MODE,
                 },
             )
         except requests.RequestException as exc:
@@ -160,6 +181,10 @@ def _poll_task_until_done(task_id: str) -> tuple[str, dict | None]:
             continue
 
         body = _safe_json(resp).get("data", {})
+        candidates = body.get("candidates") or []
+        if candidates:
+            print(f"  多峰候选完成 ({elapsed}s): {_format_price_candidates(candidates)}")
+            return "DONE", body
 
         if "finalPrice" in body and body["finalPrice"] is not None:
             print(f"  完成 ({elapsed}s)")
@@ -271,6 +296,26 @@ for i, item in enumerate(data):
     branch = final_data.get("branchCode", final_data.get("branch", ""))
     quote_avg = final_data.get("quoteAvg")
     deal_avg = final_data.get("dealAvg")
+    candidates = final_data.get("candidates") or []
+
+    if candidates:
+        candidate_text = _format_price_candidates(candidates)
+        branch_display = "多峰取最低价格峰中位数（不打折）"
+        print(f"  多峰结果 | {candidate_text}")
+        results.append({
+            "\u793e\u533a": community,
+            "\u9762\u79ef": area,
+            "\u8bc4\u4f30\u5355\u4ef7": eval_price,
+            "\u8be2\u4ef7\u5355\u4ef7": final_price,
+            "\u5dee\u8ddd%": round((final_price - eval_price) / eval_price * 100, 2)
+            if final_price and eval_price else None,
+            "\u5206\u652f": branch_display,
+            "\u5728\u552e\u5747\u4ef7": quote_avg,
+            "\u6210\u4ea4\u5747\u4ef7": deal_avg,
+            "\u72b6\u6001": "SUCCESS",
+            "\u591a\u5cf0\u5019\u9009": candidate_text,
+        })
+        continue
 
     if final_price is None:
         results.append({
@@ -285,7 +330,9 @@ for i, item in enumerate(data):
         diff_pct = round((final_price - eval_price) / eval_price * 100, 2)
 
     # 判断分支含义
-    if "QUOTE_ONLY" in str(branch):
+    if "WEIGHTED_MEDIAN" in str(branch):
+        branch_display = "加权落点中位数（主要价格区间内加权取中位数，折扣后）"
+    elif "QUOTE_ONLY" in str(branch):
         branch_display = "纯在售（折扣后）"
     elif "QUOTE" in str(branch):
         branch_display = "采用售均价"
@@ -330,6 +377,7 @@ thin_border = Border(
 )
 
 add_headers = ["询价单价", "差距比例%", "偏差评级", "是否采用售均价"]
+add_headers.append("多峰候选（中位数 -> 最终值 / 频率）")
 for j, h in enumerate(add_headers):
     cell = ws.cell(row=1, column=out_start_col + j, value=h)
     cell.font = header_font
@@ -376,7 +424,16 @@ for i, r in enumerate(results):
 
 # 列宽
 from openpyxl.utils import get_column_letter
-for j, width in enumerate([14, 14, 16, 28]):
+for i, result in enumerate(results):
+    candidate_cell = ws.cell(
+        row=i + 2,
+        column=out_start_col + 4,
+        value=result.get("\u591a\u5cf0\u5019\u9009", ""),
+    )
+    candidate_cell.border = thin_border
+    candidate_cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+
+for j, width in enumerate([14, 14, 16, 28, 52]):
     col_letter = get_column_letter(out_start_col + j)
     ws.column_dimensions[col_letter].width = width
 
