@@ -24,6 +24,9 @@ description: Analyze real-estate capture evaluation workbooks together with deta
 3. 优先使用项目现有解析逻辑：
    - `app/excel/export_operation_log_excel.py` 的 `read_log_lines()`、`parse_records()`、`finalize_record()`。
    - `app.core.algorithm.find_weighted_price_candidates()` 重建价格峰。
+   - 生成逐小区日志分析工作簿时，使用：
+     `python .agents/skills/analyze-captured-data/scripts/export_operation_log_excel.py <log> --evaluation-excel <evaluation.xlsx>`。
+     输出默认写入项目 `results/`，并以评估文件名生成 `<评估文件名>_分析.xlsx`。
 4. Excel 中多峰行如果显示 `N/A` 或仍显示旧版“打折后候选”，不得直接当作当前结果；必须从日志按当前算法重新计算。
 5. 按“城市 + 小区 + 请求面积”匹配 Excel 行和日志记录。相同小区出现多行时，使用面积和出现顺序消歧，不要用只按小区名称覆盖的字典。
 6. 同平台重复房源按项目既有去重规则处理；跨平台暂不擅自去重，也不要按平台重新赋权。算法分析使用所有平台汇集后的价格频率。
@@ -85,6 +88,13 @@ description: Analyze real-estate capture evaluation workbooks together with deta
 ```
 
 如果用户只要求“排除原始数据问题后还有多少”，以排除后的可评价样本为分母；同时注明排除了哪些记录及理由。
+
+## 分析文件输出
+
+- 评估文件为 `results/评估对比_20260724_173024.xlsx` 时，日志明细分析文件必须输出为 `results/评估对比_20260724_173024_分析.xlsx`。
+- Skill 自带入口脚本为 `.agents/skills/analyze-captured-data/scripts/export_operation_log_excel.py`；它调用项目中的唯一实现 `app/excel/export_operation_log_excel.py`，避免 Skill 与项目代码出现两份实现。
+- 不要再使用 `export_log_info.xlsx` 或把分析文件输出到日志目录。
+- `-o/--output` 仅用于用户明确指定其他输出路径时覆盖默认路径。
 
 ## 输出表格要求
 

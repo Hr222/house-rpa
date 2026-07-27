@@ -887,18 +887,34 @@ def build_workbook(records: list[InquiryRecord]) -> Workbook:
     return workbook
 
 
-def derive_output_path(log_path: Path, output_path: Optional[Path]) -> Path:
+def derive_output_path(
+    log_path: Path,
+    output_path: Optional[Path],
+    evaluation_excel_path: Optional[Path] = None,
+) -> Path:
+    """Derive the paired analysis workbook path under the project results directory."""
     if output_path is not None:
         return output_path
-    return log_path.with_name("export_log_info.xlsx")
+    project_root = Path(__file__).resolve().parents[2]
+    results_dir = project_root / "results"
+    source_stem = (
+        evaluation_excel_path.stem
+        if evaluation_excel_path is not None
+        else log_path.stem
+    )
+    if not source_stem.endswith("_分析"):
+        source_stem = f"{source_stem}_分析"
+    return results_dir / f"{source_stem}.xlsx"
 
 
 def save_workbook(workbook: Workbook, path: Path) -> Path:
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         workbook.save(path)
         return path
     except PermissionError:
         fallback = next_available_path(path)
+        fallback.parent.mkdir(parents=True, exist_ok=True)
         workbook.save(fallback)
         return fallback
 
@@ -906,18 +922,30 @@ def save_workbook(workbook: Workbook, path: Path) -> Path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log_path", type=Path, help="Path to an inquiry log file")
+    parser.add_argument(
+        "-e",
+        "--evaluation-excel",
+        type=Path,
+        help="Paired evaluation workbook; its stem is used for the XXX_分析.xlsx output name",
+    )
     parser.add_argument("-o", "--output", type=Path, help="Output xlsx path")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.evaluation_excel is not None and not args.evaluation_excel.is_file():
+        raise SystemExit(f"Evaluation workbook not found: {args.evaluation_excel}")
     lines = read_log_lines(args.log_path)
     records = parse_records(lines)
     if not records:
         raise SystemExit("No inquiry records parsed from log.")
     workbook = build_workbook(records)
-    output_path = derive_output_path(args.log_path, args.output)
+    output_path = derive_output_path(
+        args.log_path,
+        args.output,
+        args.evaluation_excel,
+    )
     actual_path = save_workbook(workbook, output_path)
     complete_count = sum(
         1

@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """Tests for historical operation-log analysis."""
 
+from pathlib import Path
+
 from app.excel.export_operation_log_excel import (
     InquiryRecord,
     ListingRow,
+    derive_output_path,
     finalize_record,
 )
 
@@ -48,3 +51,21 @@ def test_log_analysis_multi_peak_uses_lowest_median_without_discount():
     assert record.quote_avg == 100000.0
     assert record.final_price == 100000.0
     assert record.branch_code == "WEIGHTED_MEDIAN_MULTI"
+
+
+def test_analysis_output_uses_evaluation_workbook_stem_under_results():
+    output = derive_output_path(
+        Path("logs/20260724-info.log"),
+        None,
+        Path("results/评估对比_20260724_173024.xlsx"),
+    )
+
+    assert output.name == "评估对比_20260724_173024_分析.xlsx"
+    assert output.parent.name == "results"
+
+
+def test_analysis_output_falls_back_to_log_stem_under_results():
+    output = derive_output_path(Path("logs/20260724-info.log"), None)
+
+    assert output.name == "20260724-info_分析.xlsx"
+    assert output.parent.name == "results"
