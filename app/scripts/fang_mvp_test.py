@@ -589,7 +589,6 @@ def print_summary(
     listing_snapshots: list,
     filtered_deals: list,
     quote_avg: Optional[float],
-    algorithm_mode: str,
 ):
     print_mvp_result(
         platform="房天下",
@@ -627,7 +626,6 @@ def print_summary(
 async def main(
     manual_login: bool = False,
     debug: bool = False,
-    algorithm_mode: str = "default",
 ):
     if debug:
         set_debug_mode(True)
@@ -917,14 +915,9 @@ async def main(
             # ---- 算最终价：通过统一算法策略评估 ----
             if quote_avg is not None or deal_avg is not None:
                 evaluation = evaluate_algorithm(
-                    algorithm_mode=algorithm_mode,
                     inputs=AlgorithmInput(
                         quote_price_lists=[quote_prices],
-                        community_avg_prices=[None],
-                        deal_price_lists=[deal_prices],
-                        diff_threshold=config.DEAL_DIFF_THRESHOLD,
-                        no_deal_discount=config.get_no_deal_discount(),
-                        quote_only_discount=config.get_quote_only_discount(),
+                        weighted_median_discount=config.get_weighted_median_discount(),
                     ),
                 )
                 quote_avg = evaluation.quote_avg
@@ -1007,7 +1000,6 @@ async def main(
             listing_snapshots=listing_snapshots,
             filtered_deals=filtered_deals,
             quote_avg=quote_avg,
-            algorithm_mode=algorithm_mode,
         )
 
         await wait_for_manual_close()
@@ -1035,18 +1027,11 @@ def cli():
         action="store_true",
         help="开启 RPA 调试模式，导出关键页面 HTML 到 excel 目录（兼容旧参数 --excel）。",
     )
-    parser.add_argument(
-        "--algorithm-mode",
-        choices=("default", "quote_only", "weighted_median"),
-        default="default",
-        help="算法模式：default=成交+在售，quote_only=仅在售均价打折，weighted_median=加权落点中位数。",
-    )
     args = parser.parse_args()
     uc.loop().run_until_complete(
         main(
             manual_login=args.manual_login,
             debug=args.debug,
-            algorithm_mode=args.algorithm_mode,
         )
     )
 

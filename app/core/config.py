@@ -21,6 +21,22 @@ def _env_flag(name: str, default: str = "0") -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _env_positive_float(name: str, default: float) -> float:
+    """Read a positive float from the environment, falling back on errors."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        log.warning("环境配置 %s=%r 不是有效数字，使用默认值 %.2f", name, value, default)
+        return default
+    if parsed <= 0:
+        log.warning("环境配置 %s=%r 必须大于0，使用默认值 %.2f", name, value, default)
+        return default
+    return parsed
+
+
 # ===== 调试 =====
 DEBUG_MODE = _env_flag("RPA_DEBUG", "0")
 
@@ -61,23 +77,18 @@ PLATFORM_KEEPALIVE_INTERVAL = 120  # 完整保活间隔（秒）
 HEARTBEAT_INTERVAL = 20  # WebSocket 心跳间隔（秒）
 PAGE_LINGER_SECONDS = 3.5  # 每页翻页后模拟停留秒数
 
-# ===== 算法（需求 §3.6） =====
-# 成交价分歧阈值：|在售均价 - 成交均价| / 成交均价
-#   ≤ DEAL_DIFF_THRESHOLD → 取两者中较低值 (TAKE_LOWER)
-#   > DEAL_DIFF_THRESHOLD → 只取成交均价 (DEAL_ONLY)
-DEAL_DIFF_THRESHOLD = 0.10
-
-# ---- 无成交折扣（弱持久化，重启不丢失）----
+# ===== 面积弱参考 =====
+# 严格面积范围无法形成有效价格峰时，最多向请求面积两侧扩展的容差。
+WEAK_AREA_MAX_TOLERANCE = _env_positive_float(
+    "RPA_WEAK_AREA_MAX_TOLERANCE",
+    20.0,
+)
 
 _RUNTIME_FILE = PERSIST_DIR / "runtime.json"
 
-_NO_DEAL_DISCOUNT_DEFAULT = 0.9
-_no_deal_discount: float = _NO_DEAL_DISCOUNT_DEFAULT
-_no_deal_discount_loaded = False
-
-_QUOTE_ONLY_DISCOUNT_DEFAULT = 0.9
-_quote_only_discount: float = _QUOTE_ONLY_DISCOUNT_DEFAULT
-_quote_only_discount_loaded = False
+_WEIGHTED_MEDIAN_DISCOUNT_DEFAULT = 0.9
+_weighted_median_discount: float = _WEIGHTED_MEDIAN_DISCOUNT_DEFAULT
+_weighted_median_discount_loaded = False
 
 
 def _load_runtime_config() -> dict:
@@ -103,65 +114,22 @@ def _save_runtime_config(data: dict) -> None:
 
 
 def _ensure_loaded() -> None:
-    global _no_deal_discount, _no_deal_discount_loaded
-    global _quote_only_discount, _quote_only_discount_loaded
-    if _no_deal_discount_loaded and _quote_only_discount_loaded:
+    global _weighted_median_discount, _weighted_median_discount_loaded
+    if _weighted_median_discount_loaded:
         return
     data = _load_runtime_config()
-    if not _no_deal_discount_loaded:
-        if "noDealDiscount" in data:
-            try:
-                value = float(data["noDealDiscount"])
-                if 0 < value < 1:
-                    _no_deal_discount = value
-                    log.info("从持久化恢复 noDealDiscount=%.4f", _no_deal_discount)
-                else:
-                    log.warning("持久化的 noDealDiscount=%.4f 不合法，使用默认值 0.9", value)
-            except (TypeError, ValueError):
-                log.warning("持久化的 noDealDiscount 解析失败，使用默认值 0.9")
-        _no_deal_discount_loaded = True
-    if not _quote_only_discount_loaded:
-        if "quoteOnlyDiscount" in data:
-            try:
-                value = float(data["quoteOnlyDiscount"])
-                if 0 < value < 1:
-                    _quote_only_discount = value
-                    log.info("从持久化恢复 quoteOnlyDiscount=%.4f", _quote_only_discount)
-                else:
-                    log.warning("持久化的 quoteOnlyDiscount=%.4f 不合法，使用默认值 0.9", value)
-            except (TypeError, ValueError):
-                log.warning("持久化的 quoteOnlyDiscount 解析失败，使用默认值 0.9")
-        _quote_only_discount_loaded = True
-
-
-def get_no_deal_discount() -> float:
-    """返回当前生效的无成交折扣。"""
-    _ensure_loaded()
-    return _no_deal_discount
-
-
-def set_no_deal_discount(value: float) -> float:
-    """更新无成交折扣，同时弱持久化到文件。
-
-    Args:
-        value: 折扣值，需在 (0, 1) 区间。
-
-    Returns:
-        更新后的值。
-
-    Raises:
-        ValueError: 值不在合法区间。
-    """
-    if not (0 < value < 1):
-        raise ValueError(f"noDealDiscount 必须在 (0, 1) 区间，收到 {value}")
-
-    global _no_deal_discount, _no_deal_discount_loaded
-    _ensure_loaded()
-    _no_deal_discount = value
-    _no_deal_discount_loaded = True
-    _merge_and_save(noDealDiscount=value)
-    log.info("noDealDiscount 已更新为 %.4f", value)
-    return _no_deal_discount
+    stored_value = data.get("weightedMedianDiscount")
+    if stored_value is not None:
+        try:
+            value = float(stored_value)
+            if 0 < value < 1:
+                _weighted_median_discount = value
+                log.info("从持久化恢复 weightedMedianDiscount=%.4f", _weighted_median_discount)
+            else:
+                log.warning("持久化的 weightedMedianDiscount=%.4f 不合法，使用默认值 0.9", value)
+        except (TypeError, ValueError):
+            log.warning("持久化的 weightedMedianDiscount 解析失败，使用默认值 0.9")
+    _weighted_median_discount_loaded = True
 
 
 def _merge_and_save(**fields) -> None:
@@ -172,42 +140,35 @@ def _merge_and_save(**fields) -> None:
     _save_runtime_config(existing)
 
 
-def get_quote_only_discount() -> float:
-    """返回纯在售算法的折扣系数。"""
+def get_weighted_median_discount() -> float:
+    """返回加权落点中位数算法的折扣系数。"""
     _ensure_loaded()
-    return _quote_only_discount
+    return _weighted_median_discount
 
 
-def set_quote_only_discount(value: float) -> float:
-    """更新纯在售折扣系数，同时弱持久化到文件。
+def set_weighted_median_discount(value: float) -> float:
+    """更新加权落点中位数折扣系数，同时弱持久化到文件。
 
     Args:
         value: 折扣值，需在 (0, 1) 区间。
     """
     if not (0 < value < 1):
-        raise ValueError(f"quoteOnlyDiscount 必须在 (0, 1) 区间，收到 {value}")
+        raise ValueError(f"weightedMedianDiscount 必须在 (0, 1) 区间，收到 {value}")
 
-    global _quote_only_discount, _quote_only_discount_loaded
+    global _weighted_median_discount, _weighted_median_discount_loaded
     _ensure_loaded()
-    _quote_only_discount = value
-    _quote_only_discount_loaded = True
-    _merge_and_save(quoteOnlyDiscount=value)
-    log.info("quoteOnlyDiscount 已更新为 %.4f", value)
-    return _quote_only_discount
+    _weighted_median_discount = value
+    _weighted_median_discount_loaded = True
+    _merge_and_save(weightedMedianDiscount=value)
+    log.info("weightedMedianDiscount 已更新为 %.4f", value)
+    return _weighted_median_discount
 
 
-def is_quote_only_discount_default() -> bool:
-    """当前 quoteOnlyDiscount 是否还是出厂默认值。"""
+def is_weighted_median_discount_default() -> bool:
+    """当前 weightedMedianDiscount 是否还是出厂默认值。"""
     _ensure_loaded()
-    return _quote_only_discount == _QUOTE_ONLY_DISCOUNT_DEFAULT
+    return _weighted_median_discount == _WEIGHTED_MEDIAN_DISCOUNT_DEFAULT
 
 
-def is_no_deal_discount_default() -> bool:
-    """当前值是否还是出厂默认值（未被人为修改过）。"""
-    _ensure_loaded()
-    return _no_deal_discount == _NO_DEAL_DISCOUNT_DEFAULT
-
-
-# 兼容旧代码：模块导入时的别名（但不推荐再用，应走 getter）
-NO_DEAL_DISCOUNT = _NO_DEAL_DISCOUNT_DEFAULT
-QUOTE_ONLY_DISCOUNT = _QUOTE_ONLY_DISCOUNT_DEFAULT
+# 当前算法使用的折扣系数。
+WEIGHTED_MEDIAN_DISCOUNT = _WEIGHTED_MEDIAN_DISCOUNT_DEFAULT

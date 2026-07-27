@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+"""价格格式化和舍入工具。"""
+
 from __future__ import annotations
 
 from typing import Optional

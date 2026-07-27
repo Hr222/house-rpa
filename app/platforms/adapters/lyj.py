@@ -5,7 +5,7 @@
 - 面积筛选：自定义输入框填值（贝壳是点预设档位 a1-a7）
 - 搜索走 URL 参数：/esf/?c={小区名}
 - 无成交记录：乐有家不对外展示成交，业务上把小区均价（社区信息卡）
-  顶替 deal_prices，让 decide() 正常按"在售均价 vs 成交均价"对比出最终价。
+  顶替 deal_prices，保留平台无成交记录时的业务数据兼容字段。
   代码注释里已标明这一特殊处理。
 - 不点详情：小区均价在结果页社区信息卡就有（平台差异，非删流程）。
 - 分页格式：/esf/n{page}/?c={community}&ae={max}&as={min}
@@ -21,6 +21,7 @@ import time
 from typing import Optional
 
 from app.core import config
+from app.core.status import PlatformResultStatus
 from app.utils.debug_utils import dump_html
 from app.core.models import PlatformResult
 from app.parsers import lyj as parsers
@@ -36,7 +37,7 @@ from app.platforms.base import (
     listing_filter_summary,
     listing_no_data_reason,
     listing_no_data_status,
-    prepare_listing_data,
+    prepare_listing_data_with_reference,
     wait_and_reload_after_block,
     check_empty_listing_page,
 )
@@ -381,7 +382,7 @@ async def collect(
         log.exception("乐有家采集异常")
         return PlatformResult(
             name="乐有家",
-            status="ERROR",
+            status=PlatformResultStatus.ERROR,
             reason=str(exc),
             request_id=request_id,
             elapsed_seconds=round(time.time() - start, 2),
@@ -414,13 +415,13 @@ async def _do_collect(
     # 3. 判风控/登录/无数据
     if _is_login_url(keyword_url):
         return short_circuit_result(
-            "乐有家", "LOGIN_EXPIRED", "搜索后进入登录页",
+            "乐有家", PlatformResultStatus.LOGIN_EXPIRED, "搜索后进入登录页",
             request_id, started_at,
         )
     if "很抱歉，没有找到" in keyword_html:
         log.info("乐有家无匹配小区: %s，返回 NO_DATA", community_name)
         return short_circuit_result(
-            "乐有家", "NO_DATA", f"乐有家无{community_name}在售记录和成交记录",
+            "乐有家", PlatformResultStatus.NO_DATA, f"乐有家无{community_name}在售记录和成交记录",
             request_id, started_at,
         )
     # 校验搜索结果是否真的属于目标小区（解析 listing 的社区名，不用 raw HTML 切片）
@@ -428,7 +429,7 @@ async def _do_collect(
     if not has_matching_community_snapshots(keyword_snaps, community_name):
         log.info("乐有家未匹配到小区: %s，返回 NO_DATA", community_name)
         return short_circuit_result(
-            "乐有家", "NO_DATA", f"关键词搜索未匹配到小区: {community_name}",
+            "乐有家", PlatformResultStatus.NO_DATA, f"关键词搜索未匹配到小区: {community_name}",
             request_id, started_at,
         )
 
@@ -444,7 +445,7 @@ async def _do_collect(
 
     if area_range is None:
         return short_circuit_result(
-            "乐有家", "NO_DATA", "该面积区间无在售房源（档位已禁用）",
+            "乐有家", PlatformResultStatus.NO_DATA, "该面积区间无在售房源（档位已禁用）",
             request_id, started_at,
         )
 
@@ -457,7 +458,7 @@ async def _do_collect(
 
     # 返回前防御校验，确保在售价格与房源明细来自同一批目标小区数据
     collected_snapshots = listing_snapshots
-    listing_snapshots, quote_prices = prepare_listing_data(
+    listing_snapshots, quote_prices, reference = prepare_listing_data_with_reference(
         collected_snapshots,
         community_name,
         area,
@@ -474,14 +475,14 @@ async def _do_collect(
         )
     if not quote_prices:
         return short_circuit_result(
-            "乐有家", "NO_DATA", "面积结果页未抓到在售单价",
+            "乐有家", PlatformResultStatus.NO_DATA, "面积结果页未抓到在售单价",
             request_id, started_at,
         )
 
     # 6. 小区均价（乐有家无成交记录，挂牌均价顶替 deal_prices）
     listing_price = parsers.parse_community_avg_price(area_html)
     # 乐有家特殊：无成交记录，把小区均价作为 deal_prices 唯一元素，
-    # 让 decide() 正常按"在售均价 vs 成交均价"对比出最终价。
+    # 保留平台无成交记录时的业务数据兼容字段，由统一加权落点算法取值。
     deal_prices = [listing_price] if listing_price is not None else []
 
     quote_avg = sum(quote_prices) / len(quote_prices)
@@ -493,7 +494,7 @@ async def _do_collect(
 
     return PlatformResult(
         name="乐有家",
-        status="SUCCESS",
+            status=PlatformResultStatus.SUCCESS,
         community_avg_price=None,
         quote_prices=quote_prices,
         deal_prices=deal_prices,
@@ -502,4 +503,5 @@ async def _do_collect(
         detail_url=None,
         elapsed_seconds=round(time.time() - started_at, 2),
         listing_snapshots=listing_snapshots,
+        **reference,
     )

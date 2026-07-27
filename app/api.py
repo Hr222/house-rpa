@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.core import config
 from app.core.models import InquiryRequest
+from app.core.status import TaskStatus
 from app.runtime import RPARuntime
 
 
@@ -20,23 +21,14 @@ class InquiryCreatePayload(BaseModel):
     community_name: str = Field(..., min_length=1, alias="communityName")
     area: float = Field(..., gt=0, alias="area")
     request_id: Optional[str] = Field(default=None, alias="requestId")
-    algorithm_mode: str = Field(default="default", alias="algorithmMode")
 
     model_config = {
         "populate_by_name": True,
     }
 
 
-class NoDealDiscountPayload(BaseModel):
-    no_deal_discount: float = Field(..., gt=0, lt=1, alias="noDealDiscount")
-
-    model_config = {
-        "populate_by_name": True,
-    }
-
-
-class QuoteOnlyDiscountPayload(BaseModel):
-    quote_only_discount: float = Field(..., gt=0, lt=1, alias="quoteOnlyDiscount")
+class WeightedMedianDiscountPayload(BaseModel):
+    weighted_median_discount: float = Field(..., gt=0, lt=1, alias="weightedMedianDiscount")
 
     model_config = {
         "populate_by_name": True,
@@ -98,7 +90,6 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
             area=payload.area,
             city=payload.city,
             request_id=payload.request_id,
-            algorithm_mode=payload.algorithm_mode,
         )
         try:
             task = await current_runtime.enqueue_inquiry(request)
@@ -140,7 +131,7 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
             # 不存在的任务不计入限流
             raise HTTPException(status_code=404, detail="未找到对应任务")
         current_runtime.register_get(task_id)
-        if task["statusCode"] == "COMPLETED" and task["result"] is not None:
+        if task["statusCode"] == TaskStatus.COMPLETED and task["result"] is not None:
             result = task["result"]
             # 补状态字段：全平台 NO_DATA 时三个价格都是 None，
             # 若只返回 data 客户端无法判断"已完成但无数据"会死等。
@@ -148,7 +139,7 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
                 **result["data"],                   # quoteAvg/dealAvg/finalPrice（可能全 None）
                 "success": result["success"],       # 无数据时为 False
                 "statusCode": task["statusCode"],   # COMPLETED
-                "branchCode": result["branchCode"], # NO_DATA / TAKE_LOWER / ...
+                "branchCode": result["branchCode"], # NO_DATA / WEIGHTED_MEDIAN / ...
                 "branch": result["branch"],
             }
             if result.get("note"):                  # 各平台 NO_DATA 原因汇总
@@ -161,50 +152,27 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
             }
         return {"code": "OK", "message": "查询成功", "data": data}
 
-    @app.get("/admin/algorithm/no-deal-discount")
-    async def get_no_deal_discount():
+    @app.get("/admin/algorithm/weighted-median-discount")
+    async def get_weighted_median_discount():
         return {
             "code": "OK",
             "message": "查询成功",
             "data": {
-                "noDealDiscount": config.get_no_deal_discount(),
-                "isDefault": config.is_no_deal_discount_default(),
+                "weightedMedianDiscount": config.get_weighted_median_discount(),
+                "isDefault": config.is_weighted_median_discount_default(),
             },
         }
 
-    @app.put("/admin/algorithm/no-deal-discount")
-    async def update_no_deal_discount(payload: NoDealDiscountPayload):
+    @app.put("/admin/algorithm/weighted-median-discount")
+    async def update_weighted_median_discount(payload: WeightedMedianDiscountPayload):
         try:
-            new_value = config.set_no_deal_discount(payload.no_deal_discount)
+            new_value = config.set_weighted_median_discount(payload.weighted_median_discount)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return {
             "code": "OK",
             "message": "参数已更新",
-            "data": {"noDealDiscount": new_value},
-        }
-
-    @app.get("/admin/algorithm/quote-only-discount")
-    async def get_quote_only_discount():
-        return {
-            "code": "OK",
-            "message": "查询成功",
-            "data": {
-                "quoteOnlyDiscount": config.get_quote_only_discount(),
-                "isDefault": config.is_quote_only_discount_default(),
-            },
-        }
-
-    @app.put("/admin/algorithm/quote-only-discount")
-    async def update_quote_only_discount(payload: QuoteOnlyDiscountPayload):
-        try:
-            new_value = config.set_quote_only_discount(payload.quote_only_discount)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        return {
-            "code": "OK",
-            "message": "参数已更新",
-            "data": {"quoteOnlyDiscount": new_value},
+            "data": {"weightedMedianDiscount": new_value},
         }
 
     return app

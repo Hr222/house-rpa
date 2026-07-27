@@ -29,6 +29,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from app.core import config
+from app.core.status import PlatformResultStatus
 from app.utils.debug_utils import dump_html
 from app.core.models import ListingSnapshot, PlatformResult
 from app.parsers import lj as parsers
@@ -44,7 +45,7 @@ from app.platforms.base import (
     listing_filter_summary,
     listing_no_data_reason,
     listing_no_data_status,
-    prepare_listing_data,
+    prepare_listing_data_with_reference,
     check_empty_listing_page,
 )
 from app.platforms.lj_constants import START_URL
@@ -572,7 +573,7 @@ async def collect(
         log.exception("采集异常")
         return PlatformResult(
             name="链家",
-            status="ERROR",
+            status=PlatformResultStatus.ERROR,
             reason=str(exc),
             request_id=request_id,
             elapsed_seconds=round(time.time() - start, 2),
@@ -610,7 +611,7 @@ async def _do_collect(
     # 3.5 无数据短路：m-noresult（链家和贝壳共用）或 sellListContent 缺失
     if "m-noresult" in keyword_html:
         return short_circuit_result(
-            "链家", "NO_DATA", "关键词搜索无在售房源",
+            "链家", PlatformResultStatus.NO_DATA, "关键词搜索无在售房源",
             request_id, started_at,
         )
     # 校验搜索结果是否真的属于目标小区（解析 listing 的社区名，不用 raw HTML 切片）
@@ -621,7 +622,7 @@ async def _do_collect(
     )
     if not search_ok:
         return short_circuit_result(
-            "链家", "NO_DATA",
+            "链家", PlatformResultStatus.NO_DATA,
             "搜索未返回有效房源" if "sellListContent" not in keyword_html else f"未匹配到: {community_name}",
             request_id, started_at,
         )
@@ -638,7 +639,7 @@ async def _do_collect(
 
     if area_range is None:
         return short_circuit_result(
-            "链家", "NO_DATA", "该面积区间无在售房源（档位已禁用）",
+            "链家", PlatformResultStatus.NO_DATA, "该面积区间无在售房源（档位已禁用）",
             request_id, started_at,
         )
 
@@ -651,7 +652,9 @@ async def _do_collect(
     log.info("在售分页完成: 每页 %s", page_counts)
 
     # 6. 返回前防御校验，确保在售价格与房源明细来自同一批目标小区数据
-    snapshots, quote_prices = prepare_listing_data(collected_snapshots, community_name, area)
+    snapshots, quote_prices, reference = prepare_listing_data_with_reference(
+        collected_snapshots, community_name, area
+    )
     log.info(
         "链家在售房源最终校验: %s",
         listing_filter_summary(collected_snapshots, community_name, area),
@@ -664,7 +667,7 @@ async def _do_collect(
         )
     if not quote_prices:
         return short_circuit_result(
-            "链家", "NO_DATA", "面积结果页未抓到在售单价",
+            "链家", PlatformResultStatus.NO_DATA, "面积结果页未抓到在售单价",
             request_id, started_at,
         )
 
@@ -762,7 +765,7 @@ async def _do_collect(
 
     return PlatformResult(
         name="链家",
-        status="SUCCESS",
+        status=PlatformResultStatus.SUCCESS,
         community_avg_price=None,
         quote_prices=quote_prices,
         deal_prices=deal_prices,
@@ -772,4 +775,5 @@ async def _do_collect(
         detail_url=None,
         elapsed_seconds=_elapsed(),
         listing_snapshots=snapshots,
+        **reference,
     )

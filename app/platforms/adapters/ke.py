@@ -11,6 +11,7 @@ import time
 from typing import Optional
 
 from app.core import config
+from app.core.status import PlatformResultStatus
 from app.parsers import ke as parsers
 from app.utils.debug_utils import dump_html
 from app.core.models import ListingSnapshot, PlatformResult
@@ -26,7 +27,7 @@ from app.platforms.base import (
     listing_filter_summary,
     listing_no_data_reason,
     listing_no_data_status,
-    prepare_listing_data,
+    prepare_listing_data_with_reference,
     check_empty_listing_page,
 )
 from app.platforms.city_map import get_start_url
@@ -409,128 +410,6 @@ async def _click_detail_link(browser, page, expected_url: Optional[str]):
     return True, None
 
 
-async def _apply_area_filter(page, area_min, area_max):
-    """贝壳面积筛选：智能展开 → 面积区"更多及自定义" → 填值 → 确定。
-
-    首页：筛选区已展开；搜索结果页：需先点"更多选项"全局展开。
-    """
-    # 1. 智能全局展开
-    try:
-        more_btn = await page.select("div.more.btn-more", timeout=3)
-    except Exception:
-        more_btn = None
-    if more_btn:
-        try:
-            btn_text = await more_btn.apply("(el) => el.textContent.trim()")
-        except Exception:
-            btn_text = ""
-        if "更多选项" in (btn_text or ""):
-            await _human_click(page, more_btn, "global btn-more")
-            await page
-            await asyncio.sleep(1.5)
-
-    # 2. 在所有 dl.hide.hasmore 中找到 dt[title*="建筑面积"] 的那个
-    try:
-        containers = await page.select_all("dl.hide.hasmore", timeout=3)
-    except Exception:
-        containers = []
-
-    area_container = None
-    for c in containers:
-        try:
-            tit = await c.apply(
-                "(el) => { const t = el.querySelector('dt'); return t ? t.title || '' : ''; }"
-            )
-        except Exception:
-            tit = ""
-        if "建筑面积" in tit:
-            area_container = c
-            break
-
-    if area_container is None:
-        raise RuntimeError("未找到建筑面积筛选区")
-
-    try:
-        btns = await area_container.query_selector_all("span.btn-showmore")
-    except Exception:
-        btns = []
-    if btns:
-        await _human_click(page, btns[0], "btn-showmore")
-        await page
-        await asyncio.sleep(1.5)
-
-    try:
-        custom = await area_container.query_selector_all("span.customFilter[data-role='area']")
-    except Exception:
-        custom = []
-    if not custom:
-        raise RuntimeError("未找到面积自定义输入区")
-
-    min_el = max_el = None
-    try:
-        m = await custom[0].query_selector_all("input[role='minValue']")
-        min_el = m[0] if m else None
-    except Exception:
-        min_el = None
-    try:
-        m = await custom[0].query_selector_all("input[role='maxValue']")
-        max_el = m[0] if m else None
-    except Exception:
-        max_el = None
-    if min_el is None or max_el is None:
-        raise RuntimeError("未找到面积自定义输入框")
-
-    await _human_click(page, min_el, "area min input")
-    try:
-        await min_el.clear_input()
-    except Exception:
-        pass
-    await asyncio.sleep(0.3)
-    await min_el.send_keys(str(int(area_min)))
-    await page
-    await asyncio.sleep(0.5)
-
-    await _human_click(page, max_el, "area max input")
-    try:
-        await max_el.clear_input()
-    except Exception:
-        pass
-    await asyncio.sleep(0.3)
-    await max_el.send_keys(str(int(area_max)))
-    await page
-    await asyncio.sleep(0.8)
-
-    try:
-        btns = await custom[0].query_selector_all("button.btn-range")
-    except Exception:
-        btns = []
-    if not btns:
-        raise RuntimeError("未找到面积确定按钮")
-
-    try:
-        await _human_click(page, btns[0], "area confirm")
-    except Exception:
-        pass
-    else:
-        await page
-        await asyncio.sleep(3)
-        return
-
-    # JS 兜底
-    await page.evaluate(
-        """
-        (() => {
-            const btn = document.querySelector('.customFilter[data-role=\"area\"] .btn-range');
-            if (btn) { btn.classList.remove('hide'); btn.click(); return true; }
-            return false;
-        })()
-        """,
-        return_by_value=True,
-    )
-    await page
-    await asyncio.sleep(3)
-
-
 async def _search_community(page, community_name: str) -> tuple[str, str, Optional[str]]:
     inp = await _get_search_input(page)
     if not await _human_click(page, inp, "search input"):
@@ -579,7 +458,7 @@ async def collect(
         log.exception("采集异常")
         return PlatformResult(
             name="贝壳",
-            status="ERROR",
+            status=PlatformResultStatus.ERROR,
             reason=str(exc),
             request_id=request_id,
             elapsed_seconds=round(time.time() - start, 2),
@@ -612,7 +491,11 @@ async def _do_collect(
     await _dump(main_page, "ke_keyword_result")
 
     if _is_login_url(keyword_url) or _is_login_html(keyword_html):
-        status = "WAIT_MANUAL_VERIFY" if _is_manual_verify_html(keyword_html) else "LOGIN_EXPIRED"
+        status = (
+            PlatformResultStatus.WAIT_MANUAL_VERIFY
+            if _is_manual_verify_html(keyword_html)
+            else PlatformResultStatus.LOGIN_EXPIRED
+        )
         return short_circuit_result(
             "贝壳", status, "搜索后进入登录或验证页面",
             request_id, started_at, detail_url=detail_url,
@@ -620,14 +503,14 @@ async def _do_collect(
 
     if not detail_url:
         return short_circuit_result(
-            "贝壳", "NO_DATA", "关键词结果页未找到小区详情链接",
+            "贝壳", PlatformResultStatus.NO_DATA, "关键词结果页未找到小区详情链接",
             request_id, started_at,
         )
 
     # 无数据短路：贝壳"暂无房源"页面（仍有小区详情链接，需靠 m-noresult 识别）
     if "m-noresult" in keyword_html:
         return short_circuit_result(
-            "贝壳", "NO_DATA", "小区暂无在售房源",
+            "贝壳", PlatformResultStatus.NO_DATA, "小区暂无在售房源",
             request_id, started_at, detail_url=detail_url,
         )
 
@@ -635,7 +518,7 @@ async def _do_collect(
     keyword_snaps = parsers.parse_listing_snapshots(keyword_html)
     if not has_matching_community_snapshots(keyword_snaps, community_name):
         return short_circuit_result(
-            "贝壳", "NO_DATA", f"关键词搜索未匹配到小区: {community_name}",
+            "贝壳", PlatformResultStatus.NO_DATA, f"关键词搜索未匹配到小区: {community_name}",
             request_id, started_at, detail_url=detail_url,
         )
 
@@ -643,7 +526,7 @@ async def _do_collect(
     area_range = await click_area_segment(main_page, area, parsers.parse_area_segments, "ke")
     if area_range is None:
         return short_circuit_result(
-            "贝壳", "NO_DATA", "该面积区间无在售房源（档位已禁用）",
+            "贝壳", PlatformResultStatus.NO_DATA, "该面积区间无在售房源（档位已禁用）",
             request_id, started_at, detail_url=detail_url,
         )
     area_min, area_max = area_range
@@ -655,7 +538,11 @@ async def _do_collect(
     filtered_html = await wait_and_reload_after_block(main_page, detect_block, "面积筛选后")
     filtered_url = main_page.target.url or ""
     if _is_login_url(filtered_url) or _is_login_html(filtered_html):
-        status = "WAIT_MANUAL_VERIFY" if _is_manual_verify_html(filtered_html) else "LOGIN_EXPIRED"
+        status = (
+            PlatformResultStatus.WAIT_MANUAL_VERIFY
+            if _is_manual_verify_html(filtered_html)
+            else PlatformResultStatus.LOGIN_EXPIRED
+        )
         return short_circuit_result(
             "贝壳", status, "面积筛选后进入登录或验证页面",
             request_id, started_at, detail_url=detail_url,
@@ -667,7 +554,7 @@ async def _do_collect(
         total_pages,
         community_name,
     )
-    listing_snapshots, quote_prices = prepare_listing_data(
+    listing_snapshots, quote_prices, reference = prepare_listing_data_with_reference(
         collected_snapshots,
         community_name,
         area,
@@ -685,7 +572,7 @@ async def _do_collect(
         )
     if not quote_prices:
         return short_circuit_result(
-            "贝壳", "NO_DATA", "面积结果页未抓到在售单价",
+            "贝壳", PlatformResultStatus.NO_DATA, "面积结果页未抓到在售单价",
             request_id, started_at, detail_url=detail_url,
         )
 
@@ -694,12 +581,12 @@ async def _do_collect(
 
     detail_clicked, detail_tab = await _click_detail_link(browser, main_page, detail_url)
     if not detail_clicked or detail_tab is None:
-        # 详情 tab 未打开：不整单失败，降级为仅用在售均价（走 QUOTE_DISCOUNT），
+        # 详情 tab 未打开：不整单失败，保留在售数据交给统一加权落点算法，
         # 避免浪费已采到的在售数据
         log.warning("[10] 未能打开小区详情页，降级为仅用在售均价")
         return PlatformResult(
             name="贝壳",
-            status="SUCCESS",
+            status=PlatformResultStatus.SUCCESS,
             community_avg_price=None,
             quote_prices=quote_prices,
             deal_prices=[],
@@ -709,6 +596,7 @@ async def _do_collect(
             detail_url=detail_url,
             elapsed_seconds=round(time.time() - started_at, 2),
             listing_snapshots=listing_snapshots,
+            **reference,
         )
 
     # 详情页风控兜底（检测→等人回车→重取，直到页面恢复）
@@ -731,7 +619,7 @@ async def _do_collect(
             asyncio.ensure_future(_close_tab_later(detail_tab))
         return PlatformResult(
             name="贝壳",
-            status="SUCCESS",
+            status=PlatformResultStatus.SUCCESS,
             community_avg_price=None,
             quote_prices=quote_prices,
             deal_prices=[],
@@ -741,6 +629,7 @@ async def _do_collect(
             detail_url=detail_url,
             elapsed_seconds=round(time.time() - started_at, 2),
             listing_snapshots=listing_snapshots,
+            **reference,
         )
 
     if detail_tab is not main_page:
@@ -754,7 +643,7 @@ async def _do_collect(
 
     return PlatformResult(
         name="贝壳",
-        status="SUCCESS",
+        status=PlatformResultStatus.SUCCESS,
         community_avg_price=community_avg_price,
         quote_prices=quote_prices,
         deal_prices=filtered_deal_prices,
@@ -767,6 +656,7 @@ async def _do_collect(
         detail_url=detail_url,
         elapsed_seconds=round(time.time() - started_at, 2),
         listing_snapshots=listing_snapshots,
+        **reference,
     )
 
 

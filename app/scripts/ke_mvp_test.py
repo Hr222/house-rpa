@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import logging
 import re
+from statistics import mean
 import time
 from pathlib import Path
 from typing import Optional
@@ -23,7 +24,7 @@ from typing import Optional
 import nodriver as uc
 
 from app.core import config
-from app.core.algorithm import AlgorithmInput, evaluate_algorithm, mean
+from app.core.algorithm import AlgorithmInput, evaluate_algorithm
 from app.core.models import ListingSnapshot
 from app.core.price_utils import format_price, round_price
 from app.parsers import ke as parsers
@@ -367,7 +368,6 @@ async def run_ke_collect(
     community_name: str,
     area: float,
     manual_login: bool = False,
-    algorithm_mode: str = "default",
 ) -> dict:
     """执行一次完整的贝壳询价采集，返回汇总 dict。"""
     started_at = time.time()
@@ -483,14 +483,9 @@ async def run_ke_collect(
 
     # ---- 7. 算法决策 ----
     evaluation = evaluate_algorithm(
-        algorithm_mode=algorithm_mode,
         inputs=AlgorithmInput(
             quote_price_lists=[all_listing_prices],
-            community_avg_prices=[community_avg_price],
-            deal_price_lists=[deal_prices],
-            diff_threshold=config.DEAL_DIFF_THRESHOLD,
-            no_deal_discount=config.get_no_deal_discount(),
-            quote_only_discount=config.get_quote_only_discount(),
+            weighted_median_discount=config.get_weighted_median_discount(),
         ),
     )
 
@@ -509,7 +504,6 @@ async def run_ke_collect(
         "deal_records": deal_records,
         "final_price": round_price(evaluation.decision.final_price),
         "branch": evaluation.decision.branch,
-        "algorithm_mode": algorithm_mode,
         "listing_count": len(all_listing_prices),
         "deal_count": len(deal_prices),
         "elapsed_seconds": elapsed,
@@ -569,7 +563,6 @@ async def main(
     area: float = DEFAULT_AREA,
     manual_login: bool = False,
     debug: bool = False,
-    algorithm_mode: str = "default",
 ):
     if debug:
         set_debug_mode(True)
@@ -586,7 +579,6 @@ async def main(
             f"\n贝壳 MVP 测试"
             f"\n小区: {community_name}"
             f"\n面积: {area:.1f} ㎡"
-            f"\n算法: {algorithm_mode}"
             f"\n"
         )
 
@@ -595,7 +587,6 @@ async def main(
             community_name=community_name,
             area=area,
             manual_login=manual_login,
-            algorithm_mode=algorithm_mode,
         )
         _print_mvp(result)
 
@@ -631,12 +622,6 @@ def cli():
         default=DEFAULT_AREA,
         help=f"面积(㎡)，默认 {DEFAULT_AREA}",
     )
-    parser.add_argument(
-        "--algorithm-mode",
-        choices=("default", "quote_only", "weighted_median"),
-        default="default",
-        help="算法模式：default=成交+在售，quote_only=仅在售均价打折，weighted_median=加权落点中位数。",
-    )
     args = parser.parse_args()
     uc.loop().run_until_complete(
         main(
@@ -644,7 +629,6 @@ def cli():
             area=args.area,
             manual_login=args.manual_login,
             debug=args.debug,
-            algorithm_mode=args.algorithm_mode,
         )
     )
 

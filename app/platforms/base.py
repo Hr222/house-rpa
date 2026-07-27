@@ -12,7 +12,10 @@ import time
 from abc import ABC, abstractmethod
 from typing import Awaitable, Callable, Optional
 
+from app.core import config
+from app.core.algorithm import find_weighted_price_candidates
 from app.core.models import InquiryRequest, ListingSnapshot, PlatformResult, PlatformSession
+from app.core.status import PlatformHealthStatus, PlatformResultStatus
 from app.utils.listing_dedup import deduplicate_same_platform
 
 log = logging.getLogger(__name__)
@@ -112,8 +115,6 @@ class _ManualVerifyCoordinator:
 
 _MANUAL_VERIFY_COORDINATOR = _ManualVerifyCoordinator()
 _MANUAL_VERIFY_STATE_CALLBACK = None
-
-NO_MATCHING_AREA = "NO_MATCHING_AREA"
 
 # 未登录时页面的登录链接（a标签文本为"登录" + href含login/passport且非logout）
 _LOGIN_HREF_PATTERN = re.compile(
@@ -244,7 +245,7 @@ class PlatformAdapter(ABC):
         log.warning("[%s] %s，跳过询价", self.code, reason)
         return PlatformResult(
             name=self.name,
-            status="NO_DATA",
+            status=PlatformResultStatus.NO_DATA,
             reason=reason,
             request_id=request_id,
         )
@@ -416,7 +417,7 @@ def is_manual_verify_reason(reason: str) -> bool:
 
 def short_circuit_result(
     name: str,
-    status: str,
+    status: str | PlatformResultStatus,
     reason: str,
     request_id: Optional[str],
     started_at: float,
@@ -508,7 +509,8 @@ def filter_snapshots_by_community(snapshots: list, community_name: str) -> list:
 
 
 LISTING_AREA_TOLERANCE = 1.0
-LISTING_AREA_FALLBACK_TOLERANCE = 10.0
+WEAK_AREA_REFERENCE = "WEAK_AREA_REFERENCE"
+WEAK_AREA_REFERENCE_MIN_PEAK_COUNT = 3
 
 
 def listing_area_bounds(area: float, tolerance: float = LISTING_AREA_TOLERANCE) -> tuple[float, float]:
@@ -530,25 +532,105 @@ def filter_snapshots_by_area(
     ]
 
 
+def _quote_prices_from_snapshots(snapshots: list[ListingSnapshot]) -> list[float]:
+    return [
+        snapshot.unit_price
+        for snapshot in snapshots
+        if snapshot.unit_price is not None and snapshot.unit_price > 0
+    ]
+
+
+def _has_effective_price_peak(snapshots: list[ListingSnapshot]) -> bool:
+    """Return whether the current price algorithm finds a 3-listing peak."""
+    quote_prices = _quote_prices_from_snapshots(snapshots)
+    if not quote_prices:
+        return False
+    candidates = find_weighted_price_candidates([quote_prices])
+    return any(candidate.count >= WEAK_AREA_REFERENCE_MIN_PEAK_COUNT for candidate in candidates)
+
+
+def _area_tolerance_candidates(
+    snapshots: list[ListingSnapshot],
+    area: float,
+    strict_tolerance: float,
+    max_tolerance: float,
+) -> list[float]:
+    """Return the smallest symmetric tolerances represented by nearby areas."""
+    distances = {
+        round(abs(snapshot.area - area), 10)
+        for snapshot in snapshots
+        if snapshot.area is not None
+        and strict_tolerance < abs(snapshot.area - area) <= max_tolerance
+    }
+    return sorted(distances)
+
+
+def select_snapshots_by_area_with_reference(
+    snapshots: list[ListingSnapshot],
+    area: float,
+    tolerance: float = LISTING_AREA_TOLERANCE,
+    max_tolerance: Optional[float] = None,
+) -> tuple[list[ListingSnapshot], float, int]:
+    """Select the smallest area range that forms an effective price peak.
+
+    The strict range is retained whenever it already contains an effective
+    peak. Otherwise, nearby symmetric ranges are tried in ascending order.
+    Expansion stops only when the existing price-mode algorithm retains a
+    peak with at least three listings. The third return value is the number of
+    price-bearing listings added beyond the strict range.
+    """
+    max_tolerance = (
+        config.WEAK_AREA_MAX_TOLERANCE
+        if max_tolerance is None
+        else float(max_tolerance)
+    )
+    strict_matches = deduplicate_same_platform(
+        filter_snapshots_by_area(snapshots, area, tolerance)
+    )
+    if _has_effective_price_peak(strict_matches):
+        return strict_matches, tolerance, 0
+
+    if max_tolerance <= tolerance:
+        return strict_matches, tolerance, 0
+
+    strict_ids = {id(snapshot) for snapshot in strict_matches}
+    for candidate_tolerance in _area_tolerance_candidates(
+        snapshots,
+        area,
+        tolerance,
+        max_tolerance,
+    ):
+        candidate_matches = deduplicate_same_platform(
+            filter_snapshots_by_area(snapshots, area, candidate_tolerance)
+        )
+        if not _has_effective_price_peak(candidate_matches):
+            continue
+        extra_count = sum(
+            1
+            for snapshot in candidate_matches
+            if id(snapshot) not in strict_ids
+            and snapshot.unit_price is not None
+            and snapshot.unit_price > 0
+        )
+        return candidate_matches, candidate_tolerance, extra_count
+
+    return strict_matches, tolerance, 0
+
+
 def filter_snapshots_by_area_with_fallback(
     snapshots: list[ListingSnapshot],
     area: float,
     tolerance: float = LISTING_AREA_TOLERANCE,
-    fallback_tolerance: float = LISTING_AREA_FALLBACK_TOLERANCE,
+    fallback_tolerance: Optional[float] = None,
 ) -> tuple[list[ListingSnapshot], float]:
-    """Use the strict area range first, then widen only when it has no hits."""
-    strict_matches = filter_snapshots_by_area(snapshots, area, tolerance)
-    if strict_matches or fallback_tolerance <= tolerance:
-        return strict_matches, tolerance
-
-    fallback_matches = filter_snapshots_by_area(
+    """Keep the compatibility API while using the effective-peak search."""
+    matches, applied_tolerance, _ = select_snapshots_by_area_with_reference(
         snapshots,
         area,
+        tolerance,
         fallback_tolerance,
     )
-    if fallback_matches:
-        return fallback_matches, fallback_tolerance
-    return [], tolerance
+    return matches, applied_tolerance
 
 
 def listing_filter_summary(
@@ -618,8 +700,43 @@ def listing_no_data_status(
     if community_snapshots and not filter_snapshots_by_area_with_fallback(
         community_snapshots, area, tolerance
     )[0]:
-        return NO_MATCHING_AREA
-    return "NO_DATA"
+        return PlatformResultStatus.NO_MATCHING_AREA
+    return PlatformResultStatus.NO_DATA
+
+
+def prepare_listing_data_with_reference(
+    snapshots: list[ListingSnapshot],
+    community_name: str,
+    area: Optional[float] = None,
+    area_tolerance: float = LISTING_AREA_TOLERANCE,
+) -> tuple[list[ListingSnapshot], list[float], dict[str, object]]:
+    """过滤目标小区和面积房源，必要时寻找最小有效弱参考范围。"""
+    filtered = filter_snapshots_by_community(snapshots, community_name)
+    applied_tolerance = area_tolerance
+    reference_listing_count = 0
+    if area is not None:
+        filtered, applied_tolerance, reference_listing_count = select_snapshots_by_area_with_reference(
+            filtered,
+            area,
+            area_tolerance,
+        )
+    filtered = deduplicate_same_platform(filtered)
+    quote_prices = _quote_prices_from_snapshots(filtered)
+    reference: dict[str, object] = {}
+    if (
+        area is not None
+        and applied_tolerance > area_tolerance
+        and reference_listing_count > 0
+    ):
+        area_min, area_max = listing_area_bounds(area, applied_tolerance)
+        reference = {
+            "reference_code": WEAK_AREA_REFERENCE,
+            "reference_area_tolerance": round(applied_tolerance, 2),
+            "reference_area_min": round(area_min, 2),
+            "reference_area_max": round(area_max, 2),
+            "reference_listing_count": reference_listing_count,
+        }
+    return filtered, quote_prices, reference
 
 
 def prepare_listing_data(
@@ -628,20 +745,13 @@ def prepare_listing_data(
     area: Optional[float] = None,
     area_tolerance: float = LISTING_AREA_TOLERANCE,
 ) -> tuple[list[ListingSnapshot], list[float]]:
-    """过滤目标小区和面积房源，±1㎡无命中时兜底±10㎡。"""
-    filtered = filter_snapshots_by_community(snapshots, community_name)
-    if area is not None:
-        filtered, _ = filter_snapshots_by_area_with_fallback(
-            filtered,
-            area,
-            area_tolerance,
-        )
-    filtered = deduplicate_same_platform(filtered)
-    quote_prices = [
-        snapshot.unit_price
-        for snapshot in filtered
-        if snapshot.unit_price is not None and snapshot.unit_price > 0
-    ]
+    """过滤目标小区和面积房源，兼容保留原二元组返回接口。"""
+    filtered, quote_prices, _ = prepare_listing_data_with_reference(
+        snapshots,
+        community_name,
+        area,
+        area_tolerance,
+    )
     return filtered, quote_prices
 
 
@@ -704,7 +814,9 @@ async def wait_and_reload_after_block(tab, detect_func, label: str = "页面") -
             return html
         await _activate_blocked_tab()
         await _notify_state(
-            "WAIT_MANUAL_VERIFY" if is_manual_verify_reason(reason) else "WAIT_LOGIN",
+            PlatformHealthStatus.WAIT_MANUAL_VERIFY
+            if is_manual_verify_reason(reason)
+            else PlatformHealthStatus.WAIT_LOGIN,
             reason,
         )
         state_notified = True

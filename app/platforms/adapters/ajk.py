@@ -5,7 +5,7 @@
 - 面积筛选：自定义输入框填值（贝壳是点预设档位 a1-a7）
 - 无分页：单页全展示，滚动到底即可（贝壳要翻页）
 - 无成交记录：安居客不对外展示成交，业务上把挂牌均价（社区卡片）
-  顶替 deal_prices，让 decide() 正常按"在售均价 vs 成交均价"对比出最终价。
+  顶替 deal_prices，保留平台无成交记录时的业务数据兼容字段。
   代码注释里已标明这一特殊处理。
 - 不点详情：挂牌均价在结果页就有，无需进小区详情页（平台差异，非删流程）。
 
@@ -21,6 +21,7 @@ import time
 from typing import Optional
 
 from app.core import config
+from app.core.status import PlatformResultStatus
 from app.platforms.base import (
     _human_click,
     click_area_segment,
@@ -28,7 +29,7 @@ from app.platforms.base import (
     listing_filter_summary,
     listing_no_data_reason,
     listing_no_data_status,
-    prepare_listing_data,
+    prepare_listing_data_with_reference,
     short_circuit_result,
     wait_and_reload_after_block,
 )
@@ -350,7 +351,7 @@ async def collect(
         log.exception("采集异常")
         return PlatformResult(
             name="安居客",
-            status="ERROR",
+            status=PlatformResultStatus.ERROR,
             reason=str(exc),
             request_id=request_id,
             elapsed_seconds=round(time.time() - start, 2),
@@ -383,21 +384,21 @@ async def _do_collect(
     # 3. 判风控/登录
     if _is_login_url(keyword_url):
         return short_circuit_result(
-            "安居客", "LOGIN_EXPIRED", "搜索后进入登录页",
+            "安居客", PlatformResultStatus.LOGIN_EXPIRED, "搜索后进入登录页",
             request_id, started_at,
         )
 
     # 3.5 无数据短路 + 泛搜索校验
     if 'property-content-info-comm-name' not in keyword_html:
         return short_circuit_result(
-            "安居客", "NO_DATA", "关键词搜索无在售房源",
+            "安居客", PlatformResultStatus.NO_DATA, "关键词搜索无在售房源",
             request_id, started_at,
         )
 
     keyword_snaps = parsers.parse_listing_snapshots(keyword_html)
     if not has_matching_community_snapshots(keyword_snaps, community_name):
         return short_circuit_result(
-            "安居客", "NO_DATA", f"关键词搜索未匹配到小区: {community_name}",
+            "安居客", PlatformResultStatus.NO_DATA, f"关键词搜索未匹配到小区: {community_name}",
             request_id, started_at,
         )
 
@@ -409,7 +410,7 @@ async def _do_collect(
     area_html = await wait_and_reload_after_block(main_page, detect_block, "面积筛选后")
     if area_range is None:
         return short_circuit_result(
-            "安居客", "NO_DATA", "该面积区间无在售房源（档位已禁用）",
+            "安居客", PlatformResultStatus.NO_DATA, "该面积区间无在售房源（档位已禁用）",
             request_id, started_at,
         )
 
@@ -419,7 +420,9 @@ async def _do_collect(
 
     # 6. 解析在售房源
     parsed_snapshots = parsers.parse_listing_snapshots(area_html)
-    snapshots, quote_prices = prepare_listing_data(parsed_snapshots, community_name, area)
+    snapshots, quote_prices, reference = prepare_listing_data_with_reference(
+        parsed_snapshots, community_name, area
+    )
     log.info(
         "安居客在售房源最终校验: %s",
         listing_filter_summary(parsed_snapshots, community_name, area),
@@ -432,14 +435,14 @@ async def _do_collect(
         )
     if not quote_prices:
         return short_circuit_result(
-            "安居客", "NO_DATA", "面积结果页未抓到在售单价",
+            "安居客", PlatformResultStatus.NO_DATA, "面积结果页未抓到在售单价",
             request_id, started_at,
         )
 
     # 7. 挂牌均价（安居客无成交记录，挂牌均价顶替 deal_prices）
     listing_price = parsers.parse_community_avg_price(area_html)
     # 安居客特殊：无成交记录，把挂牌均价作为 deal_prices 唯一元素，
-    # 让 decide() 正常按"在售均价 vs 成交均价"对比出最终价。
+    # 保留平台无成交记录时的业务数据兼容字段，由统一加权落点算法取值。
     deal_prices = [listing_price] if listing_price is not None else []
 
     log.info(
@@ -451,7 +454,7 @@ async def _do_collect(
 
     return PlatformResult(
         name="安居客",
-        status="SUCCESS",
+        status=PlatformResultStatus.SUCCESS,
         community_avg_price=None,
         quote_prices=quote_prices,
         deal_prices=deal_prices,
@@ -460,4 +463,5 @@ async def _do_collect(
         detail_url=None,
         elapsed_seconds=round(time.time() - started_at, 2),
         listing_snapshots=snapshots,
+        **reference,
     )

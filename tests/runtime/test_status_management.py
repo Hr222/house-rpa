@@ -32,11 +32,9 @@ def _runtime_with_ke_ready() -> RPARuntime:
 
 def test_health_transitions_are_centralized():
     assert transition_platform_health(
-        PlatformHealthStatus.WAIT_LOGIN,
         PlatformHealthEvent.READY_CHECK_PASSED,
     ) == PlatformHealthStatus.READY
     assert transition_platform_health(
-        PlatformHealthStatus.READY,
         PlatformHealthEvent.RESULT_LOGIN_EXPIRED,
     ) == PlatformHealthStatus.WAIT_LOGIN
 

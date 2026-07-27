@@ -9,6 +9,7 @@ class FakeRuntime:
     def __init__(self):
         self.ready = False
         self.task = None
+        self.last_request = None
         self._last_get_at = {}
         self.platform = {
             "code": "ke",
@@ -52,6 +53,7 @@ class FakeRuntime:
     async def enqueue_inquiry(self, request):
         if not self.ready:
             raise RuntimeError("SERVICE_NOT_READY")
+        self.last_request = request
         self.task = {
             "taskId": request.request_id or "task-1",
             "statusCode": "QUEUED",
@@ -69,8 +71,8 @@ class FakeRuntime:
             "result": {
                 "success": True,
                 "finalPrice": 71086.5,
-                "branchCode": "TAKE_LOWER",
-                "branch": "差异在阈值内，取较低值",
+                "branchCode": "WEIGHTED_MEDIAN",
+                "branch": "主要价格落点中位数折扣",
                 "quoteAvg": 85635.0,
                 "dealAvg": 71086.5,
                 "data": {
@@ -149,9 +151,28 @@ def test_confirm_ready_then_create_and_query_inquiry():
         "finalPrice": 71086.5,
         "success": True,
         "statusCode": "COMPLETED",
-        "branchCode": "TAKE_LOWER",
-        "branch": "差异在阈值内，取较低值",
+        "branchCode": "WEIGHTED_MEDIAN",
+        "branch": "主要价格落点中位数折扣",
     }
+
+
+def test_inquiry_uses_fixed_algorithm_without_request_mode():
+    runtime = FakeRuntime()
+    app = create_app(runtime=runtime, manage_runtime=False)
+
+    with TestClient(app) as client:
+        client.post("/admin/platforms/ke/confirm-ready")
+        response = client.post(
+            "/inquiries",
+            json={
+                "city": "深圳",
+                "communityName": "绿景虹湾",
+                "area": 89.5,
+            },
+        )
+
+    assert response.status_code == 202
+    assert not hasattr(runtime.last_request, "algorithm_mode")
 
 
 def test_get_inquiry_rate_limited_after_first_call():

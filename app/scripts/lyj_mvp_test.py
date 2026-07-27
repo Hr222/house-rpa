@@ -514,7 +514,6 @@ def print_summary(
     deal_avg: Optional[float],
     final_price: Optional[float],
     branch: str,
-    algorithm_mode: str,
     body_len: Optional[int],
     conclusion: str,
 ):
@@ -539,8 +538,7 @@ def print_summary(
             "avg": deal_avg,
             "records": [],
             "substitute": (
-                f"小区均价顶替 {listing_price}元/㎡（{algorithm_mode}："
-                f"{'使用' if algorithm_mode == 'default' else '忽略'}）"
+                f"小区均价顶替 {listing_price}元/㎡（加权落点中位数算法不使用）"
             ),
         },
         result={
@@ -587,7 +585,6 @@ def print_summary(
 async def main(
     manual_login: bool = False,
     debug: bool = False,
-    algorithm_mode: str = "default",
 ):
     if debug:
         set_debug_mode(True)
@@ -741,14 +738,9 @@ async def main(
             # 乐有家无成交记录，小区均价顶替 deal_prices（同安居客处理）
             deal_prices = [listing_price] if listing_price is not None else []
             evaluation = evaluate_algorithm(
-                algorithm_mode=algorithm_mode,
                 inputs=AlgorithmInput(
                     quote_price_lists=[quote_prices],
-                    community_avg_prices=[None],
-                    deal_price_lists=[deal_prices],
-                    diff_threshold=config.DEAL_DIFF_THRESHOLD,
-                    no_deal_discount=config.get_no_deal_discount(),
-                    quote_only_discount=config.get_quote_only_discount(),
+                    weighted_median_discount=config.get_weighted_median_discount(),
                 ),
             )
             deal_avg = evaluation.deal_avg
@@ -756,10 +748,9 @@ async def main(
             branch = evaluation.decision.branch
 
             log.info(
-                "[5] 在售均价=%.2f 小区均价(顶替成交)=%s 算法=%s 最终价=%.2f 分支=%s",
+                "[5] 在售均价=%.2f 小区均价(顶替成交)=%s 算法=加权落点中位数 最终价=%.2f 分支=%s",
                 listing_avg or 0,
                 listing_price,
-                algorithm_mode,
                 final_price or 0,
                 branch,
             )
@@ -815,7 +806,6 @@ async def main(
             deal_avg=deal_avg,
             final_price=final_price,
             branch=branch,
-            algorithm_mode=algorithm_mode,
             body_len=body_len,
             conclusion=conclusion,
         )
@@ -845,18 +835,11 @@ def cli():
         action="store_true",
         help="开启 RPA 调试模式，导出关键页面 HTML 到 excel 目录（兼容旧参数 --excel）。",
     )
-    parser.add_argument(
-        "--algorithm-mode",
-        choices=("default", "quote_only", "weighted_median"),
-        default="default",
-        help="算法模式：default=成交+在售，quote_only=仅在售均价打折，weighted_median=加权落点中位数。",
-    )
     args = parser.parse_args()
     uc.loop().run_until_complete(
         main(
             manual_login=args.manual_login,
             debug=args.debug,
-            algorithm_mode=args.algorithm_mode,
         )
     )
 

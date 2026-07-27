@@ -21,8 +21,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # ─── 配置 ──────────────────────────────────────────────
 BASE_URL = "http://127.0.0.1:8000"
-INPUT_FILE = Path(__file__).parent / "test_data/房产评估汇总表_生成3.xlsx"
-ALGORITHM_MODE = "weighted_median"
+INPUT_FILE = Path(__file__).parent / "test_data/房产评估汇总表_生成2.xlsx"
 OUTPUT_DIR = Path(__file__).parent / "results"
 POLL_INTERVAL = 6       # 轮询间隔秒数（>5 避免连续 429）
 MAX_WAIT = 600          # 单任务软等待阈值；超过后只报警，不判失败，继续阻塞等待
@@ -132,7 +131,6 @@ def _create_inquiry_task(city: str, community: str, area: float) -> str | None:
                     "city": city,
                     "communityName": community,
                     "area": area,
-                    "algorithmMode": ALGORITHM_MODE,
                 },
             )
         except requests.RequestException as exc:
@@ -330,16 +328,10 @@ for i, item in enumerate(data):
         diff_pct = round((final_price - eval_price) / eval_price * 100, 2)
 
     # 判断分支含义
-    if "WEIGHTED_MEDIAN" in str(branch):
+    if branch == "WEIGHTED_MEDIAN":
         branch_display = "加权落点中位数（主要价格区间内加权取中位数，折扣后）"
-    elif "QUOTE_ONLY" in str(branch):
-        branch_display = "纯在售（折扣后）"
-    elif "QUOTE" in str(branch):
-        branch_display = "采用售均价"
-    elif "DEAL" in str(branch):
-        branch_display = "差值>10%，取成交均价"
-    elif "TAKE_LOWER" in str(branch):
-        branch_display = "差值≤10%，取较低值"
+    elif branch == "WEIGHTED_MEDIAN_MULTI":
+        branch_display = "多个价格落点，取最低价格峰中位数（不打折）"
     elif branch == "FAILED":
         branch_display = "无数据"
     else:
