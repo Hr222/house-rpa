@@ -16,6 +16,7 @@ env/
 .pytest_cache/
 
 # 调试产物
+persist/
 debug/
 *.html
 *.png

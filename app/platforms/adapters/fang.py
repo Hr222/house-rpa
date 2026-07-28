@@ -412,7 +412,7 @@ async def _click_deal_tab(detail_tab):
 async def _navigate_and_parse_deals(detail_tab, main_page, area_min: float, area_max: float) -> tuple[list, list]:
     """在 detail_tab 上导航到成交页并解析（与分页并行）。
 
-    解析完后立刻关闭 detail_tab 并切回 main_page，避免下一页单被卡住。
+    解析完成后安排关闭 detail_tab 并切回 main_page，避免详情页残留。
     """
     deal_prices: list = []
     deal_record_dicts: list = []
@@ -448,7 +448,8 @@ async def _navigate_and_parse_deals(detail_tab, main_page, area_min: float, area
     except Exception as exc:
         log.warning("成交页导航/解析失败: %s", exc)
     finally:
-        # 解析完立刻切回主页，tab 等 _close_tab_later 自动关
+        if detail_tab is not main_page:
+            asyncio.ensure_future(_close_tab_later(detail_tab))
         try:
             await main_page.activate()
         except Exception as exc:
@@ -758,10 +759,6 @@ async def _do_collect(
         f"{deal_avg:.2f}" if deal_avg else "None",
         len(quote_prices),
     )
-
-    # 9. 关掉详情/成交标签（已被并行任务关闭，二次关防御）
-    if detail_tab is not None:
-        asyncio.ensure_future(_close_tab_later(detail_tab))
 
     return PlatformResult(
         name="房天下",
