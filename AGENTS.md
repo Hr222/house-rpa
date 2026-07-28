@@ -121,10 +121,28 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 
 ## 7. 验证要求
 
-改动后必须:
-1. `python -m pytest tests/ -v` 全绿(算法/service/api/parsers 不回归)
-2. 新增平台后 `python -c "from app.registry import build_default_adapters; ..."` 验证注册正常
-3. MVP 脚本能跑通完整链路,人工核对采集数据合理
+项目已稳定,改动后**按改动点跑对应测试即可,不必每次跑全量 pytest**;但不得跳过验证。改动文件 → 对应测试目标的映射(基于实际 `tests/` 目录):
+
+| 改动文件 | 跑哪个测试 |
+|---|---|
+| `app/core/algorithm.py` | `tests/core/test_algorithm.py` |
+| `app/service.py` | `tests/service/test_service.py` |
+| `app/api.py` | `tests/api/test_api.py` |
+| `app/runtime.py` | `tests/runtime/`(`test_callback` / `test_restore` / `test_status_management`) |
+| `app/parsers/<code>.py` | `tests/parsers/test_<code>.py` + `tests/parsers/test_<code>_area.py` |
+| `app/platforms/base.py` | `tests/platforms/test_base_community.py` + `test_base_risk.py` |
+| `app/platforms/adapters/ajk.py` | `tests/platforms/test_ajk_adapter.py` |
+| `app/platforms/adapters/fang.py` | `tests/platforms/test_fang_risk.py` |
+| `app/utils/task_store.py` | `tests/persistence/test_task_store.py` |
+| `app/excel/*` | `tests/excel/test_export_operation_log_excel.py` |
+
+- `ke` / `lj` / `lyj` 的 adapter 目前没有专属测试,改动时以 MVP 脚本(`app/scripts/<code>_mvp_test.py`)人工验证为主,并酌情跑相邻的 `parsers` 测试兜底。
+- 跨模块改动:把涉及的测试目录一起跑,例如 `python -m pytest tests/core/ tests/parsers/ -v`。
+- 全量 `python -m pytest tests/ -v` 仅在改动面大 / 怀疑广泛回归、或发版前按需执行。
+
+此外仍需:
+1. 新增平台后 `python -c "from app.registry import build_default_adapters; ..."` 验证注册正常
+2. MVP 脚本能跑通完整链路,人工核对采集数据合理
 
 ## 8. 文件职责速查
 
