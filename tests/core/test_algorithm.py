@@ -112,6 +112,32 @@ def test_weighted_median_evaluation_exposes_multiple_candidates():
     ]
 
 
+def test_weighted_median_combines_listing_and_deal_results_by_equal_average():
+    result = evaluate_algorithm(
+        AlgorithmInput(
+            quote_price_lists=[[50000.0]],
+            deal_price_lists=[[40000.0]],
+        )
+    )
+
+    assert result.quote_avg == 50000.0
+    assert result.deal_avg == 40000.0
+    assert result.decision.final_price == 45000.0
+    assert result.decision.branch == "WEIGHTED_MEDIAN_COMBINED"
+
+
+def test_weighted_median_uses_deal_price_mode_without_listing_discount():
+    result = evaluate_algorithm(
+        AlgorithmInput(
+            quote_price_lists=[[50000.0]],
+            deal_price_lists=[[40000.0, 41000.0, 80000.0]],
+        )
+    )
+
+    assert result.deal_avg == 40500.0
+    assert result.decision.final_price == 45250.0
+
+
 def test_weighted_median_multi_peak_returns_lowest_peak_without_discount():
     result = evaluate_algorithm(
         AlgorithmInput(

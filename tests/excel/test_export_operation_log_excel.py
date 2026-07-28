@@ -147,6 +147,90 @@ def test_log_analysis_multi_peak_uses_lowest_median_without_discount():
     assert record.branch_code == "WEIGHTED_MEDIAN_MULTI"
 
 
+def test_log_analysis_combines_logged_target_area_deal_result():
+    record = InquiryRecord(
+        started_at="2026-07-24 00:00:00",
+        city="Shenzhen",
+        community_name="target",
+        area=80.0,
+        algorithm_mode="DEFAULT",
+        deal_avg=40000.0,
+        listings=[
+            ListingRow("Fang", "target", "listing", 80.0, "3 rooms 2 halls", 50000.0, 500.0),
+        ],
+    )
+
+    finalize_record(record)
+
+    assert record.quote_avg == 50000.0
+    assert record.deal_avg == 40000.0
+    assert record.final_price == 45000.0
+    assert record.branch_code == "WEIGHTED_MEDIAN_COMBINED"
+
+
+def test_log_analysis_without_target_area_deal_keeps_listing_result():
+    record = InquiryRecord(
+        started_at="2026-07-24 00:00:00",
+        city="Shenzhen",
+        community_name="target",
+        area=80.0,
+        algorithm_mode="DEFAULT",
+        listings=[
+            ListingRow("Fang", "target", "listing", 80.0, "3 rooms 2 halls", 50000.0, 500.0),
+        ],
+    )
+
+    finalize_record(record)
+
+    assert record.final_price == 45000.0
+    assert record.branch_code == "WEIGHTED_MEDIAN"
+
+
+def test_log_analysis_rebuilds_logged_single_peak_with_deal_without_discount():
+    record = InquiryRecord(
+        started_at="2026-07-24 00:00:00",
+        city="Shenzhen",
+        community_name="target",
+        area=80.0,
+        algorithm_mode="DEFAULT",
+        deal_avg=40000.0,
+        final_price=42500.0,
+        final_price_logged=True,
+        branch_code="WEIGHTED_MEDIAN_COMBINED",
+        branch_code_logged=True,
+        listings=[
+            ListingRow("Fang", "target", "listing", 80.0, "3 rooms 2 halls", 50000.0, 500.0),
+        ],
+    )
+
+    finalize_record(record)
+
+    assert record.final_price == 45000.0
+    assert record.branch_code == "WEIGHTED_MEDIAN_COMBINED"
+
+
+def test_analysis_treats_single_peak_without_deal_discount_as_rule_handling():
+    record = InquiryRecord(
+        started_at="2026-07-24 00:00:00",
+        city="Shenzhen",
+        community_name="target",
+        area=80.0,
+        algorithm_mode="DEFAULT",
+        listings=[
+            ListingRow("Fang", "target", "listing", 80.0, "3 rooms 2 halls", 50000.0, 500.0),
+        ],
+    )
+    finalize_record(record)
+
+    rows = analyze_evaluation_rows(
+        [EvaluationRow(2, "Shenzhen", 80.0, "target", 55000.0)],
+        [record],
+    )
+
+    assert rows[0].conclusion == "无真实成交价，按规则九折"
+    assert rows[0].evaluation_scope == "计入单峰评价"
+
+
 def test_analysis_does_not_count_platform_weak_reference_when_final_peak_does_not_use_it():
     record = InquiryRecord(
         started_at="2026-07-24 00:00:00",

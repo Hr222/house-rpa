@@ -88,6 +88,7 @@ U_STATUS_SUCCESS = PlatformResultStatus.SUCCESS.value
 U_PINGMI_LABEL = "\u5e73\u7c73"
 U_FAILED = "FAILED"
 U_WEIGHTED_MEDIAN = "WEIGHTED_MEDIAN"
+U_WEIGHTED_MEDIAN_COMBINED = "WEIGHTED_MEDIAN_COMBINED"
 U_WEAK_REFERENCE = "弱参考"
 
 # Excel 展示用中文。上面的 U_* 常量同时参与日志解析，不能直接改名或改值。
@@ -112,7 +113,8 @@ ALGORITHM_MODE_TEXT = {
 ALGORITHM_DESCRIPTIONS = {
     "DEFAULT": (
         "加权落点中位数算法：汇集所有平台的有效房源落点，每条房源按出现次数计票；低频孤立峰过滤，"
-        "主峰明确时返回一个中位数并打折，多峰时选择最低价格峰中位数直接返回，不打折。"
+        "主峰明确时返回一个中位数并打折，多峰时选择最低价格峰中位数直接返回，不打折；"
+        "存在真实目标面积成交价时，再将挂牌结果与成交结果做等权平均；没有符合目标面积的成交价时沿用挂牌结果。"
     ),
 }
 
@@ -509,6 +511,9 @@ def analyze_evaluation_rows(
         elif analysis.raw_diff > 0.10:
             analysis.conclusion = "原始数据偏高/偏低，不是算法问题"
             analysis.evaluation_scope = "原始数据排除"
+        elif record.deal_avg is None:
+            analysis.conclusion = "无真实成交价，按规则九折"
+            analysis.evaluation_scope = "计入单峰评价"
         elif analysis.final_diff is not None and analysis.final_diff > 0.10:
             analysis.conclusion = "算法处理造成偏差"
             analysis.evaluation_scope = "算法问题"
@@ -644,7 +649,7 @@ def has_captured_data(record: InquiryRecord) -> bool:
 def calculation_no_data_description(mode: Optional[str]) -> str:
     """说明已采集数据为何未产生最终报价。"""
     return (
-        "已抓到在售数据，但价格落点未同时满足至少60%权重覆盖和每条价格相对中心价偏差不超过10%的要求，"
+        "已抓到在售数据，但价格落点未形成符合频次要求的有效候选，或每条价格相对落点中心价的偏差超过10%，"
         "无法形成明确落点，最终无可用报价。"
     )
 
@@ -803,19 +808,13 @@ def _diagnose_weighted_median_quote(
 def infer_branch(quote_avg: Optional[float], deal_avg: Optional[float]) -> tuple[str, str]:
     if quote_avg is None:
         return U_FAILED, "\u6ca1\u6709\u660e\u786e\u7684\u4ef7\u683c\u843d\u70b9"
+    if deal_avg is not None:
+        return U_WEIGHTED_MEDIAN_COMBINED, "挂牌价与成交价等权平均"
     return U_WEIGHTED_MEDIAN, "\u4e3b\u8981\u4ef7\u683c\u843d\u70b9\u52a0\u6743\u4e2d\u4f4d\u6570\u6253\u6298"
 
 
 def finalize_record(record: InquiryRecord) -> None:
-    if record.branch_code_logged:
-        record.success = record.branch_code in {
-            U_WEIGHTED_MEDIAN,
-            "WEIGHTED_MEDIAN_MULTI",
-        } and record.final_price is not None
-        record.branch_text = BRANCH_TEXT.get(record.branch_code, record.branch_code)
-        return
-
-    if record.algorithm_mode == "DEFAULT":
+    if record.algorithm_mode == "DEFAULT" and record.listings:
         candidates = _weighted_median_candidates_for_record(record)
         if len(candidates) == 1:
             candidate = candidates[0]
@@ -824,15 +823,30 @@ def finalize_record(record: InquiryRecord) -> None:
             record.success = True
             record.branch_code = U_WEIGHTED_MEDIAN
             record.branch_text = BRANCH_TEXT[U_WEIGHTED_MEDIAN]
-            return
-        if len(candidates) > 1:
+        elif len(candidates) > 1:
             selected = min(candidates, key=lambda candidate: candidate.quote_price)
             record.quote_avg = selected.quote_price
             record.final_price = selected.quote_price
             record.success = True
             record.branch_code = "WEIGHTED_MEDIAN_MULTI"
             record.branch_text = BRANCH_TEXT[record.branch_code]
+        if record.success and record.deal_avg is not None and record.quote_avg is not None:
+            # 有真实成交价时，挂牌峰值不打折，直接与成交价等权平均。
+            record.final_price = (record.quote_avg + record.deal_avg) / 2
+            record.branch_code = U_WEIGHTED_MEDIAN_COMBINED
+            record.branch_text = BRANCH_TEXT[U_WEIGHTED_MEDIAN_COMBINED]
             return
+        if record.success:
+            return
+
+    if record.branch_code_logged:
+        record.success = record.branch_code in {
+            U_WEIGHTED_MEDIAN,
+            "WEIGHTED_MEDIAN_MULTI",
+            U_WEIGHTED_MEDIAN_COMBINED,
+        } and record.final_price is not None
+        record.branch_text = BRANCH_TEXT.get(record.branch_code, record.branch_code)
+        return
 
     record.success = record.final_price is not None
     record.branch_code, record.branch_text = infer_branch(record.quote_avg, record.deal_avg)
@@ -1074,6 +1088,14 @@ def build_workbook(
             cell.border = border
 
     def write_analysis_summary_sheet(ws, rows: list[AnalysisRow]) -> None:
+        # 先展示最终偏差最大的记录，便于按偏差降序检查；无最终值的记录放最后。
+        rows = sorted(
+            rows,
+            key=lambda row: (
+                row.final_diff is None,
+                -(row.final_diff or 0.0),
+            ),
+        )
         ws.merge_cells("A1:V1")
         title = ws["A1"]
         title.value = "抓取数据分析汇总"
@@ -1085,7 +1107,7 @@ def build_workbook(
         matched_count = sum(row.record is not None for row in rows)
         no_data_count = sum(row.evaluation_scope in {"无数据", "未匹配"} for row in rows)
         multi_count = sum(
-            row.record is not None and row.record.branch_code == "WEIGHTED_MEDIAN_MULTI"
+            row.evaluation_scope in {"多峰排除", "多峰单独观察"}
             for row in rows
         )
         weak_reference_count = sum(bool(row.weak_reference_text) for row in rows)
