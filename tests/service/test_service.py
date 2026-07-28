@@ -7,7 +7,7 @@ from app.core.models import InquiryRequest, ListingSnapshot, PlatformResult
 from app.service import RPAInquiryService, build_inquiry_result
 
 
-def test_build_inquiry_result_uses_weighted_median_only():
+def test_build_inquiry_result_averages_listing_and_deal_results():
     result = build_inquiry_result(
         [
             PlatformResult(
@@ -35,8 +35,27 @@ def test_build_inquiry_result_uses_weighted_median_only():
 
     assert result.success is True
     assert result.quote_avg == 51000.0
+    assert result.deal_avg == 40000.0
+    assert result.final_price == 45500.0
+    assert result.branch == "WEIGHTED_MEDIAN_COMBINED"
+
+
+def test_build_inquiry_result_ignores_compatibility_deal_substitutes():
+    result = build_inquiry_result(
+        [
+            PlatformResult(
+                name="安居客",
+                status="SUCCESS",
+                quote_prices=[50000.0],
+                deal_prices=[60000.0],
+                deal_source="挂牌均价顶替",
+            )
+        ]
+    )
+
+    assert result.quote_avg == 50000.0
     assert result.deal_avg is None
-    assert result.final_price == 45900.0
+    assert result.final_price == 45000.0
     assert result.branch == "WEIGHTED_MEDIAN"
 
 
@@ -118,8 +137,8 @@ def test_build_inquiry_result_rounds_prices_to_2_decimals():
     )
 
     assert result.quote_avg == 100.13
-    assert result.deal_avg is None
-    assert result.final_price == 90.11
+    assert result.deal_avg == 90.12
+    assert result.final_price == 95.13
 
 
 def test_build_inquiry_result_aggregates_weak_area_reference():

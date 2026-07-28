@@ -92,6 +92,22 @@ def _algorithm_quote_price_lists(
     return price_lists
 
 
+def _algorithm_deal_price_lists(
+    successful_results: list[PlatformResult],
+) -> list[list[float]]:
+    """构建用于最终等权平均的真实目标面积成交价。
+
+    安居客和乐有家虽然没有成交记录，但为了兼容结果结构会填充
+    ``deal_prices``；这类顶替值不能触发新的平均步骤。
+    """
+    return [
+        [price for price in result.deal_prices if price is not None and price > 0]
+        for result in successful_results
+        if result.deal_source not in {"挂牌均价顶替", "小区均价顶替"}
+        and any(price is not None and price > 0 for price in result.deal_prices)
+    ]
+
+
 def _reference_prices(result: PlatformResult) -> list[float]:
     """返回严格面积范围之外新增房源的价格值。"""
     if (
@@ -151,6 +167,7 @@ def build_inquiry_result(
         inputs=AlgorithmInput(
             quote_price_lists=_algorithm_quote_price_lists(successful_results),
             weighted_median_discount=config.get_weighted_median_discount(),
+            deal_price_lists=_algorithm_deal_price_lists(successful_results),
         ),
     )
 
@@ -193,7 +210,7 @@ def build_inquiry_result(
             ),
         }
 
-    if evaluation.quote_avg is None:
+    if evaluation.decision.final_price is None:
         # 全部平台都不支持该城市时，返回简洁提示
         all_city_unsupported = (
             len(platform_results) > 0
@@ -226,9 +243,13 @@ def build_inquiry_result(
         final_price=round_price(evaluation.decision.final_price),
         branch=evaluation.decision.branch,
         note=(
-            "\u68c0\u6d4b\u5230\u591a\u4e2a\u9ad8\u9891\u4ef7\u683c\u843d\u70b9\uff0c\u53d6\u6700\u4f4e\u4ef7\u683c\u5cf0\u4e2d\u4f4d\u6570\uff0c\u4e0d\u6253\u6298"
-            if evaluation.decision.branch == "WEIGHTED_MEDIAN_MULTI"
-            else None
+            "挂牌价与目标面积成交价等权平均"
+            if evaluation.decision.branch == "WEIGHTED_MEDIAN_COMBINED"
+            else (
+                "\u68c0\u6d4b\u5230\u591a\u4e2a\u9ad8\u9891\u4ef7\u683c\u843d\u70b9\uff0c\u53d6\u6700\u4f4e\u4ef7\u683c\u5cf0\u4e2d\u4f4d\u6570\uff0c\u4e0d\u6253\u6298"
+                if evaluation.decision.branch == "WEIGHTED_MEDIAN_MULTI"
+                else None
+            )
         ),
         quote_avg=round_price(evaluation.quote_avg),
         deal_avg=round_price(evaluation.deal_avg),

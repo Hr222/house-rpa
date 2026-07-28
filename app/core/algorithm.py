@@ -387,7 +387,7 @@ def _select_deal_price(
     deal_price_lists: Iterable[Iterable[float]],
     max_relative_deviation: float = WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION,
 ) -> Optional[float]:
-    """Select target-area deal prices without applying the listing discount."""
+    """选择目标面积成交价，不应用挂牌折扣。"""
     valid_prices = [
         float(price)
         for price_list in deal_price_lists
@@ -444,7 +444,8 @@ class WeightedMedianAlgorithm:
         deal_avg = _select_deal_price(inputs.deal_price_lists)
         if decision.final_price is not None and deal_avg is not None:
             decision = Decision(
-                final_price=(decision.final_price + deal_avg) / 2,
+                # 有真实成交价时，挂牌峰值不打折，直接与成交价等权平均。
+                final_price=(quote_avg + deal_avg) / 2,
                 branch="WEIGHTED_MEDIAN_COMBINED",
             )
 
