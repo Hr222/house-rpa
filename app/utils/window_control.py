@@ -17,6 +17,7 @@ kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 SW_RESTORE = 9
 HWND_TOP = 0
 SWP_NOZORDER = 0x0004
+WM_CLOSE = 0x0010
 
 
 @dataclass(slots=True)
@@ -110,6 +111,30 @@ def ensure_browser_foreground(pid: int) -> bool:
     if ok:
         log.info("浏览器窗口已置前: pid=%s title=%s", pid, window.title)
     return ok
+
+
+def close_windows_by_title(title_keywords: tuple[str, ...]) -> int:
+    """向标题命中关键词的可见顶层窗口发送关闭消息。"""
+    keywords = tuple(keyword.casefold() for keyword in title_keywords if keyword)
+    closed = 0
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def enum_proc(hwnd, _lparam):
+        nonlocal closed
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        title = _get_window_text(hwnd)
+        if not title or not any(keyword in title.casefold() for keyword in keywords):
+            return True
+        if user32.PostMessageW(hwnd, WM_CLOSE, 0, 0):
+            closed += 1
+            log.info("已请求关闭外部窗口: hwnd=%s title=%s", hwnd, title)
+        return True
+
+    user32.EnumWindows(enum_proc, 0)
+    if closed == 0:
+        log.warning("未找到待关闭的外部窗口: %s", title_keywords)
+    return closed
 
 
 def enumerate_browser_windows() -> list[WindowInfo]:

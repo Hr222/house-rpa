@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Iterable, Optional
 
@@ -270,8 +271,8 @@ class RPAInquiryService:
 
     async def start(self):
         for adapter in self.adapters:
-            browser = self.browsers[adapter.code]
-            # 每个平台有独立浏览器，只需导航空白标签页即可
+            browser = self.browsers.get(adapter.code)
+            # 网页平台导航常驻页；接口型平台可返回无页面的外部会话。
             session = await adapter.open_session(browser, new_tab=False)
             self.sessions[adapter.code] = session
             log.info("platform ready: %s -> %s", adapter.name, session.start_url)
@@ -301,12 +302,36 @@ class RPAInquiryService:
 
         async def _collect_one(adapter):
             session = self.sessions[adapter.code]
-            browser = self.browsers[adapter.code]
+            browser = self.browsers.get(adapter.code)
+            started_at = time.monotonic()
+            log.info(
+                "[平台采集开始] %s(%s) request_id=%s",
+                adapter.name,
+                adapter.code,
+                request.request_id or "-",
+            )
             try:
-                await session.page.activate()
-                return await adapter.collect(browser, session, request)
+                if session.page is not None:
+                    await session.page.activate()
+                result = await adapter.collect(browser, session, request)
+                log.info(
+                    "[平台采集结束] %s(%s) request_id=%s status=%s elapsed=%.1fs reason=%s",
+                    adapter.name,
+                    adapter.code,
+                    request.request_id or "-",
+                    result.status,
+                    time.monotonic() - started_at,
+                    result.reason or "-",
+                )
+                return result
             except Exception as exc:
-                log.exception("%s 采集异常", adapter.name)
+                log.exception(
+                    "[平台采集异常] %s(%s) request_id=%s elapsed=%.1fs",
+                    adapter.name,
+                    adapter.code,
+                    request.request_id or "-",
+                    time.monotonic() - started_at,
+                )
                 return PlatformResult(
                     name=adapter.name,
                     status=PlatformResultStatus.ERROR,

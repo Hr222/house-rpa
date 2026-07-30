@@ -144,6 +144,13 @@ class RPARuntime:
         self._last_get_at: dict[str, float] = {}  # GET 限流：taskId -> 上次查询时间戳
         self._restored: bool = False  # 崩溃恢复标志：全部就绪后只恢复一次残留任务
 
+    def _browser_adapters(self):
+        """返回确实需要独立 Chrome 实例的平台。"""
+        return [
+            adapter for adapter in self.adapters
+            if getattr(adapter, "uses_browser", True)
+        ]
+
     async def start(self):
         if self.service is not None:
             return
@@ -151,9 +158,9 @@ class RPARuntime:
         self.status = ServiceStatus.BOOTING
         self.message = "启动浏览器中"
 
-        # 为每个平台创建独立浏览器实例
+        # 网页平台各自使用独立浏览器；接口型平台使用外部应用会话。
         self.browsers = {}
-        for adapter in self.adapters:
+        for adapter in self._browser_adapters():
             browser = await self.browser_factory()
             self.browsers[adapter.code] = browser
             log.info("browser started for %s", adapter.name)
@@ -418,6 +425,7 @@ class RPARuntime:
                     state is None
                     or state.status != PlatformHealthStatus.READY
                     or session is None
+                    or session.page is None
                 ):
                     continue
                 try:
@@ -532,7 +540,7 @@ class RPARuntime:
                     continue
                 try:
                     session = self.service.sessions.get(code)
-                    if session:
+                    if session and session.page is not None:
                         await session.page.select("body", timeout=3)
                         await session.page
                 except Exception:
@@ -713,6 +721,9 @@ class RPARuntime:
 
     def _focus_browser_window(self, reason: str, code: Optional[str] = None):
         browser = self.browsers.get(code) if code else None
+        if code is not None and browser is None:
+            log.info("平台 %s 无独立浏览器窗口，跳过置前: %s", code, reason)
+            return
         browser_pid = getattr(getattr(browser, "_process", None), "pid", None)
         if browser_pid is None:
             browser_pid = self.browser_pid

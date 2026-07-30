@@ -133,6 +133,41 @@ def test_ready_check_captcha_enters_manual_verify_state():
     assert runtime.status == ServiceStatus.DEGRADED
 
 
+def test_ready_check_keeps_external_platform_session_for_token_capture():
+    class FakeAdapter:
+        code = "xzsfbj"
+        name = "行舟深房"
+        uses_browser = False
+
+        def __init__(self):
+            self.closed = 0
+
+        async def check_ready(self, session):
+            return True, "依赖已就绪"
+
+        def close_external_session(self):
+            self.closed += 1
+            return True
+
+    adapter = FakeAdapter()
+    runtime = RPARuntime(adapters=[adapter])
+    runtime.service = type("FakeService", (), {"sessions": {"xzsfbj": object()}})()
+    runtime.platform_states = {
+        "xzsfbj": PlatformRuntimeState(
+            code="xzsfbj",
+            name="行舟深房",
+            start_url="about:blank",
+            status=PlatformHealthStatus.WAIT_LOGIN,
+            message="等待确认",
+        ),
+    }
+
+    asyncio.run(runtime.confirm_platform_ready("xzsfbj"))
+
+    assert adapter.closed == 0
+    assert runtime.platform_states["xzsfbj"].status == PlatformHealthStatus.READY
+
+
 def test_aggregation_risk_probe_waits_for_main_page_recovery(monkeypatch):
     class FakeTab:
         def __init__(self):

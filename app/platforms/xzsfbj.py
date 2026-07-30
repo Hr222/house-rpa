@@ -21,6 +21,8 @@ class XzsfbjPlatformAdapter(PlatformAdapter):
     start_url = constants.START_URL
     # 平台没有网页登录页；token 由微信小程序会话捕获，不能走基类 HTML 登录检测。
     requires_login = False
+    # 行舟深房的数据来自用户自行打开的微信小程序，不应额外启动 Chrome。
+    uses_browser = False
     ready_confirmation_hint = (
         "无需网页登录；请确认 .env、WMPF 桥依赖和微信小程序已准备，"
         "回到终端按回车确认。首次采集时会自动捕获 token。"
@@ -30,18 +32,22 @@ class XzsfbjPlatformAdapter(PlatformAdapter):
     def __init__(self) -> None:
         self._api = XzsfbjApiAdapter()
 
-    async def open_session(self, browser, new_tab: bool = False) -> PlatformSession:
-        # Runtime 要求每个平台有一个可 activate 的常驻页；该页只承载生命周期，
-        # 行舟深房实际采集完全走 WMPF/HTTP，不在网页上导航或抓取。
-        page = await browser.get(constants.START_URL, new_tab=new_tab)
-        await page
+    async def open_session(self, browser=None, new_tab: bool = False) -> PlatformSession:
+        # 行舟深房实际采集完全走 WMPF/HTTP；用户自行打开微信小程序，
+        # 因此这里保留无页面会话供 Runtime 管理状态，不创建 about:blank 浏览器。
         return PlatformSession(
             code=self.code,
             name=self.name,
             start_url=self.start_url,
-            page=page,
+            page=None,
             ready=True,
         )
+
+    def close_external_session(self) -> bool:
+        """关闭行舟深房小程序窗口，但不退出微信主程序。"""
+        from app.utils.window_control import close_windows_by_title
+
+        return close_windows_by_title((self.name,)) > 0
 
     async def check_ready(self, session: PlatformSession) -> tuple[bool, str]:
         """检查本地索引和桥依赖；不尝试捕获 token，避免启动时打断微信。"""
@@ -62,10 +68,17 @@ class XzsfbjPlatformAdapter(PlatformAdapter):
         skip = self.check_city_support(request.city, request.request_id)
         if skip is not None:
             # 行舟深房的城市由 xqData.json 的 regionId 决定，没有网页城市首页可导航。
-            log.info("[%s] 不支持城市时仅保留常驻 about:blank 会话", self.code)
+            log.info("[%s] 不支持城市时仅保留外部小程序会话", self.code)
             return skip
-        return await self._api.collect(request)
+        try:
+            return await self._api.collect(request)
+        finally:
+            # token 捕获和接口请求均完成后再关闭小程序；若提前关闭，会阻断本次 token 捕获。
+            try:
+                self.close_external_session()
+            except Exception as exc:
+                log.warning("关闭行舟深房小程序窗口失败: %s", exc)
 
     def detect_block(self, url: str, html: str) -> tuple[bool, str]:
-        """WMPF 接口风控在 API 响应中判定，常驻 about:blank 不参与网页检测。"""
+        """WMPF 接口风控在 API 响应中判定，不参与网页检测。"""
         return False, ""
