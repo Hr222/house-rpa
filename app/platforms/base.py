@@ -27,6 +27,7 @@ _PLATFORM_NAMES = {
     "ke": "贝壳",
     "lj": "链家",
     "lyj": "乐有家",
+    "xzsfbj": "行舟深房",
 }
 
 
@@ -322,6 +323,24 @@ def set_manual_verify_state_callback(callback) -> None:
     """配置采集期间风控状态变化的运行时回调。"""
     global _MANUAL_VERIFY_STATE_CALLBACK
     _MANUAL_VERIFY_STATE_CALLBACK = callback
+
+
+async def notify_manual_verify_state(
+    context: str,
+    state: str | PlatformHealthStatus,
+    reason: str,
+) -> None:
+    """通知 Runtime 平台专属风控状态变化。
+
+    浏览器平台由 ``wait_and_reload_after_block`` 自动调用；接口型平台没有
+    可重新读取的 HTML，因此 adapter 在等待共享人工确认前后显式调用本入口。
+    """
+    callback = _MANUAL_VERIFY_STATE_CALLBACK
+    if callback is None:
+        return
+    result = callback(context, state, reason)
+    if inspect.isawaitable(result):
+        await result
 
 
 def manual_verify_events_snapshot() -> tuple[tuple[str, str], ...]:

@@ -12,11 +12,15 @@ class InquiryRequest:
 
     area: 精确面积（如 89.5）。各平台按自身档位规则自动匹配在售筛选区间，
           该区间同时用于成交记录筛选。
+    administrative_district: 行政区；主要供行舟深房本地小区索引消歧。
     """
     community_name: str
     area: float
     city: str = "深圳"
     request_id: Optional[str] = None
+    # 行政区用于行舟深房 xqData.json 中同名小区的消歧。
+    # 保留 None 兼容旧的直接调用和崩溃恢复任务；API 入口要求传入。
+    administrative_district: Optional[str] = None
 
 
 @dataclass

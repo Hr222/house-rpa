@@ -18,6 +18,9 @@ from app.runtime import RPARuntime
 
 class InquiryCreatePayload(BaseModel):
     city: str = Field(..., min_length=1, description="城市名（如 深圳、广州）")
+    administrative_district: str = Field(
+        ..., min_length=1, alias="administrativeDistrict", description="行政区（如 南山区）"
+    )
     community_name: str = Field(..., min_length=1, alias="communityName")
     area: float = Field(..., gt=0, alias="area")
     request_id: Optional[str] = Field(default=None, alias="requestId")
@@ -89,6 +92,7 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
             community_name=payload.community_name,
             area=payload.area,
             city=payload.city,
+            administrative_district=payload.administrative_district,
             request_id=payload.request_id,
         )
         try:

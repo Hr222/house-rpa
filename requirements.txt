@@ -4,5 +4,7 @@ nodriver
 beautifulsoup4
 pytest
 httpx
+websockets
+pycryptodome
 
 openpyxl

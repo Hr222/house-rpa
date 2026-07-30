@@ -7,6 +7,7 @@ from app.platforms.fang import FangPlatformAdapter
 from app.platforms.ke import KePlatformAdapter
 from app.platforms.lj import LjPlatformAdapter
 from app.platforms.lyj import LyjPlatformAdapter
+from app.platforms.xzsfbj import XzsfbjPlatformAdapter
 
 __all__ = [
     "PlatformAdapter",
@@ -15,4 +16,5 @@ __all__ = [
     "FangPlatformAdapter",
     "LjPlatformAdapter",
     "LyjPlatformAdapter",
+    "XzsfbjPlatformAdapter",
 ]

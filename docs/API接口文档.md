@@ -147,6 +147,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `communityName` | string | ✅ | 小区名称 |
+| `administrativeDistrict` | string | ✅ | 行政区（如 `南山区`）；用于行舟深房同名小区消歧 |
 | `area` | float | ✅ | 精确面积（㎡），如 `89.5`。系统自动匹配各平台面积档位 |
 | `city` | string | ✅ | 城市名（如 `深圳`、`广州`、`东莞`） |
 | `requestId` | string | | 请求标识，用于幂等；不填则由服务生成 `taskId` |
@@ -156,6 +157,7 @@
 ```json
 {
   "city": "深圳",
+  "administrativeDistrict": "南山区",
   "communityName": "绿景虹湾",
   "area": 89.5,
   "requestId": "order-001"

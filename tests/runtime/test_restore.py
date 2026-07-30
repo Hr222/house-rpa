@@ -31,11 +31,22 @@ def _make_runtime_no_browsers():
     return rt
 
 
-def _write_task_file(persist_dir, task_id, community="绿景虹湾", area=89.5):
+def _write_task_file(
+    persist_dir, task_id, community="绿景虹湾", area=89.5, administrative_district=None
+):
     """写一个残留任务 JSON（模拟崩溃前入队但未完成）。"""
     (persist_dir / f"{task_id}.json").write_text(
         json.dumps(
-            {"community_name": community, "area": area, "city": "深圳"},
+            {
+                "community_name": community,
+                "area": area,
+                "city": "深圳",
+                **(
+                    {"administrative_district": administrative_district}
+                    if administrative_district is not None
+                    else {}
+                ),
+            },
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -46,7 +57,7 @@ def test_restore_runs_once_when_all_ready(tmp_path):
     """全部平台就绪时，恢复一次残留任务到队列。"""
     persist = tmp_path / "persist"
     persist.mkdir()
-    _write_task_file(persist, "crash-001")
+    _write_task_file(persist, "crash-001", administrative_district="南山区")
     _write_task_file(persist, "crash-002")
 
     with mock.patch("app.utils.task_store.config.PERSIST_DIR", persist), \
@@ -69,6 +80,9 @@ def test_restore_runs_once_when_all_ready(tmp_path):
         assert queued == {"crash-001", "crash-002"}
         # 也进了 tasks 记录
         assert set(rt.tasks.keys()) == {"crash-001", "crash-002"}
+        assert rt.tasks["crash-001"].request.administrative_district == "南山区"
+        # 未升级的旧任务仍可恢复
+        assert rt.tasks["crash-002"].request.administrative_district is None
 
 
 def test_restore_runs_only_once(tmp_path):

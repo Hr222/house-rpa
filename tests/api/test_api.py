@@ -64,6 +64,7 @@ class FakeRuntime:
             "error": None,
             "request": {
                 "communityName": request.community_name,
+                "administrativeDistrict": request.administrative_district,
                 "area": request.area,
                 "city": request.city,
                 "requestId": request.request_id or "task-1",
@@ -122,7 +123,12 @@ def test_create_inquiry_returns_503_when_not_ready():
     with TestClient(app) as client:
         response = client.post(
             "/inquiries",
-            json={"city": "深圳", "communityName": "绿景虹湾", "area": 89.5},
+            json={
+                "city": "深圳",
+                "administrativeDistrict": "南山区",
+                "communityName": "绿景虹湾",
+                "area": 89.5,
+            },
         )
 
     assert response.status_code == 503
@@ -130,14 +136,32 @@ def test_create_inquiry_returns_503_when_not_ready():
     assert response.json()["message"] == "RPA 服务尚未就绪"
 
 
-def test_confirm_ready_then_create_and_query_inquiry():
+def test_create_inquiry_requires_administrative_district():
     app = create_app(runtime=FakeRuntime(), manage_runtime=False)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/inquiries",
+            json={"city": "深圳", "communityName": "绿景虹湾", "area": 89.5},
+        )
+
+    assert response.status_code == 422
+
+
+def test_confirm_ready_then_create_and_query_inquiry():
+    runtime = FakeRuntime()
+    app = create_app(runtime=runtime, manage_runtime=False)
 
     with TestClient(app) as client:
         confirm = client.post("/admin/platforms/ke/confirm-ready")
         create = client.post(
             "/inquiries",
-            json={"city": "深圳", "communityName": "绿景虹湾", "area": 89.5},
+            json={
+                "city": "深圳",
+                "administrativeDistrict": "南山区",
+                "communityName": "绿景虹湾",
+                "area": 89.5,
+            },
         )
         task = client.get(f"/inquiries/{create.json()['data']['taskId']}")
 
@@ -145,6 +169,7 @@ def test_confirm_ready_then_create_and_query_inquiry():
     assert create.status_code == 202
     assert task.status_code == 200
     assert create.json()["data"]["status"] == "排队中"
+    assert runtime.last_request.administrative_district == "南山区"
     assert task.json()["data"] == {
         "quoteAvg": 85635.0,
         "dealAvg": 71086.5,
@@ -166,12 +191,14 @@ def test_inquiry_uses_fixed_algorithm_without_request_mode():
             "/inquiries",
             json={
                 "city": "深圳",
+                "administrativeDistrict": "南山区",
                 "communityName": "绿景虹湾",
                 "area": 89.5,
             },
         )
 
     assert response.status_code == 202
+    assert runtime.last_request.administrative_district == "南山区"
     assert not hasattr(runtime.last_request, "algorithm_mode")
 
 
@@ -180,7 +207,15 @@ def test_get_inquiry_rate_limited_after_first_call():
     app = create_app(runtime=FakeRuntime(), manage_runtime=False)
     with TestClient(app) as client:
         client.post("/admin/platforms/ke/confirm-ready")  # 先置就绪
-        client.post("/inquiries", json={"city": "深圳", "communityName": "x", "area": 89.5})
+        client.post(
+            "/inquiries",
+            json={
+                "city": "深圳",
+                "administrativeDistrict": "南山区",
+                "communityName": "x",
+                "area": 89.5,
+            },
+        )
         first = client.get("/inquiries/task-1")
         second = client.get("/inquiries/task-1")
 

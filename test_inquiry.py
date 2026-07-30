@@ -6,6 +6,7 @@ import requests
 
 BASE = "http://127.0.0.1:8000"
 CITY = "深圳"
+ADMINISTRATIVE_DISTRICT = "南山区"
 COMMUNITY = "绿景虹湾"
 AREA = 89.5
 
@@ -17,7 +18,12 @@ print(f"[就绪] OK")
 
 r = requests.post(
     f"{BASE}/inquiries",
-    json={"city": CITY, "communityName": COMMUNITY, "area": AREA},
+    json={
+        "city": CITY,
+        "administrativeDistrict": ADMINISTRATIVE_DISTRICT,
+        "communityName": COMMUNITY,
+        "area": AREA,
+    },
 )
 task_id = r.json()["data"]["taskId"]
 print(f"[接单] taskId={task_id}")

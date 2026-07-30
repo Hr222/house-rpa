@@ -175,12 +175,14 @@ class RPARuntime:
         await asyncio.sleep(1.5)  # 等窗口位置生效
 
         for code, session in sessions.items():
+            adapter = self.adapter_map.get(code)
+            ready_hint = getattr(adapter, "ready_confirmation_hint", None)
             self.platform_states[code] = PlatformRuntimeState(
                 code=code,
                 name=session.name,
                 start_url=session.start_url,
                 status=PlatformHealthStatus.WAIT_LOGIN,
-                message="等待人工登录后确认",
+                message=ready_hint or "等待人工登录后确认",
             )
 
         self.status = ServiceStatus.WAIT_LOGIN
@@ -552,9 +554,19 @@ class RPARuntime:
                 continue
 
             lines = ["", "检测到以下平台尚未就绪："]
+            browser_confirmation_needed = False
+            dependency_confirmation_needed = False
             for state in pending:
                 lines.append(f"- {state.name}: {state.status} / {state.message}")
-            lines.append("请在浏览器完成人工登录或验证后，回到终端按回车继续...")
+                adapter = self.adapter_map.get(state.code)
+                if getattr(adapter, "requires_login", True):
+                    browser_confirmation_needed = True
+                else:
+                    dependency_confirmation_needed = True
+            if browser_confirmation_needed:
+                lines.append("请在浏览器完成人工登录或验证后，回到终端按回车继续...")
+            if dependency_confirmation_needed:
+                lines.append("无需网页登录的平台：确认本地依赖或人工处理完成后，回到终端按回车继续...")
             prompt = "\n".join(lines)
 
             self._manual_confirmation_active = True
@@ -724,6 +736,8 @@ class RPARuntime:
                 community_name=task_data["community_name"],
                 area=task_data["area"],
                 city=task_data.get("city", "深圳"),
+                # 旧的持久化任务没有行政区，恢复时保留 None，避免启动失败。
+                administrative_district=task_data.get("administrative_district"),
                 request_id=task_id,
             )
             record = InquiryTaskRecord(task_id=task_id, request=request)
