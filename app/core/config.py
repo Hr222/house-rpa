@@ -16,6 +16,35 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+BASE_DIR = Path(__file__).resolve().parent.parent.parent  # 项目根目录
+
+
+def _load_local_env(path: Path) -> None:
+    """Load simple project ``.env`` entries without overriding process env."""
+    if not path.is_file():
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        log.warning("读取 .env 失败: %s", path, exc_info=True)
+        return
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        name, value = text.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if not name:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(name, value)
+
+
+_load_local_env(BASE_DIR / ".env")
+
+
 def _env_flag(name: str, default: str = "0") -> bool:
     value = os.getenv(name, default).strip().lower()
     return value in {"1", "true", "yes", "on"}
@@ -40,7 +69,6 @@ def _env_positive_float(name: str, default: float) -> float:
 # ===== 调试 =====
 DEBUG_MODE = _env_flag("RPA_DEBUG", "0")
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent  # 项目根目录
 #开发人员调式的输出文件夹
 DEBUG_DIR = BASE_DIR / "debug"
 #日志输出文件夹

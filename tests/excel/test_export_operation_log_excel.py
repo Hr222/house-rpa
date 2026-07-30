@@ -126,6 +126,50 @@ def test_workbook_marks_removed_duplicate_rows_in_gray_italic():
     assert sheet["J15"].fill.fgColor.rgb.endswith("E7E6E6")
 
 
+def test_workbook_does_not_freeze_panes_and_wraps_detail_text():
+    record = InquiryRecord(
+        started_at="2026-07-24 00:00:00",
+        city="Shenzhen",
+        community_name="target",
+        area=100.0,
+        algorithm_mode="DEFAULT",
+        branch_text="line one\nline two",
+        listings=[
+            ListingRow("Fang", "target", "long title", 100.0, "3 rooms 2 halls", 50000.0, 500.0),
+        ],
+    )
+
+    workbook = build_workbook([record])
+    sheet = workbook["target"]
+
+    assert sheet.freeze_panes is None
+    assert sheet["B10"].alignment.wrap_text is True
+
+
+def test_analysis_summary_does_not_freeze_panes_and_wraps_text():
+    record = InquiryRecord(
+        started_at="2026-07-24 00:00:00",
+        city="Shenzhen",
+        community_name="target",
+        area=100.0,
+        algorithm_mode="DEFAULT",
+        listings=[
+            ListingRow("Fang", "target", "listing", 100.0, "3 rooms 2 halls", 50000.0, 500.0),
+        ],
+    )
+    finalize_record(record)
+    analysis_rows = analyze_evaluation_rows(
+        [EvaluationRow(2, "Shenzhen", 100.0, "target", 50000.0)],
+        [record],
+    )
+
+    workbook = build_workbook([record], analysis_rows)
+    sheet = workbook["分析汇总"]
+
+    assert sheet.freeze_panes is None
+    assert sheet["M6"].alignment.wrap_text is True
+
+
 def test_log_analysis_multi_peak_uses_lowest_median_without_discount():
     record = InquiryRecord(
         started_at="2026-07-24 00:00:00",

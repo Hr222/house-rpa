@@ -9,6 +9,8 @@ from app.platforms.base import (
     detect_block_with_common,
     detect_common_block,
     is_manual_verify_reason,
+    notify_manual_verify_state,
+    set_manual_verify_state_callback,
     set_manual_verify_lock,
     wait_for_manual_unblock,
     wait_and_reload_after_block,
@@ -115,6 +117,22 @@ def test_manual_verify_uses_runtime_platform_check_lock(monkeypatch):
 
     asyncio.run(run_waiter())
 
+
+def test_interface_manual_verify_state_callback_supports_async_callback():
+    calls = []
+
+    async def callback(context, state, reason):
+        calls.append((context, state, reason))
+
+    async def run_notify():
+        set_manual_verify_state_callback(callback)
+        try:
+            await notify_manual_verify_state("行舟深房(xzsfbj)/接口", "WAIT_MANUAL_VERIFY", "风控")
+        finally:
+            set_manual_verify_state_callback(None)
+
+    asyncio.run(run_notify())
+    assert calls == [("行舟深房(xzsfbj)/接口", "WAIT_MANUAL_VERIFY", "风控")]
 
 def test_wait_and_reload_continues_only_after_risk_page_recovers(monkeypatch):
     class FakeTab:

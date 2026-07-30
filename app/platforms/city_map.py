@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """跨平台城市映射表。
 
-5 个平台 URL 前缀命名规则完全不统一（缩写/全拼混用），
+5 个网页平台 URL 前缀命名规则完全不统一（缩写/全拼混用），
 不能用规则推导，必须维护显式映射表。
+
+行舟深房是 WMPF 接口平台，不参与网页 URL 导航，仅在表中登记深圳能力边界。
 
 数据来源：从各平台城市选择页 HTML dump 中提取（2026-07-17）。
 
@@ -22,6 +24,11 @@ from typing import Optional
 
 # CITY_MAP[platform_code][city_name] = url_prefix
 CITY_MAP: dict[str, dict[str, str]] = {
+    # 行舟深房是小程序接口平台，仅支持深圳；该映射只用于统一城市能力检查，
+    # 采集时不调用 ensure_city_navigated，也不把 prefix 当作网页导航地址。
+    "xzsfbj": {
+        "深圳": "shenzhen",
+    },
     # 贝壳：缩写为主，jiangmen/zhanjiang/yangjiang 用全拼
     "ke": {
         "广州": "gz",
@@ -114,6 +121,7 @@ CITY_MAP: dict[str, dict[str, str]] = {
 
 # 各平台 URL 模板
 _URL_PATTERNS: dict[str, str] = {
+    "xzsfbj": "https://www.xzsfbj.com.cn/",
     "ke": "https://{prefix}.ke.com/ershoufang/",
     "lj": "https://{prefix}.lianjia.com/ershoufang/",
     "ajk": "https://{prefix}.anjuke.com/sale/",

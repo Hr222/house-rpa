@@ -4,6 +4,7 @@ cookie*.txt
 *.cookie
 .env
 .workbuddy
+third_party/zhong_wmpf_bridge/node_modules/
 
 # Python
 __pycache__/

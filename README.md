@@ -40,6 +40,7 @@
 | 链家 | lj | 动态读取档位+点击链接 | 有，翻页 | 详情→成交列表翻页 | 不取 | 必须点 | 10/21 |
 | 房天下 | fang | 动态读取档位+点击链接 | 有，翻页 | 详情→小区成交 tab | 不取 | Ctrl+点击 | 21/21 |
 | 乐有家 | lyj | 动态读取档位+点击链接 | 有，翻页 | **无**（小区均价顶替） | 结果页社区信息卡 | 不点 | 9/21 |
+| 行舟深房 | xzsfbj | 接口按面积请求，返回后 ±1㎡复核 | 有，接口翻页 | 接口记录，严格面积 ±1㎡ + 近半年 | 在售接口 | 不适用 | 1/21 |
 
 5 平台全部覆盖的城市（9 个）：广州、深圳、珠海、佛山、东莞、中山、惠州、江门、清远。
 
@@ -52,6 +53,7 @@
 - **乐有家**：同安居客，无成交记录，小区均价顶替 `deal_prices`；搜索走 URL 参数。
 - **链家**：贝壳子公司，DOM 高度相似；成交筛选用严格区间 + 近半年（与贝壳 ±20% 容差不同）。
 - **房天下**：成交筛选用严格区间 + 近半年；详情入口只在第一页，Ctrl+点击后台打开。
+- **行舟深房**：接口成交记录按实际面积 `±1㎡` 且近半年筛选；日期缺失或无法识别的记录不参与成交统计。多期住宅在平台适配器内合并后再进入统一算法。
 
 ## 3. 业务链路
 
@@ -60,7 +62,7 @@
 1. 启动浏览器并打开各平台二手房首页。
 2. 人工在前台完成各平台登录。
 3. 通过 API `POST /admin/platforms/{code}/confirm-ready` 或终端回车确认就绪。
-4. 接收询价请求：`city`（城市名）、`communityName`（小区名）、`area`（精确面积）。
+4. 接收询价请求：`city`（城市名）、`administrativeDistrict`（行政区）、`communityName`（小区名）、`area`（精确面积）。
 5. 检查各平台是否支持该城市：不支持的平台跳过询价只做保活刷新；支持的继续。
 6. 城市导航：如果当前浏览器不在目标城市域名下，先导航到目标城市首页。
 7. 刷新常驻页面，执行轻量保活。
@@ -99,6 +101,7 @@
 
 - **贝壳**：对成交案例按请求面积上下浮动 `20%` 筛选后取均价。
 - **链家 / 房天下**：严格面积区间 + 近半年（6 个月）筛选后取均价。
+- **行舟深房**：实际面积 `±1㎡` + 近半年（6 个月）筛选后取均价；接口返回的历史记录不参与统计。
 - **安居客 / 乐有家**：无成交记录，用平台挂牌均价顶替 `deal_prices`。
 
 ### 最终取值：挂牌价与成交价汇总
@@ -158,25 +161,28 @@ jeethink-rpa/
 │  │  └─ price_utils.py     # 价格格式化工具
 │  ├─ platforms/
 │  │  ├─ base.py            # 平台适配器抽象基类
-│  │  ├─ city_map.py        # 跨平台城市映射表（5 平台 × 广东 21 城）
+│  │  ├─ city_map.py        # 跨平台城市映射表（网页平台 + 行舟深房深圳支持）
 │  │  ├─ __init__.py        # 平台导出集合
 │  │  ├─ ke.py / ke_constants.py       # 贝壳：薄壳适配器 + 常量
 │  │  ├─ ajk.py / ajk_constants.py     # 安居客：薄壳适配器 + 常量
 │  │  ├─ lj.py / lj_constants.py       # 链家：薄壳适配器 + 常量
 │  │  ├─ fang.py / fang_constants.py   # 房天下：薄壳适配器 + 常量
 │  │  ├─ lyj.py / lyj_constants.py     # 乐有家：薄壳适配器 + 常量
+│  │  ├─ xzsfbj.py / xzsfbj_constants.py # 行舟深房：WMPF 接口薄壳 + 常量
 │  │  └─ adapters/
 │  │     ├─ ke.py           # 贝壳真实采集逻辑
 │  │     ├─ ajk.py          # 安居客真实采集逻辑
 │  │     ├─ lj.py           # 链家真实采集逻辑
 │  │     ├─ fang.py         # 房天下真实采集逻辑
-│  │     └─ lyj.py          # 乐有家真实采集逻辑
+│  │     ├─ lyj.py          # 乐有家真实采集逻辑
+│  │     └─ xzsfbj.py       # 行舟深房 WMPF/HTTP 采集逻辑
 │  ├─ parsers/
 │  │  ├─ ke.py              # 贝壳 HTML 解析器
 │  │  ├─ ajk.py             # 安居客 HTML 解析器
 │  │  ├─ lj.py              # 链家 HTML 解析器
 │  │  ├─ fang.py            # 房天下 HTML 解析器
-│  │  └─ lyj.py             # 乐有家 HTML 解析器
+│  │  ├─ lyj.py             # 乐有家 HTML 解析器
+│  │  └─ xzsfbj.py          # 行舟深房 JSON 响应解析器
 │  ├─ utils/
 │  │  ├─ logging_utils.py   # 日志配置（按日切分）
 │  │  ├─ debug_utils.py     # 调试 HTML 导出
@@ -189,16 +195,25 @@ jeethink-rpa/
 │  │  ├─ ajk_mvp_test.py    # 安居客 MVP 测试
 │  │  ├─ lj_mvp_test.py     # 链家 MVP 测试
 │  │  ├─ fang_mvp_test.py   # 房天下 MVP 测试
-│  │  └─ lyj_mvp_test.py    # 乐有家 MVP 测试
+│  │  ├─ lyj_mvp_test.py    # 乐有家 MVP 测试
+│  │  └─ xzsfbj_mvp_test.py # 行舟深房 MVP 测试（接口平台回归工具）
 │  ├─ api.py                # FastAPI 路由定义
 │  ├─ runtime.py            # 服务运行时
 │  ├─ service.py            # 服务编排
 │  └─ registry.py           # 平台注册
 ├─ tests/                   # 单元测试
 ├─ docs/                    # 对接文档
+├─ third_party/
+│  └─ zhong_wmpf_bridge/    # 行舟深房 WMPF 调试桥源码与配置（Node 依赖本机安装）
 ├─ requirements.txt
 └─ README.md
 ```
+
+`third_party/zhong_wmpf_bridge/` 是行舟深房接口采集所需的第三方桥接源码，包含桥接入口、
+Frida 配置、`package.json`、`package-lock.json`、上游许可证和来源说明。运行
+`scripts\setup_xzsfbj_wmpf_bridge.ps1` 后生成的 `node_modules/` 属于本机依赖，已被 Git
+忽略，不应提交；迁移到新机器时按“行舟深房环境准备”重新安装即可。默认路径可通过
+`XZSFBJ_WMPF_BRIDGE_DIR` 覆盖。
 
 ## 7. 核心模块说明
 
@@ -309,7 +324,7 @@ FastAPI 入口。接口清单：
 
 ### `app/platforms/city_map.py`
 
-跨平台城市映射表，维护 5 平台 × 广东 21 个地级市的 URL 前缀。
+跨平台城市映射表，维护网页平台的城市 URL 前缀，并维护行舟深房仅支持深圳的能力边界。
 
 - `CITY_MAP[platform_code][city_name] = url_prefix` — 显式映射（不能用规则推导，各平台命名规则不统一）
 - `get_start_url(platform_code, city)` → 完整起始 URL，不支持时 raise `ValueError`
@@ -325,6 +340,7 @@ FastAPI 入口。接口清单：
 - `parsers/lj.py` — 链家：在售快照、成交记录、面积档位解析、严格面积区间+近半年筛选
 - `parsers/fang.py` — 房天下：在售快照、成交表格、面积档位解析、严格面积区间+近半年筛选
 - `parsers/lyj.py` — 乐有家：在售快照、小区均价（顶替成交）、面积档位解析
+- `parsers/xzsfbj.py` — 行舟深房：小区索引、接口在售/成交响应、住宅期数匹配、面积 ±1㎡ + 近半年筛选
 
 ### `app/utils/`
 
@@ -416,6 +432,57 @@ python -m app.scripts.fang_mvp_test --debug --manual-login     # 房天下
 python -m app.scripts.lyj_mvp_test --debug --manual-login      # 乐有家
 ```
 
+### 行舟深房（xzsfbj）环境准备
+
+> 行舟深房已接入默认平台列表，首期仅支持深圳；正式服务仍需按下方步骤准备本机微信小程序数据。
+
+行舟深房通过 Windows 微信小程序的 WMPF 调试桥获取内存 token，再调用其结构化接口。
+小区匹配只保留住宅候选，明确标注为商铺、写字楼、办公、酒店、宿舍或厂房的索引条目会被排除；
+“大厦”“中心”等字样本身不足以判定为非住宅。
+新机器首次使用前，按以下顺序准备：
+
+1. 复制 `.env.example` 为 `.env`，填写 `XZSFBJ_AES_KEY`（行舟深房
+   `regionId` 的 AES-ECB 密钥，必须是 16/24/32 字节）。真实密钥只保存在本机 `.env`，
+   不要提交到 Git。
+
+2. 安装 64 位 Node.js，并安装 Python 依赖：
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+   ```
+
+3. 安装项目内置 WMPF 桥的 Node 依赖。该步骤会下载 Frida 原生绑定，必须成功生成
+   `third_party\zhong_wmpf_bridge\node_modules\frida\build\frida_binding.node`：
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\setup_xzsfbj_wmpf_bridge.ps1
+   ```
+
+   若该文件不存在，勿运行 MVP；检查网络是否能访问 Frida 的预编译绑定下载地址后重试。
+   `node_modules` 是本机依赖，不提交到 Git。
+
+4. 登录 Windows 微信，首次打开一次「行舟深房」并等待页面加载完成。小程序会自动创建
+   本地小区索引 `xqData.json`；无需从其它机器复制或提交该文件。
+   默认会从当前用户的微信目录自动查找；若微信使用了非标准数据目录，可设置
+   `XZSFBJ_XQ_DATA_PATH` 指向本机生成的 `xqData.json`，桥目录也可用
+   `XZSFBJ_WMPF_BRIDGE_DIR` 覆盖。
+
+5. 启动服务或 MVP。首次实际采集前，桥接就绪后从微信会话重新打开小程序并进入任意
+   小区的成交记录；程序会在内存中捕获 token，日志仅显示脱敏片段、长度和指纹，随后
+   自动关闭 WMPF 桥，微信小程序保持打开。token 每 30 个小区或 1 小时刷新一次。
+
+   正式服务使用 `--manual-login` 启动时，行舟深房会在终端明确提示“无需网页登录”，
+   只需确认本地依赖后按回车；真正采集该平台时才会提示打开小程序并自动捕获 token。
+
+   ```powershell
+   .\.venv\Scripts\python.exe app\scripts\xzsfbj_mvp_test.py `
+     --community "月亮湾花园" --area 91.5 --debug
+   ```
+
+`--debug` 仅导出脱敏接口 JSON 到 `debug/`，该目录已被 Git 忽略。正式服务默认不导出
+调试响应；MVP 和正式 adapter 都不使用系统代理、证书注入或落盘 token。接口触发风控时，
+程序沿用统一人工回车确认流程，确认后重新捕获 token 并继续当前小区。
+
 ### 接单测试
 
 服务就绪后，用根目录 `test_inquiry.py` 发一次真实询价，观察浏览器采集并轮询结果：
@@ -435,6 +502,7 @@ python test_inquiry.py
 ```json
 {
   "city": "深圳",
+  "administrativeDistrict": "南山区",
   "communityName": "绿景虹湾",
   "area": 89.5,
   "requestId": "demo-001"
@@ -444,6 +512,7 @@ python test_inquiry.py
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `city` | string | 是 | 城市名（如 深圳、广州、东莞） |
+| `administrativeDistrict` | string | 是 | 行政区（如 南山区）；用于行舟深房同名小区消歧 |
 | `communityName` | string | 是 | 小区名称 |
 | `area` | number | 是 | 精确面积（㎡） |
 | `requestId` | string | 否 | 自定义任务 ID，不传则自动生成 |

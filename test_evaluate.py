@@ -21,7 +21,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # ─── 配置 ──────────────────────────────────────────────
 BASE_URL = "http://127.0.0.1:8000"
-INPUT_FILE = Path(__file__).parent / "test_data/房产评估汇总表_生成4.xlsx"
+INPUT_FILE = Path(__file__).parent / "test_data/房产评估汇总表_生成4_新增行政区.xlsx"
 OUTPUT_DIR = Path(__file__).parent / "results"
 POLL_INTERVAL = 6       # 轮询间隔秒数（>5 避免连续 429）
 MAX_WAIT = 600          # 单任务软等待阈值；超过后只报警，不判失败，继续阻塞等待
@@ -120,7 +120,9 @@ def _wait_until_service_ready(reason: str):
         time.sleep(READY_CHECK_INTERVAL)
 
 
-def _create_inquiry_task(city: str, community: str, area: float) -> str | None:
+def _create_inquiry_task(
+    city: str, administrative_district: str, community: str, area: float
+) -> str | None:
     """创建询价任务。服务端待人工处理时阻塞等待恢复，而不是直接失败。"""
     while True:
         try:
@@ -129,6 +131,7 @@ def _create_inquiry_task(city: str, community: str, area: float) -> str | None:
                 "/inquiries",
                 json={
                     "city": city,
+                    "administrativeDistrict": administrative_district,
                     "communityName": community,
                     "area": area,
                 },
@@ -216,6 +219,7 @@ for c in range(1, ws_in.max_column + 1):
         col_map[str(h).strip()] = c
 
 city_col = col_map.get("city")
+administrative_district_col = col_map.get("行政区") or col_map.get("administrativeDistrict")
 area_col = col_map.get("面积㎡", 1)
 price_col = col_map.get("评估单价", 2)
 community_col = col_map.get("小区名称", 4)
@@ -226,6 +230,9 @@ if city_col:
     print(f"[city] 检测到 city 列（第 {city_col} 列），将逐行读取城市")
 else:
     print(f"[city] 未检测到 city 列，使用默认城市: {DEFAULT_CITY}")
+
+if not administrative_district_col:
+    raise SystemExit("评估表缺少‘行政区’列，无法创建新的询价请求")
 
 # 表头列名: city? | 面积㎡ | 评估单价 | 房产评估总值 | 小区名称 | ...
 data = []
@@ -241,8 +248,17 @@ for row_idx in range(2, ws_in.max_row + 1):
         city = str(city).strip() if city else ""
     if not city:
         city = DEFAULT_CITY
+    administrative_district = ws_in.cell(
+        row=row_idx, column=administrative_district_col
+    ).value
+    administrative_district = (
+        str(administrative_district).strip() if administrative_district else ""
+    )
+    if not administrative_district:
+        raise SystemExit(f"第 {row_idx} 行缺少行政区，无法创建询价请求")
     data.append({
         "city": city,
+        "administrative_district": administrative_district,
         "community": str(community).strip(),
         "area": float(area),
         "eval_price": float(eval_price),
@@ -265,11 +281,17 @@ for i, item in enumerate(data):
     area = item["area"]
     eval_price = item["eval_price"]
     city = item["city"]
+    administrative_district = item["administrative_district"]
 
-    print(f"\n[{i+1}/{len(data)}] {city} {community} 面积={area}㎡ 评估单价={eval_price}")
+    print(
+        f"\n[{i+1}/{len(data)}] {city} {administrative_district} {community} "
+        f"面积={area}㎡ 评估单价={eval_price}"
+    )
     final_data = None
     while True:
-        task_id = _create_inquiry_task(city, community, area)
+        task_id = _create_inquiry_task(
+            city, administrative_district, community, area
+        )
         if not task_id:
             results.append({
                 "社区": community, "面积": area, "评估单价": eval_price,

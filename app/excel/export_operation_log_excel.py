@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from copy import copy
 import re
 import sys
 from collections import Counter, defaultdict
@@ -1076,6 +1077,16 @@ def build_workbook(
     left = Alignment(horizontal="left", vertical="top", wrap_text=True)
     used_sheet_names: Counter[str] = Counter()
 
+    def configure_sheet_view(ws) -> None:
+        """设置导出文件的默认视图，避免用户打开后再次手工调整。"""
+        ws.freeze_panes = None
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.value is not None:
+                    alignment = copy(cell.alignment)
+                    alignment.wrap_text = True
+                    cell.alignment = alignment
+
     def write_row(ws, row_index: int, values: list[object], header: bool = False) -> None:
         for col_index, value in enumerate(values, 1):
             cell = ws.cell(row=row_index, column=col_index, value=value)
@@ -1214,7 +1225,6 @@ def build_workbook(
             for column in (7, 9, 10):
                 ws.cell(row=row_index, column=column).number_format = "0.00%"
 
-        ws.freeze_panes = "A6"
         widths = {
             1: 10,
             2: 10,
@@ -1241,6 +1251,7 @@ def build_workbook(
         }
         for column, width in widths.items():
             ws.column_dimensions[get_column_letter(column)].width = width
+        configure_sheet_view(ws)
 
     if analysis_rows is not None:
         summary_title = safe_sheet_name("分析汇总", used_sheet_names)
@@ -1449,7 +1460,6 @@ def build_workbook(
             write_row(ws, row_index, ["", U_DEAL_NOTE, "", "", "", "", U_NONE])
             row_index += 1
 
-        ws.freeze_panes = "A13"
         for col_index, width in {
             1: 12,
             2: 12,
@@ -1463,6 +1473,7 @@ def build_workbook(
             10: 28,
         }.items():
             ws.column_dimensions[get_column_letter(col_index)].width = width
+        configure_sheet_view(ws)
 
     return workbook
 
