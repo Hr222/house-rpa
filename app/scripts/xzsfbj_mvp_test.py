@@ -50,6 +50,7 @@ from app.platforms.base import (
     short_circuit_result,
 )
 from app.platforms import xzsfbj_constants as constants
+from app.platforms.adapters.xzsfbj import DealPageRisk
 from app.parsers.xzsfbj import (
     filter_deal_records,
     find_community_candidates,
@@ -76,15 +77,15 @@ DEBUG_DIR = config.DEBUG_DIR
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 WMPF_BRIDGE_DIR_ENV = "XZSFBJ_WMPF_BRIDGE_DIR"
 DEFAULT_WMPF_BRIDGE_DIR = PROJECT_ROOT / "third_party" / "zhong_wmpf_bridge"
-TOKEN_CAPTURE_TIMEOUT = 180
+TOKEN_CAPTURE_TIMEOUT = 30
 XQ_DATA_PATH_ENV = "XZSFBJ_XQ_DATA_PATH"
 MINI_PROGRAM_APP_ID = "wxd49effb77288061d"
 
-# 防风控参数（行舟深房接口实测需要 5~8 秒真人间隔）
-PAGE_GAP_MIN = 5.0
-PAGE_GAP_MAX = 8.0
-STEP_GAP_MIN = 5.0
-STEP_GAP_MAX = 8.0
+# 防风控参数：行舟深房接口请求间隔固定为 11 秒
+PAGE_GAP_MIN = 11.0
+PAGE_GAP_MAX = 11.0
+STEP_GAP_MIN = 11.0
+STEP_GAP_MAX = 11.0
 DEAL_AREA_TOLERANCE = constants.DEAL_AREA_TOLERANCE
 DEAL_LOOKBACK_MONTHS = constants.DEAL_LOOKBACK_MONTHS
 
@@ -314,6 +315,8 @@ def _check_err(api_name, data):
     if str(err) == "0":
         return
     msg = str(data.get("errMsg", ""))
+    if str(err) in constants.DEAL_PAGE_RISK_CODES and api_name == "getXqDeal":
+        raise DealPageRisk(f"{api_name} 平台风控 errCode={err} msg={msg}")
     if any(kw in msg.lower() for kw in _RISK_KEYWORDS):
         raise Blocked(f"errCode={err} msg={msg}")
     if str(err) in {"40001", "41000"}:
@@ -428,11 +431,41 @@ async def _do_collect_one(client, headers, community, area, started_at, request_
     # 成交记录（自动翻页）
     page = 1
     deal_total = 0
+    deal_incomplete_reason = None
     while True:
         log.info("    成交记录 第%d页...", page)
-        deal_data = await asyncio.to_thread(
-            fetch_deals, client, headers, region_id, page, area
-        )
+        risk_retries = 0
+        while True:
+            try:
+                deal_data = await asyncio.to_thread(
+                    fetch_deals, client, headers, region_id, page, area
+                )
+                break
+            except DealPageRisk as exc:
+                if risk_retries < constants.DEAL_PAGE_RISK_MAX_RETRIES:
+                    risk_retries += 1
+                    log.warning(
+                        "    成交第%d页触发平台风控，%s秒后重试（第%d/%d次）: %s",
+                        page,
+                        constants.DEAL_PAGE_RISK_RETRY_DELAY,
+                        risk_retries,
+                        constants.DEAL_PAGE_RISK_MAX_RETRIES,
+                        exc,
+                    )
+                    await _human_api_pause(
+                        constants.DEAL_PAGE_RISK_RETRY_DELAY,
+                        constants.DEAL_PAGE_RISK_RETRY_DELAY,
+                    )
+                    continue
+                deal_incomplete_reason = (
+                    f"后续成交记录因平台风控未能获取（第{page}页，"
+                    f"已重试{constants.DEAL_PAGE_RISK_MAX_RETRIES}次），"
+                    f"已保留此前成功获取的{len(all_deals)}条成交数据"
+                )
+                log.warning("    %s", deal_incomplete_reason)
+                break
+        if deal_incomplete_reason:
+            break
         if deal_data is None:
             break
         if not isinstance(deal_data, dict):
@@ -517,6 +550,7 @@ async def _do_collect_one(client, headers, community, area, started_at, request_
         deal_records=deal_records,
         listing_snapshots=filtered_snapshots,
         deal_source="成交记录" if deal_prices else "无",
+        reason=deal_incomplete_reason,
         request_id=request_id,
         elapsed_seconds=round(time.time() - started_at, 2),
         **reference,

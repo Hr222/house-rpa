@@ -135,6 +135,7 @@ class PlatformAdapter(ABC):
     name: str
     start_url: str
     requires_login: bool = True  # 子类可设为 False（如安居客无需登录）
+    uses_browser: bool = True  # 接口型平台可设为 False，由外部应用会话提供数据
 
     _LOGIN_POSITIVE_MARKERS = ("退出", "退出登录")  # 已登录后页面必定包含的标识
 

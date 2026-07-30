@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import logging
+import math
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -14,6 +16,8 @@ from app.core import config
 from app.core.models import InquiryRequest
 from app.core.status import TaskStatus
 from app.runtime import RPARuntime
+
+log = logging.getLogger(__name__)
 
 
 class InquiryCreatePayload(BaseModel):
@@ -122,13 +126,21 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
         # 限流：同一 taskId 两次查询最小间隔 GET_INQUIRY_MIN_INTERVAL 秒
         allowed, wait = current_runtime.check_get_allowed(task_id)
         if not allowed:
+            retry_after = max(1, math.ceil(wait))
+            log.warning(
+                "[API限流] GET /inquiries/%s 查询过于频繁，retry_after=%ss；"
+                "该 429 来自客户端轮询，不是平台采集接口",
+                task_id,
+                retry_after,
+            )
             return JSONResponse(
                 status_code=429,
                 content={
                     "code": "TOO_MANY_REQUESTS",
-                    "message": f"查询过于频繁，请在 {wait:.0f} 秒后重试",
-                    "data": {"taskId": task_id, "retryAfter": round(wait)},
+                    "message": f"查询过于频繁，请在 {retry_after} 秒后重试",
+                    "data": {"taskId": task_id, "retryAfter": retry_after},
                 },
+                headers={"Retry-After": str(retry_after)},
             )
         task = current_runtime.get_task(task_id)
         if task is None:

@@ -678,6 +678,7 @@ persist/                  # 项目根目录下
 
 - 控制台
 - `logs/YYYYMMDD-info.log`
+- `logs/YYYYMMDD-error.log`（`WARNING` 及以上级别）
 
 日志内容重点包括：
 

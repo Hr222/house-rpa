@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import importlib.util
 import json
 import logging
 import random
@@ -51,6 +52,10 @@ class Blocked(Exception):
 
 class ApiResponseError(RuntimeError):
     """接口返回未识别的业务错误。"""
+
+
+class DealPageRisk(ApiResponseError):
+    """成交分页触发平台风控，允许保留已采集数据后降级。"""
 
 
 def _sanitize_debug_payload(value: Any) -> Any:
@@ -105,6 +110,11 @@ def _check_api_error(api_name: str, payload: Any) -> None:
     if error_code == "0":
         return
     message = str(payload.get("errMsg", ""))
+    if (
+        error_code in constants.DEAL_PAGE_RISK_CODES
+        and api_name.startswith("deals_page_")
+    ):
+        raise DealPageRisk(f"{api_name} 平台风控 errCode={error_code} msg={message}")
     lowered = message.casefold()
     if any(keyword.casefold() in lowered for keyword in constants.RISK_KEYWORDS):
         raise Blocked(f"errCode={error_code} msg={message}")
@@ -134,6 +144,12 @@ class XzsfbjApiAdapter:
         node = shutil.which("node")
         if node is None:
             return False, "未找到 Node.js，无法启动 WMPF 调试桥"
+        try:
+            crypto_available = importlib.util.find_spec("Crypto.Cipher") is not None
+        except ModuleNotFoundError:
+            crypto_available = False
+        if not crypto_available:
+            return False, "Python 依赖 pycryptodome 未安装，请执行 python -m pip install pycryptodome"
         bridge_dir = constants.resolve_wmpf_bridge_dir()
         if not (bridge_dir / "src" / "index.js").is_file():
             return False, f"未找到 WMPF 调试桥: {bridge_dir}"
@@ -192,8 +208,18 @@ class XzsfbjApiAdapter:
             proc.kill()
             await asyncio.to_thread(proc.wait, 5)
 
-    async def _capture_token(self, reason: str = "") -> Optional[str]:
+    async def _capture_token(
+        self,
+        reason: str = "",
+        request_id: Optional[str] = None,
+    ) -> Optional[str]:
         proc = None
+        capture_started = time.monotonic()
+        log.info(
+            "[行舟深房 token] 开始捕获 request_id=%s timeout=%.0fs",
+            request_id or "-",
+            constants.TOKEN_CAPTURE_TIMEOUT,
+        )
         try:
             proc = await self._start_bridge()
             async with websockets.connect(constants.WMPF_WS_URL) as socket:
@@ -210,11 +236,24 @@ class XzsfbjApiAdapter:
                     )
                 deadline = asyncio.get_running_loop().time() + constants.TOKEN_CAPTURE_TIMEOUT
                 token = None
+                last_progress_at = capture_started
                 while (remaining := deadline - asyncio.get_running_loop().time()) > 0:
                     try:
-                        raw = await asyncio.wait_for(socket.recv(), timeout=remaining)
+                        raw = await asyncio.wait_for(
+                            socket.recv(), timeout=min(remaining, 15.0)
+                        )
                     except TimeoutError:
-                        break
+                        elapsed = time.monotonic() - capture_started
+                        if elapsed - last_progress_at >= 15:
+                            log.info(
+                                "[行舟深房 token] 仍在等待小程序成交记录请求 "
+                                "request_id=%s elapsed=%.0fs remaining=%.0fs",
+                                request_id or "-",
+                                elapsed,
+                                max(constants.TOKEN_CAPTURE_TIMEOUT - elapsed, 0),
+                            )
+                            last_progress_at = elapsed
+                        continue
                     try:
                         message = json.loads(raw)
                     except json.JSONDecodeError:
@@ -235,21 +274,43 @@ class XzsfbjApiAdapter:
                     if token:
                         break
             if not token:
-                log.error("未捕获到 token，请确认小程序已重新打开并进入成交记录")
+                log.warning(
+                    "[行舟深房 token] 捕获超时，未收到有效 Authorization "
+                    "request_id=%s elapsed=%.1fs，请确认小程序已重新打开并进入成交记录",
+                    request_id or "-",
+                    time.monotonic() - capture_started,
+                )
                 return None
             masked = f"{token[:8]}...{token[-8:]}" if len(token) > 20 else "***"
             fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
-            log.info("token 已捕获: %s（长度=%d，指纹=%s）", masked, len(token), fingerprint)
+            log.info(
+                "[行舟深房 token] 已捕获 request_id=%s: %s（长度=%d，指纹=%s，耗时=%.1fs）",
+                request_id or "-",
+                masked,
+                len(token),
+                fingerprint,
+                time.monotonic() - capture_started,
+            )
             return token
         except (OSError, RuntimeError, websockets.WebSocketException) as exc:
-            log.error("token 抓取失败: %s", exc)
+            log.error(
+                "[行舟深房 token] 抓取失败 request_id=%s: %s",
+                request_id or "-",
+                exc,
+            )
             return None
         finally:
             await self._stop_bridge(proc)
             if proc is not None:
                 log.info("WMPF 调试桥已关闭")
 
-    async def _get_token(self, *, force: bool = False, reason: str = "") -> Optional[str]:
+    async def _get_token(
+        self,
+        *,
+        force: bool = False,
+        reason: str = "",
+        request_id: Optional[str] = None,
+    ) -> Optional[str]:
         now = time.time()
         if (
             not force
@@ -267,7 +328,7 @@ class XzsfbjApiAdapter:
                 and now - self._token_acquired_at < constants.TOKEN_REFRESH_INTERVAL
             ):
                 return self._token
-            token = await self._capture_token(reason)
+            token = await self._capture_token(reason, request_id=request_id)
             if token:
                 self._token = token
                 self._token_acquired_at = time.time()
@@ -316,6 +377,10 @@ class XzsfbjApiAdapter:
             raise LoginExpired(f"{label} HTTP 401")
         if response.status_code == 403:
             raise Blocked(f"{label} HTTP 403")
+        if response.status_code == 429:
+            retry_after = response.headers.get("Retry-After", "")
+            detail = f" retry_after={retry_after}s" if retry_after else ""
+            raise Blocked(f"{label} HTTP 429{detail}")
         response.raise_for_status()
         try:
             payload = response.json()
@@ -356,22 +421,60 @@ class XzsfbjApiAdapter:
         )
         return parsers.parse_sales(payload.get("data"))
 
-    async def _wait_api_risk(self, reason: str, request_id: Optional[str]) -> bool:
+    async def _recover_token_after_manual(
+        self, reason: str, request_id: Optional[str]
+    ) -> Optional[str]:
+        """人工确认后重新捕获 token；再次失败时继续等待人工处理。"""
         context = "行舟深房(xzsfbj)/接口"
-        await notify_manual_verify_state(
-            context, PlatformHealthStatus.WAIT_MANUAL_VERIFY, reason
-        )
-        try:
-            await wait_for_manual_unblock(context, attempt=1)
-        except Exception as exc:
-            log.warning("行舟深房人工风控确认失败 request=%s: %s", request_id, exc)
-            return False
-        self._token = None
-        token = await self._get_token(force=True, reason="人工确认完成，请重新捕获 token")
-        if not token:
-            return False
-        await notify_manual_verify_state(context, PlatformHealthStatus.READY, "接口风控已人工确认")
-        return True
+        attempt = 1
+        current_reason = reason
+        while True:
+            await notify_manual_verify_state(
+                context, PlatformHealthStatus.WAIT_MANUAL_VERIFY, current_reason
+            )
+            log.warning(
+                "行舟深房 token 未就绪，暂停采集并等待人工恢复 "
+                "request=%s attempt=%d reason=%s；恢复前不进入汇总",
+                request_id,
+                attempt,
+                current_reason,
+            )
+            try:
+                await wait_for_manual_unblock(context, attempt=attempt)
+            except Exception as exc:
+                log.warning(
+                    "行舟深房人工风控确认失败 request=%s attempt=%d: %s",
+                    request_id,
+                    attempt,
+                    exc,
+                )
+                return None
+
+            self._token = None
+            token = await self._get_token(
+                force=True,
+                reason="人工确认完成，请重新捕获 token",
+                request_id=request_id,
+            )
+            if token:
+                await notify_manual_verify_state(
+                    context, PlatformHealthStatus.READY, "接口风控已人工确认，token 已重新捕获"
+                )
+                return token
+
+            attempt += 1
+            current_reason = (
+                "人工确认后仍未捕获到 token，请重新打开行舟深房小程序并进入成交记录；"
+                "采集仍处于风控暂停状态"
+            )
+            log.warning(
+                "行舟深房人工确认后仍未捕获到 token request=%s，继续等待下一次人工确认",
+                request_id,
+            )
+
+    async def _wait_api_risk(self, reason: str, request_id: Optional[str]) -> bool:
+        token = await self._recover_token_after_manual(reason, request_id)
+        return token is not None
 
     async def collect_one(
         self,
@@ -401,11 +504,38 @@ class XzsfbjApiAdapter:
             all_deals: list[dict[str, Any]] = []
             page = 1
             deal_total = 0
+            deal_incomplete_reason: Optional[str] = None
             while True:
                 log.info("成交记录 第%d页...", page)
-                deal_total, page_deals = await self._fetch_deals(
-                    client, headers, region_id, page, area
-                )
+                risk_retries = 0
+                while True:
+                    try:
+                        deal_total, page_deals = await self._fetch_deals(
+                            client, headers, region_id, page, area
+                        )
+                        break
+                    except DealPageRisk as exc:
+                        if risk_retries < constants.DEAL_PAGE_RISK_MAX_RETRIES:
+                            risk_retries += 1
+                            log.warning(
+                                "行舟深房成交第%d页触发平台风控，%s秒后重试（第%d/%d次）: %s",
+                                page,
+                                constants.DEAL_PAGE_RISK_RETRY_DELAY,
+                                risk_retries,
+                                constants.DEAL_PAGE_RISK_MAX_RETRIES,
+                                exc,
+                            )
+                            await asyncio.sleep(constants.DEAL_PAGE_RISK_RETRY_DELAY)
+                            continue
+                        deal_incomplete_reason = (
+                            f"后续成交记录因平台风控未能获取（第{page}页，"
+                            f"已重试{constants.DEAL_PAGE_RISK_MAX_RETRIES}次），"
+                            f"已保留此前成功获取的{len(all_deals)}条成交数据"
+                        )
+                        log.warning("行舟深房%s", deal_incomplete_reason)
+                        break
+                if deal_incomplete_reason:
+                    break
                 all_deals.extend(page_deals)
                 log.info(
                     "本页 %d 条，累计 %d/%d", len(page_deals), len(all_deals), deal_total
@@ -465,6 +595,7 @@ class XzsfbjApiAdapter:
                 deal_records=deal_record_dicts,
                 listing_snapshots=filtered_snapshots,
                 deal_source="成交记录" if deal_prices else "无",
+                reason=deal_incomplete_reason,
                 request_id=request_id,
                 elapsed_seconds=round(time.time() - started_at, 2),
                 **reference,
@@ -564,6 +695,11 @@ class XzsfbjApiAdapter:
                 ),
             }
 
+        partial_reasons = [result.reason for result in results if result.reason]
+        reason = f"已合并 {len(results)} 个住宅期数"
+        if partial_reasons:
+            reason = "；".join([reason, *partial_reasons])
+
         return PlatformResult(
             name="行舟深房",
             status=PlatformResultStatus.SUCCESS,
@@ -572,7 +708,7 @@ class XzsfbjApiAdapter:
             deal_records=deal_records,
             listing_snapshots=snapshots,
             deal_source="成交记录" if deal_prices else "无",
-            reason=f"已合并 {len(results)} 个住宅期数",
+            reason=reason,
             request_id=request_id,
             elapsed_seconds=round(time.time() - started_at, 2),
             **reference,
@@ -618,14 +754,21 @@ class XzsfbjApiAdapter:
                             "token reached the per-batch limit; recapture it from the mini program"
                             if self._communities_since_refresh >= constants.MAX_COMMUNITIES_PER_TOKEN
                             else ""
-                        )
+                        ),
+                        request_id=request.request_id,
                     )
                     if not token:
-                        return short_circuit_result(
-                            "行舟深房", PlatformResultStatus.WAIT_MANUAL_VERIFY,
-                            "未捕获到 token，请重新打开小程序并进入成交记录",
-                            request.request_id, started_at,
+                        token = await self._recover_token_after_manual(
+                            "30 秒 token 捕获窗口已结束，未捕获到 token；"
+                            "请重新打开行舟深房小程序并进入成交记录，确认后继续采集",
+                            request.request_id,
                         )
+                        if not token:
+                            return short_circuit_result(
+                                "行舟深房", PlatformResultStatus.WAIT_MANUAL_VERIFY,
+                                "人工风控恢复未完成，未捕获到 token，采集未进入汇总",
+                                request.request_id, started_at,
+                            )
                     await self._wait_between_communities()
                     self._communities_since_refresh += 1
                     log.info(

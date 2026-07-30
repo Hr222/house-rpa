@@ -223,6 +223,7 @@ def test_get_inquiry_rate_limited_after_first_call():
     assert second.status_code == 429
     assert second.json()["code"] == "TOO_MANY_REQUESTS"
     assert second.json()["data"]["retryAfter"] == 10
+    assert second.headers["retry-after"] == "10"
     assert "taskId" in second.json()["data"]
 
 
