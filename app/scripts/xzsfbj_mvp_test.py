@@ -2368,7 +2368,7 @@ async def run_ui_mvp(
             )
             await asyncio.to_thread(input)
             await _enable_network_after_manual_ready(client)
-            return await _run_ui_mvp_item(
+            result = await _run_ui_mvp_item(
                 client,
                 monitor,
                 community,
@@ -2378,6 +2378,12 @@ async def run_ui_mvp(
                 administrative_district,
                 hold_seconds,
             )
+            log.info(
+                "UI MVP 单条采集已完成并回到可搜索首页；保持微信小程序、"
+                "WMPF 桥和 Network 监听，等待下一单（Ctrl+C 才清理）"
+            )
+            await asyncio.Event().wait()
+            return result
     except (OSError, RuntimeError, websockets.WebSocketException) as exc:
         log.exception("UI MVP 失败: %r (%s)", exc, type(exc).__name__)
         return None
