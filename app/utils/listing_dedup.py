@@ -128,6 +128,60 @@ def deduplicate_same_platform(items: Iterable[T]) -> list[T]:
     return result
 
 
+def _cross_platform_match_score(
+    left: T,
+    right: T,
+    *,
+    area_tolerance: float,
+    unit_price_tolerance: float,
+) -> tuple[int, float, float, float] | None:
+    """返回跨平台候选的匹配分数；不匹配时返回 None。"""
+    left_platform = _normalized_text(getattr(left, "platform", ""))
+    right_platform = _normalized_text(getattr(right, "platform", ""))
+    if not left_platform or left_platform == right_platform:
+        return None
+
+    left_community = _normalized_text(getattr(left, "community_name", ""))
+    right_community = _normalized_text(getattr(right, "community_name", ""))
+    if not left_community or left_community != right_community:
+        return None
+
+    left_area = _number(getattr(left, "area", None))
+    right_area = _number(getattr(right, "area", None))
+    left_price = _number(getattr(left, "unit_price", None))
+    right_price = _number(getattr(right, "unit_price", None))
+    if left_area is None or right_area is None or left_price is None or right_price is None:
+        return None
+
+    area_distance = abs(left_area - right_area)
+    price_distance = abs(left_price - right_price)
+    if area_distance > area_tolerance or price_distance > unit_price_tolerance:
+        return None
+
+    left_layout = _layout_signature(getattr(left, "layout", ""))
+    right_layout = _layout_signature(getattr(right, "layout", ""))
+    if left_layout is not None and right_layout is not None:
+        if left_layout != right_layout:
+            return None
+    elif not _titles_match(
+        getattr(left, "title", ""),
+        getattr(right, "title", ""),
+    ):
+        # 任一数据源缺少户型时，标题仍是必要条件，不能只靠数值字段合并。
+        return None
+
+    left_total = _number(getattr(left, "total_price", None))
+    right_total = _number(getattr(right, "total_price", None))
+    total_distance = (
+        abs(left_total - right_total)
+        if left_total is not None and right_total is not None
+        else float("inf")
+    )
+    # 标题仅用于多个候选同时命中时消歧，不改变原有的面积/单价/户型准入条件。
+    title_match = int(_titles_match(getattr(left, "title", ""), getattr(right, "title", "")))
+    return title_match, -area_distance, -price_distance, -total_distance
+
+
 def _cross_platform_match(
     left: T,
     right: T,
@@ -136,38 +190,12 @@ def _cross_platform_match(
     unit_price_tolerance: float,
 ) -> bool:
     """返回两行数据是否可以安全视为同一套房源。"""
-    left_platform = _normalized_text(getattr(left, "platform", ""))
-    right_platform = _normalized_text(getattr(right, "platform", ""))
-    if not left_platform or left_platform == right_platform:
-        return False
-
-    left_community = _normalized_text(getattr(left, "community_name", ""))
-    right_community = _normalized_text(getattr(right, "community_name", ""))
-    if not left_community or left_community != right_community:
-        return False
-
-    left_area = _number(getattr(left, "area", None))
-    right_area = _number(getattr(right, "area", None))
-    left_price = _number(getattr(left, "unit_price", None))
-    right_price = _number(getattr(right, "unit_price", None))
-    if left_area is None or right_area is None or left_price is None or right_price is None:
-        return False
-    if abs(left_area - right_area) > area_tolerance:
-        return False
-    if abs(left_price - right_price) > unit_price_tolerance:
-        return False
-
-    left_layout = _layout_signature(getattr(left, "layout", ""))
-    right_layout = _layout_signature(getattr(right, "layout", ""))
-    if left_layout is not None and right_layout is not None:
-        return left_layout == right_layout
-
-    # 任一数据源缺少户型时，使用规范化标题作为身份判断的兜底信号。
-    # 这同时覆盖一方缺少户型和双方都缺少户型的情况。
-    return _titles_match(
-        getattr(left, "title", ""),
-        getattr(right, "title", ""),
-    )
+    return _cross_platform_match_score(
+        left,
+        right,
+        area_tolerance=area_tolerance,
+        unit_price_tolerance=unit_price_tolerance,
+    ) is not None
 
 
 def deduplicate_cross_platform(
@@ -186,7 +214,7 @@ def deduplicate_cross_platform(
     # 每行数据只与房源组的首行比较。
     # 这样可以将代表项作为身份锚点，避免两行数据仅因恰好共享另一条匹配项就被直接判定为相等。
     for index, row in enumerate(rows):
-        compatible_components = []
+        compatible_components: list[tuple[int, tuple[int, float, float, float]]] = []
         for component_index, component in enumerate(components):
             platform = _normalized_text(getattr(row, "platform", ""))
             component_platforms = {
@@ -195,19 +223,30 @@ def deduplicate_cross_platform(
             }
             if platform and platform in component_platforms:
                 continue
-            if _cross_platform_match(
+            score = _cross_platform_match_score(
                 row,
                 rows[component[0]],
                 area_tolerance=area_tolerance,
                 unit_price_tolerance=unit_price_tolerance,
-            ):
-                compatible_components.append(component_index)
+            )
+            if score is not None:
+                compatible_components.append((component_index, score))
 
-        # 有歧义的匹配保留为独立房源。
-        if len(compatible_components) != 1:
+        if not compatible_components:
             components.append([index])
             continue
-        components[compatible_components[0]].append(index)
+
+        best_score = max(score for _, score in compatible_components)
+        best_components = [
+            component_index
+            for component_index, score in compatible_components
+            if score == best_score
+        ]
+        # 多个候选完全同分时仍保留独立房源；只有存在明确的最佳候选才合并。
+        if len(best_components) != 1:
+            components.append([index])
+            continue
+        components[best_components[0]].append(index)
 
     for component in components:
         if len(component) < 2:

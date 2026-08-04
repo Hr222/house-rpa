@@ -110,12 +110,19 @@ def _algorithm_deal_price_lists(
 
 
 def _reference_prices(result: PlatformResult) -> list[float]:
-    """返回严格面积范围之外新增房源的价格值。"""
+    """返回弱参考房源的价格值，包括严格范围内的单条弱参考。"""
     if (
         result.listing_snapshots
         and result.reference_area_min is not None
         and result.reference_area_max is not None
     ):
+        valid_prices = [
+            snapshot.unit_price
+            for snapshot in result.listing_snapshots
+            if snapshot.unit_price is not None and snapshot.unit_price > 0
+        ]
+        if result.reference_listing_count == 1 and len(valid_prices) == 1:
+            return valid_prices
         request_area = (result.reference_area_min + result.reference_area_max) / 2
         return [
             snapshot.unit_price

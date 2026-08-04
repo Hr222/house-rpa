@@ -231,7 +231,7 @@
 | `referenceCode` | 可选；最终选中的价格峰实际使用面积弱参考时为 `WEAK_AREA_REFERENCE` |
 | `referenceAreaTolerance` | 可选；弱参考实际使用的请求面积对称容差，单位㎡ |
 | `referenceAreaMin` / `referenceAreaMax` | 可选；弱参考实际使用的面积范围，单位㎡ |
-| `referenceListingCount` | 可选；额外补充进入弱参考的房源数量 |
+| `referenceListingCount` | 可选；进入弱参考的房源数量，单条严格命中时也会计为 1 |
 
 弱参考不是新的状态码或决策分支。公开询价响应不会返回 `platformResults`；平台级弱参考字段仅保留在运行时内部结果、操作日志和 Excel 分析数据中。最终公开结果只有在选中的价格峰确实包含该平台补充数据时才输出顶层弱参考字段。最大面积容差默认 `20㎡`，可通过环境配置 `RPA_WEAK_AREA_MAX_TOLERANCE` 调整，当前暂不提供 API 修改入口。
 

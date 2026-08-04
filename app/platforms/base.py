@@ -529,7 +529,6 @@ def filter_snapshots_by_community(snapshots: list, community_name: str) -> list:
 
 LISTING_AREA_TOLERANCE = 1.0
 WEAK_AREA_REFERENCE = "WEAK_AREA_REFERENCE"
-WEAK_AREA_REFERENCE_MIN_PEAK_COUNT = 3
 
 
 def listing_area_bounds(area: float, tolerance: float = LISTING_AREA_TOLERANCE) -> tuple[float, float]:
@@ -560,28 +559,12 @@ def _quote_prices_from_snapshots(snapshots: list[ListingSnapshot]) -> list[float
 
 
 def _has_effective_price_peak(snapshots: list[ListingSnapshot]) -> bool:
-    """返回当前价格算法是否找到了包含 3 条房源的价格峰值。"""
+    """返回当前价格算法是否找到了至少一个可用价格峰。"""
     quote_prices = _quote_prices_from_snapshots(snapshots)
     if not quote_prices:
         return False
     candidates = find_weighted_price_candidates([quote_prices])
-    return any(candidate.count >= WEAK_AREA_REFERENCE_MIN_PEAK_COUNT for candidate in candidates)
-
-
-def _area_tolerance_candidates(
-    snapshots: list[ListingSnapshot],
-    area: float,
-    strict_tolerance: float,
-    max_tolerance: float,
-) -> list[float]:
-    """返回相邻面积所体现的最小对称容差。"""
-    distances = {
-        round(abs(snapshot.area - area), 10)
-        for snapshot in snapshots
-        if snapshot.area is not None
-        and strict_tolerance < abs(snapshot.area - area) <= max_tolerance
-    }
-    return sorted(distances)
+    return bool(candidates)
 
 
 def select_snapshots_by_area_with_reference(
@@ -590,11 +573,11 @@ def select_snapshots_by_area_with_reference(
     tolerance: float = LISTING_AREA_TOLERANCE,
     max_tolerance: Optional[float] = None,
 ) -> tuple[list[ListingSnapshot], float, int]:
-    """选择能够形成有效价格峰值的最小面积范围。
+    """选择能够形成有效价格峰值的面积范围。
 
-    如果严格范围已经包含有效峰值，则保留严格范围；否则按升序依次尝试相邻的对称范围。
-    只有当现有价格众数算法保留了至少 3 条房源的峰值时才停止扩展。第三个返回值表示
-    严格范围之外新增的、带有价格的房源数量。
+    如果严格范围已经包含有效峰值，则保留严格范围；否则取封顶范围内的全部目标小区
+    房源交给现有价格峰算法。第三个返回值表示严格范围之外新增的、带有价格的房源数量。
+    单条候选也会保留，但调用方会将其标记为弱参考。
     """
     max_tolerance = (
         config.WEAK_AREA_MAX_TOLERANCE
@@ -610,28 +593,31 @@ def select_snapshots_by_area_with_reference(
     if max_tolerance <= tolerance:
         return strict_matches, tolerance, 0
 
-    strict_ids = {id(snapshot) for snapshot in strict_matches}
-    for candidate_tolerance in _area_tolerance_candidates(
-        snapshots,
-        area,
-        tolerance,
-        max_tolerance,
-    ):
-        candidate_matches = deduplicate_same_platform(
-            filter_snapshots_by_area(snapshots, area, candidate_tolerance)
-        )
-        if not _has_effective_price_peak(candidate_matches):
-            continue
-        extra_count = sum(
-            1
-            for snapshot in candidate_matches
-            if id(snapshot) not in strict_ids
-            and snapshot.unit_price is not None
-            and snapshot.unit_price > 0
-        )
-        return candidate_matches, candidate_tolerance, extra_count
+    candidate_matches = deduplicate_same_platform(
+        filter_snapshots_by_area(snapshots, area, max_tolerance)
+    )
+    if not _has_effective_price_peak(candidate_matches):
+        return strict_matches, tolerance, 0
 
-    return strict_matches, tolerance, 0
+    strict_ids = {id(snapshot) for snapshot in strict_matches}
+    extra_count = sum(
+        1
+        for snapshot in candidate_matches
+        if id(snapshot) not in strict_ids
+        and snapshot.unit_price is not None
+        and snapshot.unit_price > 0
+    )
+    applied_tolerance = max(
+        [
+            tolerance,
+            *(
+                abs(snapshot.area - area)
+                for snapshot in candidate_matches
+                if snapshot.area is not None
+            ),
+        ]
+    )
+    return candidate_matches, applied_tolerance, extra_count
 
 
 def filter_snapshots_by_area_with_fallback(
@@ -727,7 +713,11 @@ def prepare_listing_data_with_reference(
     area: Optional[float] = None,
     area_tolerance: float = LISTING_AREA_TOLERANCE,
 ) -> tuple[list[ListingSnapshot], list[float], dict[str, object]]:
-    """过滤目标小区和面积房源，必要时寻找最小有效弱参考范围。"""
+    """过滤目标小区和面积房源，必要时寻找封顶范围内的弱参考数据。
+
+    只有一条可用挂牌价时也保留该数据，但统一标记为弱参考，避免单条数据被误当成
+    稳定价格峰。
+    """
     filtered = filter_snapshots_by_community(snapshots, community_name)
     applied_tolerance = area_tolerance
     reference_listing_count = 0
@@ -740,10 +730,14 @@ def prepare_listing_data_with_reference(
     filtered = deduplicate_same_platform(filtered)
     quote_prices = _quote_prices_from_snapshots(filtered)
     reference: dict[str, object] = {}
+    single_listing_reference = area is not None and len(quote_prices) == 1
     if (
         area is not None
-        and applied_tolerance > area_tolerance
-        and reference_listing_count > 0
+        and quote_prices
+        and (
+            single_listing_reference
+            or (applied_tolerance > area_tolerance and reference_listing_count > 0)
+        )
     ):
         area_min, area_max = listing_area_bounds(area, applied_tolerance)
         reference = {
@@ -751,7 +745,7 @@ def prepare_listing_data_with_reference(
             "reference_area_tolerance": round(applied_tolerance, 2),
             "reference_area_min": round(area_min, 2),
             "reference_area_max": round(area_max, 2),
-            "reference_listing_count": reference_listing_count,
+            "reference_listing_count": 1 if single_listing_reference else reference_listing_count,
         }
     return filtered, quote_prices, reference
 

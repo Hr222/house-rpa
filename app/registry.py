@@ -20,5 +20,5 @@ def build_default_adapters() -> list[PlatformAdapter]:
         FangPlatformAdapter(),
         LjPlatformAdapter(),
         LyjPlatformAdapter(),
-        XzsfbjPlatformAdapter(),
+        # XzsfbjPlatformAdapter(),
     ]
