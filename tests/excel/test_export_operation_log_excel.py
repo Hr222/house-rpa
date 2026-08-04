@@ -61,6 +61,71 @@ def test_cross_platform_dedup_ignores_title_but_requires_layout():
     }
 
 
+def test_cross_platform_dedup_resolves_duplicate_candidates_by_exact_title():
+    rows = [
+        ListingRow(
+            "Ke",
+            "福安雅园",
+            "大四房 户型方正 有入户花园 满五唯一",
+            141.04,
+            "4室2厅",
+            32615.0,
+            460.0,
+        ),
+        ListingRow(
+            "Fang",
+            "福安雅园",
+            "大四房户型方正有入户花园满五唯一",
+            141.04,
+            "4室2厅",
+            32615.0,
+            460.0,
+        ),
+        ListingRow(
+            "Fang",
+            "福安雅园",
+            "深圳龙华福安雅园4室2厅,精装拎包入住,高实用率",
+            141.0,
+            "4室2厅",
+            32624.0,
+            460.0,
+        ),
+        ListingRow(
+            "Lianjia",
+            "福安雅园",
+            "大四房 户型方正 有入户花园 满五唯一",
+            141.04,
+            "4室2厅",
+            32615.0,
+            460.0,
+        ),
+    ]
+
+    result = deduplicate_listings(rows)
+
+    assert len(result.items) == 2
+    assert len(result.cross_platform_groups) == 1
+    assert {item.platform for item in result.cross_platform_groups[0].members} == {
+        "Ke",
+        "Fang",
+        "Lianjia",
+    }
+
+
+def test_cross_platform_dedup_keeps_exactly_tied_candidates_separate():
+    rows = [
+        ListingRow("Ke", "target", "title-a", 100.0, "3室2厅", 50000.0, 500.0),
+        ListingRow("Fang", "target", "title-b", 100.0, "3室2厅", 50000.0, 500.0),
+        ListingRow("Fang", "target", "title-c", 100.0, "3室2厅", 50000.0, 500.0),
+        ListingRow("Lianjia", "target", "title-d", 100.0, "3室2厅", 50000.0, 500.0),
+    ]
+
+    result = deduplicate_listings(rows)
+
+    assert len(result.items) == 3
+    assert len(result.cross_platform_groups) == 1
+
+
 def test_cross_platform_dedup_uses_same_title_when_both_layouts_are_missing():
     rows = [
         ListingRow("Fang", "target", "same title", 100.0, "", 50000.0, 500.0),
@@ -167,7 +232,51 @@ def test_analysis_summary_does_not_freeze_panes_and_wraps_text():
     sheet = workbook["分析汇总"]
 
     assert sheet.freeze_panes is None
-    assert sheet["M6"].alignment.wrap_text is True
+    assert sheet["J6"].alignment.wrap_text is True
+
+
+def test_analysis_summary_uses_the_current_nineteen_column_layout():
+    record = InquiryRecord(
+        started_at="2026-07-24 00:00:00",
+        city="Shenzhen",
+        community_name="target",
+        area=100.0,
+        algorithm_mode="DEFAULT",
+        listings=[
+            ListingRow("Fang", "target", "listing", 100.0, "3 rooms 2 halls", 50000.0, 500.0),
+        ],
+    )
+    finalize_record(record)
+    analysis_rows = analyze_evaluation_rows(
+        [EvaluationRow(2, "Shenzhen", 100.0, "target", 50000.0)],
+        [record],
+    )
+
+    workbook = build_workbook([record], analysis_rows)
+    sheet = workbook["分析汇总"]
+
+    assert sheet.max_column == 19
+    assert [sheet.cell(row=5, column=column).value for column in range(1, 20)] == [
+        "行号",
+        "城市",
+        "请求面积(㎡)",
+        "小区",
+        "评估单价",
+        "最终取值",
+        "最终偏差",
+        "决策分支",
+        "所有候选峰（频率）",
+        "分析结论",
+        "评价口径",
+        "原始房源数",
+        "同平台去重后",
+        "跨平台去重后",
+        "跨平台重复组",
+        "严格±1㎡候选",
+        "弱参考信息",
+        "严格范围房源数",
+        "弱参考补充数",
+    ]
 
 
 def test_log_analysis_multi_peak_uses_lowest_median_without_discount():
@@ -354,8 +463,8 @@ def test_analysis_summary_explains_multi_peak_and_selected_lowest_peak():
     assert record.final_price == 126836.0
     assert analysis_rows[0].conclusion == "原始数据/评估基准不匹配，排除评价"
     assert sheet["F6"].value == 126836.0
-    assert "155,634" in sheet["L6"].value
-    assert sheet["M6"].value == "原始数据/评估基准不匹配，排除评价"
+    assert "155,634" in sheet["I6"].value
+    assert sheet["J6"].value == "原始数据/评估基准不匹配，排除评价"
 
 
 def test_log_analysis_preserves_weak_reference_metadata():
@@ -396,9 +505,9 @@ def test_log_analysis_preserves_weak_reference_metadata():
     )
     workbook = build_workbook(records, analysis_rows)
     sheet = workbook["分析汇总"]
-    assert "WEAK_AREA_REFERENCE" in sheet["T6"].value
-    assert sheet["U6"].value == 1
-    assert sheet["V6"].value == 2
+    assert "WEAK_AREA_REFERENCE" in sheet["Q6"].value
+    assert sheet["R6"].value == 1
+    assert sheet["S6"].value == 2
 
 
 def test_log_parser_reconstructs_house_id_and_negative_weak_area_min():

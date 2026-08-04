@@ -289,11 +289,12 @@ def _format_weak_reference_text(record: InquiryRecord) -> str:
         area_min = to_float(note.get("reference_area_min"))
         area_max = to_float(note.get("reference_area_max"))
         count = note.get("reference_listing_count", "0")
+        count_label = "弱参考" if tolerance is not None and tolerance <= 1.0 else "额外"
         parts.append(
             f"{platform}: {note.get('reference_code')} "
             f"±{_format_optional_number(tolerance)}㎡ "
             f"({_format_optional_number(area_min)}~"
-            f"{_format_optional_number(area_max)}㎡)，额外{count}条"
+            f"{_format_optional_number(area_max)}㎡)，{count_label}{count}条"
         )
     return "; ".join(parts)
 
@@ -305,12 +306,13 @@ def _format_platform_reason(note: dict[str, str]) -> str:
     tolerance = to_float(note.get("reference_area_tolerance"))
     area_min = to_float(note.get("reference_area_min"))
     area_max = to_float(note.get("reference_area_max"))
+    count_label = "弱参考" if tolerance is not None and tolerance <= 1.0 else "额外"
     weak_text = (
         f"{note.get('reference_code')} "
         f"±{_format_optional_number(tolerance)}㎡ "
         f"({_format_optional_number(area_min)}~"
         f"{_format_optional_number(area_max)}㎡)，"
-        f"额外{note.get('reference_listing_count', '0')}条"
+        f"{count_label}{note.get('reference_listing_count', '0')}条"
     )
     return f"{reason}; {weak_text}" if reason else weak_text
 
@@ -1107,7 +1109,7 @@ def build_workbook(
                 -(row.final_diff or 0.0),
             ),
         )
-        ws.merge_cells("A1:V1")
+        ws.merge_cells("A1:S1")
         title = ws["A1"]
         title.value = "抓取数据分析汇总"
         title.font = font_title
@@ -1159,15 +1161,12 @@ def build_workbook(
         )
 
         headers = [
-            "Excel行号",
+            "行号",
             "城市",
             "请求面积(㎡)",
             "小区",
             "评估单价",
-            "选中主峰/原始主峰",
-            "距评估最近候选峰偏差",
             "最终取值",
-            "原始主峰偏差",
             "最终偏差",
             "决策分支",
             "所有候选峰（频率）",
@@ -1201,10 +1200,7 @@ def build_workbook(
                 evaluation.area,
                 evaluation.community_name,
                 evaluation.evaluation_price,
-                analysis.raw_peak_price,
-                analysis.nearest_peak_diff,
                 record.final_price if record else None,
-                analysis.raw_diff,
                 analysis.final_diff,
                 display_branch(record.branch_code) if record else "未匹配",
                 analysis.candidate_text,
@@ -1220,10 +1216,9 @@ def build_workbook(
                 analysis.weak_listing_count,
             ]
             write_row(ws, row_index, values)
-            for column in (5, 6, 8):
+            for column in (5, 6):
                 ws.cell(row=row_index, column=column).number_format = "#,##0.00"
-            for column in (7, 9, 10):
-                ws.cell(row=row_index, column=column).number_format = "0.00%"
+            ws.cell(row=row_index, column=7).number_format = "0.00%"
 
         widths = {
             1: 10,
@@ -1231,23 +1226,20 @@ def build_workbook(
             3: 14,
             4: 28,
             5: 14,
-            6: 18,
-            7: 18,
-            8: 14,
-            9: 14,
-            10: 14,
-            11: 28,
-            12: 48,
-            13: 34,
-            14: 18,
-            15: 14,
-            16: 14,
-            17: 14,
-            18: 48,
-            19: 48,
-            20: 64,
-            21: 14,
-            22: 14,
+            6: 14,
+            7: 14,
+            8: 28,
+            9: 48,
+            10: 34,
+            11: 18,
+            12: 14,
+            13: 14,
+            14: 14,
+            15: 48,
+            16: 48,
+            17: 64,
+            18: 14,
+            19: 14,
         }
         for column, width in widths.items():
             ws.column_dimensions[get_column_letter(column)].width = width

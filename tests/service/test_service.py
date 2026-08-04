@@ -164,6 +164,36 @@ def test_build_inquiry_result_aggregates_weak_area_reference():
     assert result.reference_listing_count == 1
 
 
+def test_build_inquiry_result_marks_strict_single_listing_as_weak_reference():
+    result = build_inquiry_result(
+        [
+            PlatformResult(
+                name="单条平台",
+                status="SUCCESS",
+                quote_prices=[50000.0],
+                listing_snapshots=[
+                    ListingSnapshot(
+                        house_id="single",
+                        community_name="target",
+                        area=100.0,
+                        unit_price=50000.0,
+                    )
+                ],
+                reference_code="WEAK_AREA_REFERENCE",
+                reference_area_tolerance=1.0,
+                reference_area_min=99.0,
+                reference_area_max=101.0,
+                reference_listing_count=1,
+            )
+        ]
+    )
+
+    assert result.final_price == 45000.0
+    assert result.reference_code == "WEAK_AREA_REFERENCE"
+    assert result.reference_area_tolerance == 1.0
+    assert result.reference_listing_count == 1
+
+
 def test_build_inquiry_result_only_marks_selected_peak_reference():
     result = build_inquiry_result(
         [
