@@ -528,12 +528,22 @@ def filter_snapshots_by_community(snapshots: list, community_name: str) -> list:
 
 
 LISTING_AREA_TOLERANCE = 1.0
+# 成交允许比在售更宽的可比面积范围；弱参考和在售仍固定使用 ±1㎡。
+DEAL_AREA_TOLERANCE = 5.0
 WEAK_AREA_REFERENCE = "WEAK_AREA_REFERENCE"
 
 
 def listing_area_bounds(area: float, tolerance: float = LISTING_AREA_TOLERANCE) -> tuple[float, float]:
     """计算在售房源的精确面积范围（默认请求面积 ±1㎡）。"""
     return area - tolerance, area + tolerance
+
+
+def deal_area_bounds(
+    area: float,
+    tolerance: float = DEAL_AREA_TOLERANCE,
+) -> tuple[float, float]:
+    """计算真实成交的可比面积范围，默认请求面积 ±5㎡。"""
+    return listing_area_bounds(area, tolerance)
 
 
 def filter_snapshots_by_area(

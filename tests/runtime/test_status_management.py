@@ -3,6 +3,8 @@
 
 import asyncio
 
+import pytest
+
 from app.core.models import InquiryResult, PlatformResult
 from app.core.status import (
     PlatformHealthEvent,
@@ -168,6 +170,26 @@ def test_ready_check_keeps_external_platform_session_for_token_capture():
     assert runtime.platform_states["xzsfbj"].status == PlatformHealthStatus.READY
 
 
+def test_console_confirmation_skips_manual_verify_during_active_task(monkeypatch):
+    class StopConsoleLoop(Exception):
+        pass
+
+    runtime = RPARuntime()
+    runtime.current_task_id = "active-task"
+
+    def unexpected_input(_prompt):
+        raise AssertionError("活动任务期间不应由运行时读取人工确认")
+
+    async def stop_after_task_skip(_seconds):
+        raise StopConsoleLoop
+
+    monkeypatch.setattr("builtins.input", unexpected_input)
+    monkeypatch.setattr("app.runtime.asyncio.sleep", stop_after_task_skip)
+
+    with pytest.raises(StopConsoleLoop):
+        asyncio.run(runtime._console_confirmation_loop())
+
+
 def test_aggregation_risk_probe_waits_for_main_page_recovery(monkeypatch):
     class FakeTab:
         def __init__(self):
@@ -221,3 +243,31 @@ def test_aggregation_risk_probe_waits_for_main_page_recovery(monkeypatch):
 
     assert runtime.platform_states["ke"].status == PlatformHealthStatus.READY
     assert runtime.status == ServiceStatus.READY
+
+
+def test_browser_windows_tile_only_once_after_initial_login(monkeypatch):
+    calls = []
+    monkeypatch.setattr("app.runtime.tile_browser_windows", lambda pids: calls.append(pids))
+
+    runtime = RPARuntime()
+    runtime.browsers = {
+        "ke": type(
+            "Browser",
+            (), {"_process": type("Process", (), {"pid": 12345})()},
+        )(),
+    }
+    runtime.platform_states = {
+        "ke": PlatformRuntimeState(
+            code="ke",
+            name="贝壳",
+            start_url="x",
+            status=PlatformHealthStatus.READY,
+            message="人工确认就绪",
+        ),
+    }
+
+    runtime._refresh_service_status()
+    runtime.status = ServiceStatus.WAIT_LOGIN
+    runtime._refresh_service_status()
+
+    assert calls == [[12345]]

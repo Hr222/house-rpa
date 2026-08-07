@@ -8,9 +8,7 @@
 - 详情入口只在第一页有：分页前先 Ctrl+点击打开详情（后台新标签），
   采完在售再切到详情标签抓成交（方案B）。
 - 成交记录在详情页的"小区成交"tab，同页跳转到 /loupan/{id}/chengjiao/。
-- 成交筛选规则：严格面积区间（不套容差）+ 近半年。
-  注意：贝壳用的是 ±20% 容差（parsers.filter_deal_prices_by_area），
-  房天下按业务确认用严格区间，两者口径不同，各自实现，不混用。
+- 成交筛选规则：请求面积 ±5㎡ + 近半年；不使用在售页面的宽面积档位。
 
 采集逻辑移植自 fang_mvp_test.py 全链路验证通过的实现。
 """
@@ -38,6 +36,8 @@ from app.platforms.base import (
     short_circuit_result,
     has_matching_community_snapshots,
     filter_snapshots_by_community,
+    community_name_match,
+    deal_area_bounds,
     listing_filter_summary,
     listing_no_data_reason,
     listing_no_data_status,
@@ -46,6 +46,12 @@ from app.platforms.base import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _filter_deals_for_request_area(records: list, request_area: float) -> list:
+    """按请求面积 ±5㎡和近半年筛选房天下真实成交。"""
+    area_min, area_max = deal_area_bounds(request_area)
+    return parsers.filter_deal_records(records, area_min, area_max, months=6)
 
 
 # ============================================================
@@ -336,7 +342,7 @@ async def _wait_for_new_tab(browser, old_tab_ids: set, expected_url, timeout=20)
     return None
 
 
-async def _click_detail_link(browser, page):
+async def _click_detail_link(browser, page, community_name: str):
     """点击"小区详情"打开新标签页，返回 (是否成功, 详情标签页)。
 
     多浏览器模式下直接用 human_click，每个平台独立浏览器，打开新标签不影响其他平台。
@@ -344,19 +350,39 @@ async def _click_detail_link(browser, page):
     old_tab_ids = {id(tab) for tab in browser.tabs}
 
     detail_link = None
-    for selector in ("a.href_xq", "a#kesfqbfylb_A01_08_01", "a[href*='/loupan/']"):
+
+    # 房天下结果页的第一个 /loupan/ 链接可能是页脚推荐小区，不能盲点。
+    # 目标房源卡片使用 /house-xm{id}/，按链接 title/文本匹配请求小区。
+    try:
+        candidates = await page.select_all("a[href*='/house-xm']", timeout=4)
+    except Exception:
+        candidates = []
+    for candidate in candidates:
         try:
-            detail_link = await page.select(selector, timeout=4)
+            title = (await candidate.get_attribute("title")) or ""
+            text = await candidate.apply("(el) => el.textContent.trim()")
         except Exception:
-            detail_link = None
-        if detail_link:
+            continue
+        if community_name_match(community_name, title) or community_name_match(
+            community_name, text or ""
+        ):
+            detail_link = candidate
             break
 
+    # 兼容旧页面的专用详情入口，但同样必须核对链接文本/标题。
     if not detail_link:
-        try:
-            detail_link = await page.find("小区详情", timeout=3)
-        except Exception:
-            detail_link = None
+        for selector in ("a.href_xq", "a#kesfqbfylb_A01_08_01"):
+            try:
+                candidate = await page.select(selector, timeout=3)
+                title = (await candidate.get_attribute("title")) or ""
+                text = await candidate.apply("(el) => el.textContent.trim()")
+            except Exception:
+                continue
+            if community_name_match(community_name, title) or community_name_match(
+                community_name, text or ""
+            ):
+                detail_link = candidate
+                break
 
     if not detail_link:
         return False, None
@@ -409,7 +435,7 @@ async def _click_deal_tab(detail_tab):
 # 成交页导航与解析（后台并行任务）
 # ============================================================
 
-async def _navigate_and_parse_deals(detail_tab, main_page, area_min: float, area_max: float) -> tuple[list, list]:
+async def _navigate_and_parse_deals(detail_tab, main_page, request_area: float) -> tuple[list, list]:
     """在 detail_tab 上导航到成交页并解析（与分页并行）。
 
     解析完成后安排关闭 detail_tab 并切回 main_page，避免详情页残留。
@@ -435,7 +461,8 @@ async def _navigate_and_parse_deals(detail_tab, main_page, area_min: float, area
         deal_html = await wait_and_reload_after_block(detail_tab, detect_block, "成交页")
 
         all_deals = parsers.parse_deal_records(deal_html)
-        filtered_deals = parsers.filter_deal_records(all_deals, area_min, area_max, months=6)
+        area_min, area_max = deal_area_bounds(request_area)
+        filtered_deals = _filter_deals_for_request_area(all_deals, request_area)
         deal_prices = [d[3] for d in filtered_deals]
         deal_record_dicts = [
             {"area": d[0], "date": d[1], "price": d[3]}
@@ -702,7 +729,9 @@ async def _do_collect(
 
     # 6. 点开小区详情（Ctrl+点击后台新标签，入口只在第一页有，翻页前必须点）
     log.info("点击小区详情（分页前先点开）")
-    detail_clicked, detail_tab = await _click_detail_link(browser, main_page)
+    detail_clicked, detail_tab = await _click_detail_link(
+        browser, main_page, community_name
+    )
     if detail_clicked and detail_tab is not None:
         log.info("详情标签已打开")
     else:
@@ -715,7 +744,7 @@ async def _do_collect(
     deal_record_dicts_future: Optional[asyncio.Task] = None
     if detail_tab is not None:
         deal_prices_future = asyncio.ensure_future(
-            _navigate_and_parse_deals(detail_tab, main_page, area_min, area_max)
+            _navigate_and_parse_deals(detail_tab, main_page, area)
         )
 
     # 分页采集在售房源（主线程，和成交导航并行）

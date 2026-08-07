@@ -29,6 +29,7 @@ from app.core.status import (
     OPERATION_STATUS_TEXT,
     PlatformResultStatus,
 )
+from app.platforms.base import deal_area_bounds
 from app.utils.listing_dedup import ListingDeduplicationResult, deduplicate_listings
 
 U_QUERY_CITY = "\u67e5\u8be2\u57ce\u5e02"
@@ -115,7 +116,7 @@ ALGORITHM_DESCRIPTIONS = {
     "DEFAULT": (
         "加权落点中位数算法：汇集所有平台的有效房源落点，每条房源按出现次数计票；低频孤立峰过滤，"
         "主峰明确时返回一个中位数并打折，多峰时选择最低价格峰中位数直接返回，不打折；"
-        "存在真实目标面积成交价时，再将挂牌结果与成交结果做等权平均；没有符合目标面积的成交价时沿用挂牌结果。"
+        "存在请求面积 ±5㎡ 内的真实成交价时，再将挂牌结果与成交结果做等权平均；没有符合范围的成交价时沿用挂牌结果。"
     ),
 }
 
@@ -181,6 +182,7 @@ class EvaluationRow:
     area: Optional[float]
     community_name: str
     evaluation_price: Optional[float]
+    administrative_district: str = ""
 
 
 @dataclass
@@ -359,6 +361,7 @@ def read_evaluation_rows(path: Path) -> list[EvaluationRow]:
             return None
 
         city_column = find_column("city", "城市")
+        administrative_district_column = find_column("行政区", "行政区划")
         area_column = find_column("面积㎡", "面积", "请求面积(㎡)")
         community_column = find_column("小区名称", "小区")
         price_column = find_column("评估单价", "评估价", "评估价格")
@@ -387,6 +390,11 @@ def read_evaluation_rows(path: Path) -> list[EvaluationRow]:
                     area=to_float(values[area_column]),
                     community_name=community_name,
                     evaluation_price=to_float(values[price_column]),
+                    administrative_district=(
+                        clean_text(values[administrative_district_column])
+                        if administrative_district_column is not None
+                        else ""
+                    ),
                 )
             )
         return evaluation_rows
@@ -816,7 +824,39 @@ def infer_branch(quote_avg: Optional[float], deal_avg: Optional[float]) -> tuple
     return U_WEIGHTED_MEDIAN, "\u4e3b\u8981\u4ef7\u683c\u843d\u70b9\u52a0\u6743\u4e2d\u4f4d\u6570\u6253\u6298"
 
 
+def _rebuild_real_deal_average(record: InquiryRecord) -> Optional[float]:
+    """Rebuild the real deal peak from transaction rows within request area ±5㎡."""
+    if record.area is None:
+        return None
+
+    area_min, area_max = deal_area_bounds(record.area)
+    prices = [
+        float(deal.price)
+        for deal in record.deals
+        if (
+            deal.area is not None
+            and deal.price is not None
+            and deal.price > 0
+            and area_min <= deal.area <= area_max
+        )
+    ]
+    if not prices:
+        return None
+    if len(prices) == 1:
+        return prices[0]
+
+    candidates = find_weighted_price_candidates([prices], quote_discount=1.0)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda candidate: candidate.quote_price).quote_price
+
+
 def finalize_record(record: InquiryRecord) -> None:
+    if record.algorithm_mode == "DEFAULT":
+        # Logged dealAvg can reflect an old area scope or a listing-price substitute.
+        # Analysis only uses individual real deals meeting the current ±5㎡ rule.
+        record.deal_avg = _rebuild_real_deal_average(record)
+
     if record.algorithm_mode == "DEFAULT" and record.listings:
         candidates = _weighted_median_candidates_for_record(record)
         if len(candidates) == 1:
@@ -1109,7 +1149,7 @@ def build_workbook(
                 -(row.final_diff or 0.0),
             ),
         )
-        ws.merge_cells("A1:S1")
+        ws.merge_cells("A1:T1")
         title = ws["A1"]
         title.value = "抓取数据分析汇总"
         title.font = font_title
@@ -1163,6 +1203,7 @@ def build_workbook(
         headers = [
             "行号",
             "城市",
+            "行政区",
             "请求面积(㎡)",
             "小区",
             "评估单价",
@@ -1197,6 +1238,7 @@ def build_workbook(
             values = [
                 evaluation.row_number,
                 evaluation.city,
+                evaluation.administrative_district,
                 evaluation.area,
                 evaluation.community_name,
                 evaluation.evaluation_price,
@@ -1216,30 +1258,31 @@ def build_workbook(
                 analysis.weak_listing_count,
             ]
             write_row(ws, row_index, values)
-            for column in (5, 6):
+            for column in (6, 7):
                 ws.cell(row=row_index, column=column).number_format = "#,##0.00"
-            ws.cell(row=row_index, column=7).number_format = "0.00%"
+            ws.cell(row=row_index, column=8).number_format = "0.00%"
 
         widths = {
             1: 10,
             2: 10,
-            3: 14,
-            4: 28,
-            5: 14,
+            3: 12,
+            4: 14,
+            5: 28,
             6: 14,
             7: 14,
-            8: 28,
-            9: 48,
-            10: 34,
-            11: 18,
-            12: 14,
+            8: 14,
+            9: 28,
+            10: 48,
+            11: 34,
+            12: 18,
             13: 14,
             14: 14,
-            15: 48,
+            15: 14,
             16: 48,
-            17: 64,
-            18: 14,
+            17: 48,
+            18: 64,
             19: 14,
+            20: 14,
         }
         for column, width in widths.items():
             ws.column_dimensions[get_column_letter(column)].width = width

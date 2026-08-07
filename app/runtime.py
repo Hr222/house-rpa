@@ -40,7 +40,7 @@ from app.registry import build_default_adapters
 from app.service import RPAInquiryService
 from app.utils.task_store import delete_task, save_task, load_pending_tasks
 from app.utils.callback import notify_result
-from app.utils.window_control import ensure_browser_foreground, tile_browser_windows
+from app.utils.window_control import tile_browser_windows
 
 log = logging.getLogger(__name__)
 
@@ -125,7 +125,6 @@ class RPARuntime:
         self.enable_console_ready_confirmation = enable_console_ready_confirmation
 
         self.browsers: dict[str, object] = {}
-        self.browser_pid: Optional[int] = None
         self.service: Optional[RPAInquiryService] = None
         self.platform_states: dict[str, PlatformRuntimeState] = {}
         self.tasks: dict[str, InquiryTaskRecord] = {}
@@ -138,6 +137,7 @@ class RPARuntime:
         set_manual_verify_lock(self._platform_check_lock)
         set_manual_verify_state_callback(self._on_manual_verify_state)
         self._manual_confirmation_active = False
+        self._initial_window_layout_done = False
         self.current_task_id: Optional[str] = None
         self.status = ServiceStatus.BOOTING
         self.message = "启动中"
@@ -157,6 +157,7 @@ class RPARuntime:
 
         self.status = ServiceStatus.BOOTING
         self.message = "启动浏览器中"
+        self._initial_window_layout_done = False
 
         # 网页平台各自使用独立浏览器；接口型平台使用外部应用会话。
         self.browsers = {}
@@ -165,21 +166,8 @@ class RPARuntime:
             self.browsers[adapter.code] = browser
             log.info("browser started for %s", adapter.name)
 
-        self.browser_pid = getattr(
-            getattr(list(self.browsers.values())[0], "_process", None), "pid", None
-        ) if self.browsers else None
-
         self.service = RPAInquiryService(self.browsers, self.adapters)
         sessions = await self.service.start()
-
-        # 将 5 个浏览器窗口平铺填满屏幕
-        browser_pids = [
-            getattr(getattr(b, "_process", None), "pid", None)
-            for b in self.browsers.values()
-        ]
-        browser_pids = [p for p in browser_pids if p is not None]
-        tile_browser_windows(browser_pids)
-        await asyncio.sleep(1.5)  # 等窗口位置生效
 
         for code, session in sessions.items():
             adapter = self.adapter_map.get(code)
@@ -218,7 +206,7 @@ class RPARuntime:
                 pass
 
         self.browsers = {}
-        self.browser_pid = None
+        self._initial_window_layout_done = False
         self.service = None
         self.worker_task = None
         self.keepalive_task = None
@@ -306,18 +294,16 @@ class RPARuntime:
             self._focus_browser_window(f"{state.name} 仍需人工处理", code)
         return self._serialize_platform_state(state)
 
-    def _tile_after_login(self):
-        """登录确认后重新平铺窗口。"""
-        if not hasattr(self, "browsers"):
+    def _tile_browser_windows_once(self):
+        """首次完成登录初始化后平铺一次浏览器窗口。"""
+        if self._initial_window_layout_done:
             return
-        pids = []
-        for b in self.browsers.values():
-            try:
-                pid = getattr(getattr(b, "_process", None), "pid", None)
-                if pid:
-                    pids.append(pid)
-            except Exception:
-                pass
+        self._initial_window_layout_done = True
+        pids = [
+            pid
+            for browser in self.browsers.values()
+            if (pid := getattr(getattr(browser, "_process", None), "pid", None))
+        ]
         if pids:
             tile_browser_windows(pids)
 
@@ -330,7 +316,7 @@ class RPARuntime:
 
         if all(item.status == PlatformHealthStatus.READY for item in states):
             if self.status != ServiceStatus.READY:
-                self._tile_after_login()
+                self._tile_browser_windows_once()
                 # 首次全部就绪：恢复崩溃前未完成的任务（只执行一次）。
                 # 恢复先于 self.status 置 READY，保证残留任务排在就绪后接的新单之前。
                 if not self._restored:
@@ -548,6 +534,10 @@ class RPARuntime:
 
     async def _console_confirmation_loop(self):
         while True:
+            if self.current_task_id is not None:
+                await asyncio.sleep(1)
+                continue
+
             pending = [
                 state
                 for state in self.platform_states.values()
@@ -720,18 +710,9 @@ class RPARuntime:
         return payload
 
     def _focus_browser_window(self, reason: str, code: Optional[str] = None):
-        browser = self.browsers.get(code) if code else None
-        if code is not None and browser is None:
-            log.info("平台 %s 无独立浏览器窗口，跳过置前: %s", code, reason)
-            return
-        browser_pid = getattr(getattr(browser, "_process", None), "pid", None)
-        if browser_pid is None:
-            browser_pid = self.browser_pid
-        if not browser_pid:
-            return
+        """保留风险状态记录，不自动抢占用户窗口。"""
         platform_label = f"[{code}] " if code else ""
-        log.info("尝试将浏览器置前: %s%s", platform_label, reason)
-        ensure_browser_foreground(browser_pid)
+        log.debug("静默处理浏览器窗口: %s%s", platform_label, reason)
 
     def _restore_pending_tasks(self):
         """启动时恢复崩溃前未完成的任务（持久化兜底）。

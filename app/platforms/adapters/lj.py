@@ -10,7 +10,7 @@
 - 在售分页：有分页，翻页前真人滚动停留 + 风控检测（被拦暂停等人工）
 - 在售解析：截断到"猜你喜欢"之前，排除推荐位（和安居客 list-guess-title 同类）
 - 成交记录：详情页点"查看全部成交记录"→成交列表页翻页抓取
-- 成交筛选规则：严格面积区间 + 近半年（和房天下一致；贝壳用 ±20% 容差）
+- 成交筛选规则：请求面积 ±5㎡ + 近半年；不使用在售页面的宽面积档位。
 
 风控检测：链家自己维护标记词（链家和贝壳共用安全系统，
 标记词"人机验证"/"贝壳信息安全中心"/"CAPTCHA" 等），不依赖外部通用实现。
@@ -42,6 +42,7 @@ from app.platforms.base import (
     short_circuit_result,
     has_matching_community_snapshots,
     filter_snapshots_by_community,
+    deal_area_bounds,
     listing_filter_summary,
     listing_no_data_reason,
     listing_no_data_status,
@@ -52,6 +53,12 @@ from app.platforms.lj_constants import START_URL
 from app.platforms.city_map import get_start_url
 
 log = logging.getLogger(__name__)
+
+
+def _filter_deals_for_request_area(records: list, request_area: float) -> list:
+    """按请求面积 ±5㎡和近半年筛选链家真实成交。"""
+    area_min, area_max = deal_area_bounds(request_area)
+    return parsers.filter_deal_records(records, area_min, area_max, months=6)
 
 
 # ============================================================
@@ -731,7 +738,8 @@ async def _do_collect(
                                 log.info("成交第 %d 页已有超出半年的记录，停止翻页", deal_page_no)
                                 break
 
-                    filtered_deals = parsers.filter_deal_records(all_deals, area_min, area_max, months=6)
+                    deal_area_min, deal_area_max = deal_area_bounds(area)
+                    filtered_deals = _filter_deals_for_request_area(all_deals, area)
                     deal_prices = [d[3] for d in filtered_deals if d[3] is not None]
                     deal_record_dicts = [
                         {"area": d[0], "date": d[1], "price": d[3]}
@@ -739,7 +747,7 @@ async def _do_collect(
                     ]
                     log.info(
                         "成交记录: 总 %d 条, %.0f-%.0f㎡且近半年 %d 条",
-                        len(all_deals), area_min, area_max, len(filtered_deals),
+                        len(all_deals), deal_area_min, deal_area_max, len(filtered_deals),
                     )
         if not deal_clicked:
             log.warning("未能打开成交记录页")
