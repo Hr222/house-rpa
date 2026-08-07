@@ -194,6 +194,52 @@ def test_build_inquiry_result_marks_strict_single_listing_as_weak_reference():
     assert result.reference_listing_count == 1
 
 
+def test_build_inquiry_result_applies_sparse_luxury_adjustment_by_request_area():
+    result = build_inquiry_result(
+        [
+            PlatformResult(
+                name="平台A",
+                status="SUCCESS",
+                quote_prices=[100000.0],
+                listing_snapshots=[
+                    ListingSnapshot(
+                        house_id="luxury-1",
+                        community_name="target",
+                        area=225.0,
+                        unit_price=100000.0,
+                    )
+                ],
+            )
+        ],
+        request_area=225.0,
+    )
+
+    assert result.final_price == 74700.0
+
+
+def test_build_inquiry_result_keeps_non_luxury_sparse_data_on_general_rule():
+    result = build_inquiry_result(
+        [
+            PlatformResult(
+                name="平台A",
+                status="SUCCESS",
+                quote_prices=[100000.0],
+                listing_snapshots=[
+                    ListingSnapshot(
+                        house_id="ordinary-1",
+                        community_name="target",
+                        area=119.0,
+                        unit_price=100000.0,
+                    )
+                ],
+            )
+        ],
+        request_area=119.0,
+    )
+
+    assert result.final_price == 90000.0
+
+
 def test_build_inquiry_result_only_marks_selected_peak_reference():
     result = build_inquiry_result(
         [
@@ -321,9 +367,9 @@ def test_run_inquiry_checks_risk_before_aggregation(monkeypatch):
 
     original_build = service_module.build_inquiry_result
 
-    def tracked_build(results):
+    def tracked_build(results, **kwargs):
         events.append("aggregate")
-        return original_build(results)
+        return original_build(results, **kwargs)
 
     monkeypatch.setattr(service_module, "build_inquiry_result", tracked_build)
 
