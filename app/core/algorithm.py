@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from math import isclose
 from statistics import median as statistics_median
@@ -173,6 +174,36 @@ def _find_price_modes(
         if members:
             selected.append((refined_center, members))
 
+    # 非极大值抑制会合并相邻的重叠窗口。若被合并的窗口仍包含至少两条未被
+    # 已选峰覆盖的报价，它具有独立的密集核心，必须恢复为单独价格峰。
+    selected_member_keys = {tuple(sorted(members)) for _, members in selected}
+    covered_members: Counter[float] = Counter()
+    for _, members in selected:
+        covered_members |= Counter(members)
+
+    for _, center in sorted(ranked, key=lambda item: (-item[0], item[1])):
+        refined_center, members = _mode_members(
+            prices,
+            center,
+            max_relative_deviation,
+        )
+        member_key = tuple(sorted(members))
+        if len(members) <= 1 or member_key in selected_member_keys:
+            continue
+        if any(
+            abs(refined_center - selected_center)
+            / min(refined_center, selected_center)
+            <= max_relative_deviation
+            for selected_center, _ in selected
+        ):
+            continue
+        uncovered_count = sum((Counter(members) - covered_members).values())
+        if uncovered_count < 2:
+            continue
+        selected.append((refined_center, members))
+        selected_member_keys.add(member_key)
+        covered_members |= Counter(members)
+
     return sorted(selected, key=lambda item: item[0])
 
 
@@ -183,8 +214,8 @@ def find_weighted_price_candidates(
 ) -> list[PriceCandidate]:
     """按价格升序返回显著的挂牌单价峰值。
 
-    小的孤立峰值仅在其出现频次低于最强峰值的 60% 时才视为异常值。出现频次较高的低价
-    因此会作为真实市场区间保留，不会仅因数值偏低而被丢弃。
+    仅剔除未能形成自身价格簇的孤立点；与主峰频次相差较大的密集价格簇仍是独立峰，
+    不会仅因频次或数值偏低而被丢弃。
     """
     prices = [
         item.price
@@ -197,17 +228,12 @@ def find_weighted_price_candidates(
     if not modes:
         return []
 
-    max_count = max(len(members) for _, members in modes)
-    min_count = (
-        1
-        if max_count == 1
-        else max(2, int(max_count * 0.60 + 0.999999))
-    )
-    significant = [
+    dense_modes = [
         (center, members)
         for center, members in modes
-        if len(members) >= min_count
+        if len(members) > 1
     ]
+    significant = dense_modes or modes
     total_count = len(prices)
     return [
         PriceCandidate(

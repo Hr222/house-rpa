@@ -14,7 +14,7 @@ from app.core import config
 from app.core.status import PlatformResultStatus
 from app.parsers import ke as parsers
 from app.utils.debug_utils import dump_html
-from app.core.models import ListingSnapshot, PlatformResult
+from app.core.models import DealRecord, ListingSnapshot, PlatformResult
 from app.platforms.base import (
     wait_and_reload_after_block,
     human_linger,
@@ -24,6 +24,7 @@ from app.platforms.base import (
     short_circuit_result,
     has_matching_community_snapshots,
     filter_snapshots_by_community,
+    deal_area_bounds,
     listing_filter_summary,
     listing_no_data_reason,
     listing_no_data_status,
@@ -33,6 +34,15 @@ from app.platforms.base import (
 from app.platforms.city_map import get_start_url
 
 log = logging.getLogger(__name__)
+
+
+def _filter_deal_prices_for_request_area(
+    deal_records: list[DealRecord],
+    request_area: float,
+) -> list[float]:
+    """只保留请求面积 ±5㎡范围内的贝壳真实成交单价。"""
+    area_min, area_max = deal_area_bounds(request_area)
+    return parsers.filter_deal_prices_by_area(deal_records, area_min, area_max)
 
 
 async def _delay(min_s: float = 1.5, max_s: float = 3.5):
@@ -522,15 +532,19 @@ async def _do_collect(
             request_id, started_at, detail_url=detail_url,
         )
 
-    # 4. 面积筛选（动态读取页面档位，点击对应区间链接；返回区间用于成交筛选）
+    # 4. 面积筛选（动态读取页面档位，点击对应区间链接）
     area_range = await click_area_segment(main_page, area, parsers.parse_area_segments, "ke")
     if area_range is None:
         return short_circuit_result(
             "贝壳", PlatformResultStatus.NO_DATA, "该面积区间无在售房源（档位已禁用）",
             request_id, started_at, detail_url=detail_url,
         )
-    area_min, area_max = area_range
-    log.info("[4] 面积筛选区间: %.0f~%.0f (来自档位匹配)", area_min, area_max)
+    listing_area_min, listing_area_max = area_range
+    log.info(
+        "[4] 面积筛选区间: %.0f~%.0f (来自档位匹配)",
+        listing_area_min,
+        listing_area_max,
+    )
     await _dump(main_page, "ke_after_area")
 
     filtered_html = await _wait_for_results_loaded(main_page, expected_page=1)
@@ -605,12 +619,17 @@ async def _do_collect(
 
     community_avg_price = parsers.parse_community_avg_price(detail_html)
     deal_records = parsers.parse_deal_records(detail_html)
-    filtered_deal_prices = parsers.filter_deal_prices_by_area(
-        deal_records,
-        area_min,
-        area_max,
+    # 在售页面的面积档位只用于收集候选房源；成交按请求面积 ±5㎡筛选，
+    # 不能把同一宽档位内、超出可比范围的户型当成目标面积成交。
+    deal_area_min, deal_area_max = deal_area_bounds(area)
+    filtered_deal_prices = _filter_deal_prices_for_request_area(deal_records, area)
+    log.info(
+        "[11] 小区均价=%s 成交单价=%d条（请求面积±5㎡范围 %.2f~%.2f㎡）",
+        community_avg_price,
+        len(filtered_deal_prices),
+        deal_area_min,
+        deal_area_max,
     )
-    log.info("[11] 小区均价=%s 成交单价=%d条", community_avg_price, len(filtered_deal_prices))
 
     # 详情页恢复后仍未取得任何成交/均价：降级为仅用在售均价，不整单失败
     if community_avg_price is None and not filtered_deal_prices:

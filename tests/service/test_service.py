@@ -95,7 +95,7 @@ def test_build_inquiry_result_deduplicates_cross_platform_listings():
                     ListingSnapshot(
                         house_id="b-low",
                         community_name="target",
-                        title="same listing from another platform",
+                        title="low",
                         area=100.0,
                         layout="3 rooms 2 halls",
                         unit_price=50000.0,

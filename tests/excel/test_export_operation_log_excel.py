@@ -4,6 +4,7 @@
 from pathlib import Path
 
 from app.excel.export_operation_log_excel import (
+    DealRow,
     EvaluationRow,
     InquiryRecord,
     ListingRow,
@@ -18,7 +19,11 @@ from app.excel.export_operation_log_excel import (
     finalize_record,
     parse_records,
 )
-from app.utils.listing_dedup import _cross_platform_match, deduplicate_listings
+from app.utils.listing_dedup import (
+    _cross_platform_match,
+    deduplicate_listings,
+    deduplicate_same_platform,
+)
 
 
 def test_log_analysis_deduplicates_rows_per_platform_before_frequency_count():
@@ -42,10 +47,10 @@ def test_log_analysis_deduplicates_rows_per_platform_before_frequency_count():
     assert record.success is True
 
 
-def test_cross_platform_dedup_ignores_title_but_requires_layout():
+def test_cross_platform_dedup_requires_exact_core_values_and_matching_layouts():
     rows = [
         ListingRow("Fang", "target", "title-a", 87.62, "3\u5ba41\u5385", 57065.0, 500.0),
-        ListingRow("Lianjia", "target", "title-b", 87.62, "3\u5ba41\u5385", 57065.0, 500.0),
+        ListingRow("Lianjia", "target", "title-b", 87.62, "3\u5ba41\u5385", 57064.0, 499.0),
         ListingRow("Lyj", "target", "title-c", 87.62, "3\u5ba42\u5385", 57065.0, 500.0),
     ]
 
@@ -53,12 +58,37 @@ def test_cross_platform_dedup_ignores_title_but_requires_layout():
 
     assert result.raw_count == 3
     assert len(result.same_platform_items) == 3
-    assert len(result.items) == 2
-    assert len(result.cross_platform_groups) == 1
-    assert {item.platform for item in result.cross_platform_groups[0].members} == {
-        "Fang",
-        "Lianjia",
-    }
+    assert len(result.items) == 3
+    assert result.cross_platform_groups == ()
+
+
+def test_cross_platform_dedup_ignores_unicode_punctuation_in_community_name():
+    for punctuation in ("\u00b7", "\uff0e", "\u2022"):
+        rows = [
+            ListingRow(
+                "Ke",
+                "\u5929\u5065\u548c\u90e1\u5e9c",
+                "title-a",
+                111.0,
+                "4\u5ba42\u5385",
+                60000.0,
+                666.0,
+            ),
+            ListingRow(
+                "Fang",
+                f"\u5929\u5065{punctuation}\u548c\u90e1\u5e9c",
+                "title-b",
+                111.0,
+                "4\u5ba42\u5385",
+                60000.0,
+                666.0,
+            ),
+        ]
+
+        result = deduplicate_listings(rows)
+
+        assert len(result.items) == 1
+        assert len(result.cross_platform_groups) == 1
 
 
 def test_cross_platform_dedup_resolves_duplicate_candidates_by_exact_title():
@@ -107,8 +137,8 @@ def test_cross_platform_dedup_resolves_duplicate_candidates_by_exact_title():
     assert len(result.cross_platform_groups) == 1
     assert {item.platform for item in result.cross_platform_groups[0].members} == {
         "Ke",
-        "Fang",
         "Lianjia",
+        "Fang",
     }
 
 
@@ -126,7 +156,26 @@ def test_cross_platform_dedup_keeps_exactly_tied_candidates_separate():
     assert len(result.cross_platform_groups) == 1
 
 
-def test_cross_platform_dedup_uses_same_title_when_both_layouts_are_missing():
+def test_cross_platform_dedup_accepts_exact_structured_match_with_district_suffix():
+    rows = [
+        ListingRow("Ke", "鸿基花园", "翠园东晓创新 电梯大三房", 104.03, "3室2厅", 38259.0, 398.0),
+        ListingRow("Ajk", "鸿基花园(罗湖)", "金稻田路2053号3室2厅2卫", 104.03, "3室2厅", 38259.0, 398.0),
+        ListingRow("Lianjia", "鸿基花园", "翠园东晓创新 电梯大三房", 104.03, "3室2厅", 38259.0, 398.0),
+        ListingRow("Fang", "鸿基花园", "拎包入住，双阳台", 104.03, "3室2厅", 38258.0, 398.0),
+    ]
+
+    result = deduplicate_listings(rows)
+
+    assert len(result.items) == 2
+    assert len(result.cross_platform_groups) == 1
+    assert {item.platform for item in result.cross_platform_groups[0].members} == {
+        "Ke",
+        "Ajk",
+        "Lianjia",
+    }
+
+
+def test_cross_platform_dedup_merges_rows_with_missing_layouts_by_exact_core_values():
     rows = [
         ListingRow("Fang", "target", "same title", 100.0, "", 50000.0, 500.0),
         ListingRow("Lianjia", "target", "same title", 100.0, "", 50000.0, 500.0),
@@ -135,9 +184,92 @@ def test_cross_platform_dedup_uses_same_title_when_both_layouts_are_missing():
 
     result = deduplicate_listings(rows)
 
-    assert len(result.items) == 2
+    assert len(result.items) == 1
     assert len(result.cross_platform_groups) == 1
-    assert "\u6237\u578b\u6709\u7f3a\u5931" in result.cross_platform_groups[0].reason
+
+
+def test_cross_platform_dedup_merges_strong_title_when_one_layout_is_missing():
+    rows = [
+        ListingRow(
+            "Ke",
+            "爱琴湾",
+            "满五年税费低，大梅沙联排别墅，配套齐全，一线海景",
+            237.76,
+            "9室3厅",
+            75707.0,
+            1800.0,
+        ),
+        ListingRow(
+            "Fang",
+            "爱琴湾山庄",
+            "满五年税费低,大梅沙联排别墅,配套齐全,一线海景",
+            237.76,
+            "",
+            75707.0,
+            1800.0,
+        ),
+        ListingRow(
+            "Lianjia",
+            "爱琴湾",
+            "满五年税费低，大梅沙联排别墅，配套齐全，一线海景",
+            237.76,
+            "9室3厅",
+            75707.0,
+            1800.0,
+        ),
+    ]
+
+    result = deduplicate_listings(rows)
+
+    assert len(result.items) == 1
+    assert len(result.cross_platform_groups) == 1
+    assert {item.platform for item in result.cross_platform_groups[0].members} == {
+        "Ke",
+        "Fang",
+        "Lianjia",
+    }
+
+
+def test_same_platform_dedup_merges_missing_layout_rows_with_exact_prices():
+    rows = [
+        ListingRow(
+            "Fang",
+            "莱蒙水榭山",
+            "给我一个电话,给您一个温馨的家",
+            281.78,
+            "",
+            184541.0,
+            5200.0,
+        ),
+        ListingRow(
+            "Fang",
+            "水榭山",
+            "龙华莱蒙水榭山6室大户型,满五免税费,带超大露台",
+            281.78,
+            "",
+            184541.0,
+            5200.0,
+        ),
+    ]
+
+    result = deduplicate_same_platform(rows)
+
+    assert len(result) == 1
+    assert result[0].title == rows[1].title
+
+
+def test_listing_dedup_merges_missing_layout_duplicate_before_cross_platform_match():
+    rows = [
+        ListingRow("Fang", "莱蒙水榭山", "给我一个电话,给您一个温馨的家", 281.78, "", 184541.0, 5200.0),
+        ListingRow("Fang", "水榭山", "龙华莱蒙水榭山6室大户型,满五免税费,带超大露台", 281.78, "", 184541.0, 5200.0),
+        ListingRow("Lyj", "莱蒙水榭山", "龙华莱蒙水榭山6室大户型，满五免税费，带超大露台", 281.78, "6室4厅", 184541.0, 5200.0),
+    ]
+
+    result = deduplicate_listings(rows)
+
+    assert len(result.same_platform_items) == 2
+    assert len(result.items) == 1
+    assert {item.platform for item in result.cross_platform_groups[0].members} == {"Fang", "Lyj"}
 
 
 def test_cross_platform_dedup_title_contains_core_title_when_one_layout_is_missing():
@@ -160,12 +292,33 @@ def test_cross_platform_dedup_title_contains_core_title_when_one_layout_is_missi
     assert _cross_platform_match(
         rows[2], rows[0], area_tolerance=0.5, unit_price_tolerance=100.0
     )
-    assert not _cross_platform_match(
+    assert _cross_platform_match(
         rows[2], rows[1], area_tolerance=0.5, unit_price_tolerance=100.0
     )
     assert len(result.items) == 1
     assert len(result.cross_platform_groups) == 1
-    assert "\u4ee3\u8868\u623f\u6e90" in result.cross_platform_groups[0].reason
+    assert {item.platform for item in result.cross_platform_groups[0].members} == {
+        "Fang",
+        "Lianjia",
+        "Lyj",
+    }
+
+
+def test_cross_platform_dedup_keeps_same_price_layout_with_different_titles():
+    rows = [
+        ListingRow("Ke", "鸿基花园", "鸿基花园 翠园东晓创新 电梯大三房", 104.03, "3室2厅", 38259.0, 398.0),
+        ListingRow("Fang", "鸿基花园", "罗湖鸿基花园3室2厅,拎包入住,双阳台,双轨交汇", 104.03, "3室2厅", 38258.0, 398.0),
+        ListingRow("Lyj", "鸿基花园", "罗湖鸿基花园3室2厅，拎包入住，双阳台，双轨交汇", 104.03, "3室2厅", 38258.0, 398.0),
+    ]
+
+    result = deduplicate_listings(rows)
+
+    assert len(result.items) == 2
+    assert len(result.cross_platform_groups) == 1
+    assert {item.platform for item in result.cross_platform_groups[0].members} == {
+        "Fang",
+        "Lyj",
+    }
 
 
 def test_workbook_marks_removed_duplicate_rows_in_gray_italic():
@@ -176,8 +329,8 @@ def test_workbook_marks_removed_duplicate_rows_in_gray_italic():
         area=100.0,
         algorithm_mode="DEFAULT",
         listings=[
-            ListingRow("Fang", "target", "title-a", 100.0, "3 rooms 2 halls", 50000.0, 500.0),
-            ListingRow("Lianjia", "target", "title-b", 100.0, "3 rooms 2 halls", 50000.0, 500.0),
+            ListingRow("Fang", "target", "same title", 100.0, "3 rooms 2 halls", 50000.0, 500.0),
+            ListingRow("Lianjia", "target", "same title", 100.0, "3 rooms 2 halls", 50000.0, 500.0),
         ],
     )
 
@@ -232,10 +385,10 @@ def test_analysis_summary_does_not_freeze_panes_and_wraps_text():
     sheet = workbook["分析汇总"]
 
     assert sheet.freeze_panes is None
-    assert sheet["J6"].alignment.wrap_text is True
+    assert sheet["K6"].alignment.wrap_text is True
 
 
-def test_analysis_summary_uses_the_current_nineteen_column_layout():
+def test_analysis_summary_includes_administrative_district():
     record = InquiryRecord(
         started_at="2026-07-24 00:00:00",
         city="Shenzhen",
@@ -248,17 +401,27 @@ def test_analysis_summary_uses_the_current_nineteen_column_layout():
     )
     finalize_record(record)
     analysis_rows = analyze_evaluation_rows(
-        [EvaluationRow(2, "Shenzhen", 100.0, "target", 50000.0)],
+        [
+            EvaluationRow(
+                2,
+                "Shenzhen",
+                100.0,
+                "target",
+                50000.0,
+                administrative_district="Nanshan",
+            )
+        ],
         [record],
     )
 
     workbook = build_workbook([record], analysis_rows)
     sheet = workbook["分析汇总"]
 
-    assert sheet.max_column == 19
-    assert [sheet.cell(row=5, column=column).value for column in range(1, 20)] == [
+    assert sheet.max_column == 20
+    assert [sheet.cell(row=5, column=column).value for column in range(1, 21)] == [
         "行号",
         "城市",
+        "行政区",
         "请求面积(㎡)",
         "小区",
         "评估单价",
@@ -277,6 +440,7 @@ def test_analysis_summary_uses_the_current_nineteen_column_layout():
         "严格范围房源数",
         "弱参考补充数",
     ]
+    assert sheet["C6"].value == "Nanshan"
 
 
 def test_log_analysis_multi_peak_uses_lowest_median_without_discount():
@@ -307,7 +471,7 @@ def test_log_analysis_combines_logged_target_area_deal_result():
         community_name="target",
         area=80.0,
         algorithm_mode="DEFAULT",
-        deal_avg=40000.0,
+        deals=[DealRow("Fang", 80.0, "2026-07", 0.0, 40000.0)],
         listings=[
             ListingRow("Fang", "target", "listing", 80.0, "3 rooms 2 halls", 50000.0, 500.0),
         ],
@@ -354,11 +518,65 @@ def test_log_analysis_rebuilds_logged_single_peak_with_deal_without_discount():
         listings=[
             ListingRow("Fang", "target", "listing", 80.0, "3 rooms 2 halls", 50000.0, 500.0),
         ],
+        deals=[DealRow("Fang", 80.0, "2026-07", 0.0, 40000.0)],
     )
 
     finalize_record(record)
 
     assert record.final_price == 45000.0
+    assert record.branch_code == "WEIGHTED_MEDIAN_COMBINED"
+
+
+def test_log_analysis_rebuilds_deals_with_request_area_plus_minus_five():
+    record = InquiryRecord(
+        started_at="2026-08-05 14:00:00",
+        city="Shenzhen",
+        community_name="target",
+        area=104.03,
+        algorithm_mode="DEFAULT",
+        deal_avg=40654.0,
+        final_price=39456.5,
+        final_price_logged=True,
+        branch_code="WEIGHTED_MEDIAN_COMBINED",
+        branch_code_logged=True,
+        listings=[
+            ListingRow("Ke", "target", "listing", 104.03, "3 rooms 2 halls", 38259.0, 0.0),
+        ],
+        deals=[
+            DealRow("Ke", 89.1, "2026-07", 0.0, 40654.0),
+            DealRow("Ke", 89.1, "2026-06", 0.0, 40654.0),
+            DealRow("Ke", 92.49, "2026-05", 0.0, 40654.0),
+        ],
+    )
+
+    finalize_record(record)
+
+    assert record.deal_avg is None
+    assert record.final_price == 34433.1
+    assert record.branch_code == "WEIGHTED_MEDIAN"
+
+
+def test_log_analysis_keeps_real_deals_at_request_area_plus_minus_five_boundary():
+    record = InquiryRecord(
+        started_at="2026-08-05 14:00:00",
+        city="Shenzhen",
+        community_name="target",
+        area=104.03,
+        algorithm_mode="DEFAULT",
+        listings=[
+            ListingRow("Ke", "target", "listing", 104.03, "3 rooms 2 halls", 38259.0, 0.0),
+        ],
+        deals=[
+            DealRow("Ke", 99.03, "2026-07", 0.0, 40000.0),
+            DealRow("Ke", 109.03, "2026-06", 0.0, 40000.0),
+            DealRow("Ke", 109.04, "2026-05", 0.0, 10000.0),
+        ],
+    )
+
+    finalize_record(record)
+
+    assert record.deal_avg == 40000.0
+    assert record.final_price == 39129.5
     assert record.branch_code == "WEIGHTED_MEDIAN_COMBINED"
 
 
@@ -462,9 +680,9 @@ def test_analysis_summary_explains_multi_peak_and_selected_lowest_peak():
 
     assert record.final_price == 126836.0
     assert analysis_rows[0].conclusion == "原始数据/评估基准不匹配，排除评价"
-    assert sheet["F6"].value == 126836.0
-    assert "155,634" in sheet["I6"].value
-    assert sheet["J6"].value == "原始数据/评估基准不匹配，排除评价"
+    assert sheet["G6"].value == 126836.0
+    assert "155,634" in sheet["J6"].value
+    assert sheet["K6"].value == "原始数据/评估基准不匹配，排除评价"
 
 
 def test_log_analysis_preserves_weak_reference_metadata():
@@ -505,9 +723,9 @@ def test_log_analysis_preserves_weak_reference_metadata():
     )
     workbook = build_workbook(records, analysis_rows)
     sheet = workbook["分析汇总"]
-    assert "WEAK_AREA_REFERENCE" in sheet["Q6"].value
-    assert sheet["R6"].value == 1
-    assert sheet["S6"].value == 2
+    assert "WEAK_AREA_REFERENCE" in sheet["R6"].value
+    assert sheet["S6"].value == 1
+    assert sheet["T6"].value == 2
 
 
 def test_log_parser_reconstructs_house_id_and_negative_weak_area_min():

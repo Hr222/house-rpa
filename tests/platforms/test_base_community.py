@@ -4,6 +4,7 @@
 from app.core.models import ListingSnapshot
 from app.platforms.base import (
     community_name_match,
+    deal_area_bounds,
     filter_snapshots_by_area,
     filter_snapshots_by_area_with_fallback,
     filter_snapshots_by_community,
@@ -16,6 +17,12 @@ from app.platforms.base import (
     prepare_listing_data,
     prepare_listing_data_with_reference,
 )
+
+
+def test_deal_area_bounds_uses_plus_minus_five_without_widening_listing_scope():
+    """成交使用 ±5㎡，但不改变在售房源既有的 ±1㎡范围。"""
+    assert deal_area_bounds(104.03) == (99.03, 109.03)
+    assert listing_area_bounds(104.03) == (103.03, 105.03)
 
 
 def test_has_matching_community_snapshots_respects_prefix_alias():

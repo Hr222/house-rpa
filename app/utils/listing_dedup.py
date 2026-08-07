@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Generic, Iterable, TypeVar
 
@@ -57,8 +58,54 @@ def _number(value: Any) -> float | None:
 def _normalized_text(value: Any) -> str:
     """规范化不同网站之间无实际影响的标点和空格差异。"""
     text = _text(value).casefold()
-    punctuation = r"[\s,\uFF0C\u3002.!\uFF01\u3001;\uFF1B:/\\|()\uFF08\uFF09\[\]\u3010\u3011_-]+"
-    return re.sub(punctuation, "", text)
+    return "".join(
+        character
+        for character in text
+        if not character.isspace()
+        and unicodedata.category(character)[0] not in {"P", "S"}
+    )
+
+
+def _normalized_community(value: Any) -> str:
+    """标准化小区名，并忽略末尾括号中的行政区后缀。"""
+    text = _text(value)
+    text = re.sub(r"[（(][^（）()]*[）)]$", "", text)
+    return _normalized_text(text)
+
+
+_RESIDENTIAL_COMMUNITY_SUFFIXES = (
+    "山庄",
+    "花园",
+    "公馆",
+    "家园",
+    "华庭",
+    "小区",
+    "名苑",
+)
+
+
+def _communities_match_for_strong_title(left: Any, right: Any) -> bool:
+    """强标题匹配时允许一方仅多出明确的住宅通用后缀。"""
+    left_community = _normalized_community(left)
+    right_community = _normalized_community(right)
+    if not left_community or not right_community:
+        return False
+    if left_community == right_community:
+        return True
+    shorter, longer = sorted((left_community, right_community), key=len)
+    return any(longer == f"{shorter}{suffix}" for suffix in _RESIDENTIAL_COMMUNITY_SUFFIXES)
+
+
+def _communities_share_distinctive_name(left: Any, right: Any) -> bool:
+    """判断小区全称与无歧义简称是否指向同一名称。"""
+    left_community = _normalized_community(left)
+    right_community = _normalized_community(right)
+    if not left_community or not right_community:
+        return False
+    if left_community == right_community:
+        return True
+    shorter, longer = sorted((left_community, right_community), key=len)
+    return len(shorter) >= 3 and shorter in longer
 
 
 def _layout_signature(value: Any) -> tuple[int, int] | None:
@@ -115,16 +162,76 @@ def listing_dedup_key(item: T) -> tuple[Any, ...] | None:
     )
 
 
+def _same_platform_incomplete_match(left: T, right: T) -> bool:
+    """识别缺少房源编号或户型时仍具备强证据的同平台重复记录。"""
+    if _normalized_text(getattr(left, "platform", "")) != _normalized_text(
+        getattr(right, "platform", "")
+    ):
+        return False
+    if _text(getattr(left, "house_id", "")) or _text(getattr(right, "house_id", "")):
+        return False
+    if not _communities_share_distinctive_name(
+        getattr(left, "community_name", ""),
+        getattr(right, "community_name", ""),
+    ):
+        return False
+
+    left_layout = _layout_signature(getattr(left, "layout", ""))
+    right_layout = _layout_signature(getattr(right, "layout", ""))
+    if left_layout is not None and right_layout is not None:
+        return False
+
+    left_area = _number(getattr(left, "area", None))
+    right_area = _number(getattr(right, "area", None))
+    left_price = _number(getattr(left, "unit_price", None))
+    right_price = _number(getattr(right, "unit_price", None))
+    left_total = _number(getattr(left, "total_price", None))
+    right_total = _number(getattr(right, "total_price", None))
+    return (
+        left_area is not None
+        and left_area == right_area
+        and left_price is not None
+        and left_price == right_price
+        and left_total is not None
+        and left_total == right_total
+    )
+
+
+def _listing_information_score(item: T) -> tuple[int, int, int]:
+    """在确定重复时优先保留标题和结构化字段更完整的一条。"""
+    return (
+        int(_layout_signature(getattr(item, "layout", "")) is not None),
+        len(_normalized_text(getattr(item, "title", ""))),
+        len(_normalized_community(getattr(item, "community_name", ""))),
+    )
+
+
 def deduplicate_same_platform(items: Iterable[T]) -> list[T]:
-    """按输入顺序保留确定重复房源的首次出现项。"""
+    """按稳定编号或完整字段去重，并处理缺字段时的强证据重复。"""
     result: list[T] = []
     seen: set[tuple[Any, ...]] = set()
     for item in items:
         key = listing_dedup_key(item)
-        if key is None or key not in seen:
-            result.append(item)
         if key is not None:
-            seen.add(key)
+            if key not in seen:
+                result.append(item)
+                seen.add(key)
+            continue
+
+        duplicate_index = next(
+            (
+                index
+                for index, existing in enumerate(result)
+                if _same_platform_incomplete_match(item, existing)
+            ),
+            None,
+        )
+        if duplicate_index is None:
+            result.append(item)
+        elif _listing_information_score(item) > _listing_information_score(
+            result[duplicate_index]
+        ):
+            result[duplicate_index] = item
     return result
 
 
@@ -135,15 +242,17 @@ def _cross_platform_match_score(
     area_tolerance: float,
     unit_price_tolerance: float,
 ) -> tuple[int, float, float, float] | None:
-    """返回跨平台候选的匹配分数；不匹配时返回 None。"""
+    """返回跨平台核心字段匹配分数；不匹配时返回 None。"""
     left_platform = _normalized_text(getattr(left, "platform", ""))
     right_platform = _normalized_text(getattr(right, "platform", ""))
     if not left_platform or left_platform == right_platform:
         return None
 
-    left_community = _normalized_text(getattr(left, "community_name", ""))
-    right_community = _normalized_text(getattr(right, "community_name", ""))
-    if not left_community or left_community != right_community:
+    communities_match = _communities_share_distinctive_name(
+        getattr(left, "community_name", ""),
+        getattr(right, "community_name", ""),
+    )
+    if not communities_match:
         return None
 
     left_area = _number(getattr(left, "area", None))
@@ -153,33 +262,21 @@ def _cross_platform_match_score(
     if left_area is None or right_area is None or left_price is None or right_price is None:
         return None
 
-    area_distance = abs(left_area - right_area)
-    price_distance = abs(left_price - right_price)
-    if area_distance > area_tolerance or price_distance > unit_price_tolerance:
-        return None
-
     left_layout = _layout_signature(getattr(left, "layout", ""))
     right_layout = _layout_signature(getattr(right, "layout", ""))
-    if left_layout is not None and right_layout is not None:
-        if left_layout != right_layout:
-            return None
-    elif not _titles_match(
-        getattr(left, "title", ""),
-        getattr(right, "title", ""),
-    ):
-        # 任一数据源缺少户型时，标题仍是必要条件，不能只靠数值字段合并。
+    if left_layout is not None and right_layout is not None and left_layout != right_layout:
         return None
 
     left_total = _number(getattr(left, "total_price", None))
     right_total = _number(getattr(right, "total_price", None))
-    total_distance = (
-        abs(left_total - right_total)
-        if left_total is not None and right_total is not None
-        else float("inf")
-    )
-    # 标题仅用于多个候选同时命中时消歧，不改变原有的面积/单价/户型准入条件。
-    title_match = int(_titles_match(getattr(left, "title", ""), getattr(right, "title", "")))
-    return title_match, -area_distance, -price_distance, -total_distance
+    if (
+        left_area != right_area
+        or left_price != right_price
+        or left_total is None
+        or left_total != right_total
+    ):
+        return None
+    return int(left_layout is not None and right_layout is not None), 0.0, 0.0, 0.0
 
 
 def _cross_platform_match(
@@ -252,17 +349,15 @@ def deduplicate_cross_platform(
         if len(component) < 2:
             continue
         members = tuple(rows[index] for index in component)
-        has_layout = all(
-            _layout_signature(getattr(item, "layout", "")) is not None
+        representative = members[0]
+        has_missing_layout = any(
+            _layout_signature(getattr(item, "layout", "")) is None
             for item in members
         )
         reason = (
-            "\u5c0f\u533a\u4e00\u81f4\uff0c\u62a5\u4ef7\u5dee\u2264100\u5143/\u5e73\uff0c\u9762\u79ef\u5dee\u22640.5\u33a1\uff0c\u6237\u578b\u4e00\u81f4\uff0c\u6807\u9898\u5dee\u5f02\u4e0d\u5f71\u54cd\u5224\u5b9a"
-            if has_layout
-            else (
-                "\u5c0f\u533a\u4e00\u81f4\uff0c\u62a5\u4ef7\u5dee\u2264100\u5143/\u5e73\uff0c\u9762\u79ef\u5dee\u22640.5\u33a1\uff0c"
-                "\u6237\u578b\u6709\u7f3a\u5931\uff0c\u6807\u9898\u6807\u51c6\u5316\u540e\u4e0e\u4ee3\u8868\u623f\u6e90\u4e00\u81f4"
-            )
+            "\u5c0f\u533a\u5168\u79f0/\u7b80\u79f0\u4e00\u81f4\uff0c\u9762\u79ef\u3001\u5355\u4ef7\u3001\u603b\u4ef7\u7cbe\u786e\u4e00\u81f4\uff0c\u6237\u578b\u7f3a\u5931\u4e0d\u53c2\u4e0e\u6bd4\u8f83"
+            if has_missing_layout
+            else "\u5c0f\u533a\u5168\u79f0/\u7b80\u79f0\u4e00\u81f4\uff0c\u9762\u79ef\u3001\u5355\u4ef7\u3001\u603b\u4ef7\u3001\u6237\u578b\u5168\u90e8\u7cbe\u786e\u4e00\u81f4"
         )
         groups.append(
             ListingDuplicateGroup(
