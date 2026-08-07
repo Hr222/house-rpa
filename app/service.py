@@ -109,6 +109,53 @@ def _algorithm_deal_price_lists(
     ]
 
 
+def _luxury_data_is_sparse(
+    successful_results: list[PlatformResult],
+    request_area: Optional[float],
+) -> bool:
+    """Identify sparse strict-area evidence for the luxury-only adjustment."""
+    if request_area is None:
+        return False
+
+    strict_listings: list[_AlgorithmListing] = []
+    strict_platforms: set[str] = set()
+    has_weak_reference = False
+    for result in successful_results:
+        if result.reference_code:
+            has_weak_reference = True
+        for snapshot in result.listing_snapshots:
+            if (
+                snapshot.area is None
+                or snapshot.unit_price is None
+                or snapshot.unit_price <= 0
+                or abs(snapshot.area - request_area) > LISTING_AREA_TOLERANCE
+            ):
+                continue
+            strict_platforms.add(result.name)
+            strict_listings.append(
+                _AlgorithmListing(
+                    platform=result.name,
+                    house_id=snapshot.house_id or "",
+                    community_name=snapshot.community_name,
+                    title=snapshot.title,
+                    area=snapshot.area,
+                    layout=snapshot.layout,
+                    unit_price=snapshot.unit_price,
+                    total_price=snapshot.total_price,
+                )
+            )
+
+    if not strict_listings:
+        return True
+    unique_count = len(deduplicate_listings(strict_listings).items)
+    platform_count = len(strict_platforms)
+    return (
+        unique_count <= 3
+        or platform_count <= 1
+        or (has_weak_reference and unique_count <= 5)
+    )
+
+
 def _reference_prices(result: PlatformResult) -> list[float]:
     """返回弱参考房源的价格值，包括严格范围内的单条弱参考。"""
     if (
@@ -166,6 +213,7 @@ def _reference_contributors(
 
 def build_inquiry_result(
     platform_results: list[PlatformResult],
+    request_area: Optional[float] = None,
 ) -> InquiryResult:
     """使用唯一的加权落点中位数算法计算最终价。"""
     successful_results = [
@@ -176,6 +224,11 @@ def build_inquiry_result(
             quote_price_lists=_algorithm_quote_price_lists(successful_results),
             weighted_median_discount=config.get_weighted_median_discount(),
             deal_price_lists=_algorithm_deal_price_lists(successful_results),
+            area=request_area,
+            luxury_data_sparse=_luxury_data_is_sparse(
+                successful_results,
+                request_area,
+            ),
         ),
     )
 
@@ -373,7 +426,10 @@ class RPAInquiryService:
                 summary,
             )
 
-        inquiry_result = build_inquiry_result(platform_results)
+        inquiry_result = build_inquiry_result(
+            platform_results,
+            request_area=request.area,
+        )
         self._log_inquiry_result(inquiry_result)
         return inquiry_result
 

@@ -23,6 +23,8 @@ class AlgorithmInput:
     quote_price_lists: list[list[float]]
     weighted_median_discount: float = 0.9
     deal_price_lists: list[list[float]] = field(default_factory=list)
+    area: Optional[float] = None
+    luxury_data_sparse: bool = False
 
 
 class AlgorithmStrategy(Protocol):
@@ -43,7 +45,15 @@ class AlgorithmEvaluation:
 WEIGHTED_MEDIAN_MIN_COVERAGE = 0.60
 WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION = 0.10
 
-
+LUXURY_TRANSITION_START_AREA = 120.0
+LUXURY_AREA_START = 125.0
+LUXURY_SINGLE_EXTRA_DISCOUNTS = (
+    (150.0, 0.05),
+    (200.0, 0.05),
+    (250.0, 0.17),
+    (300.0, 0.10),
+    (float("inf"), 0.08),
+)
 @dataclass(frozen=True)
 class _WeightedPrice:
     price: float
@@ -409,6 +419,34 @@ def decide_weighted_median(
     )
 
 
+def _luxury_transition_weight(area: Optional[float]) -> float:
+    """Return the gradual luxury weight for the 120-125㎡ transition zone."""
+    if area is None or area < LUXURY_TRANSITION_START_AREA:
+        return 0.0
+    if area >= LUXURY_AREA_START:
+        return 1.0
+    return (area - LUXURY_TRANSITION_START_AREA) / (
+        LUXURY_AREA_START - LUXURY_TRANSITION_START_AREA
+    )
+
+
+def _luxury_discount_rate(
+    area: Optional[float],
+    bands: tuple[tuple[float, float], ...],
+) -> float:
+    """Return an area-band discount, blended at the 120-125㎡ boundary."""
+    weight = _luxury_transition_weight(area)
+    if weight <= 0.0:
+        return 0.0
+    assert area is not None
+    full_rate = next(rate for upper, rate in bands if area <= upper)
+    return full_rate * weight
+
+
+def _luxury_single_multiplier(area: Optional[float]) -> float:
+    return 1.0 - _luxury_discount_rate(area, LUXURY_SINGLE_EXTRA_DISCOUNTS)
+
+
 def _select_deal_price(
     deal_price_lists: Iterable[Iterable[float]],
     max_relative_deviation: float = WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION,
@@ -443,6 +481,10 @@ class WeightedMedianAlgorithm:
             inputs.quote_price_lists,
             quote_discount=inputs.weighted_median_discount,
         )
+        deal_avg = _select_deal_price(inputs.deal_price_lists)
+        luxury_single_adjustment_enabled = (
+            inputs.luxury_data_sparse and deal_avg is None
+        )
         if len(candidates) > 1:
             selected = min(candidates, key=lambda candidate: candidate.quote_price)
             candidates = [
@@ -457,17 +499,35 @@ class WeightedMedianAlgorithm:
                 for candidate in candidates
             ]
             decision = Decision(
+                # A multi-peak decision already selects the lowest valid peak.
+                # Do not apply a second luxury discount to that conservative value.
                 final_price=selected.quote_price,
                 branch="WEIGHTED_MEDIAN_MULTI",
             )
             quote_avg = selected.quote_price
         else:
             quote_avg = candidates[0].quote_price if candidates else None
+            luxury_multiplier = (
+                _luxury_single_multiplier(inputs.area)
+                if luxury_single_adjustment_enabled
+                else 1.0
+            )
             decision = decide_weighted_median(
                 quote_avg,
-                inputs.weighted_median_discount,
+                inputs.weighted_median_discount * luxury_multiplier,
             )
-        deal_avg = _select_deal_price(inputs.deal_price_lists)
+            if candidates and luxury_single_adjustment_enabled:
+                candidates = [
+                    PriceCandidate(
+                        quote_price=candidate.quote_price,
+                        final_price=candidate.final_price * luxury_multiplier,
+                        count=candidate.count,
+                        frequency=candidate.frequency,
+                        min_price=candidate.min_price,
+                        max_price=candidate.max_price,
+                    )
+                    for candidate in candidates
+                ]
         if decision.final_price is not None and deal_avg is not None:
             decision = Decision(
                 # 有真实成交价时，挂牌峰值不打折，直接与成交价等权平均。

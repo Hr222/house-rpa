@@ -267,3 +267,68 @@ def test_weighted_median_decision_fails_without_peak():
     decision = decide_weighted_median(None)
     assert decision.final_price is None
     assert decision.branch == "FAILED"
+
+
+def test_non_luxury_area_keeps_the_general_discount_even_when_sparse():
+    result = evaluate_algorithm(
+        AlgorithmInput(
+            quote_price_lists=[[100000.0]],
+            area=119.9,
+            luxury_data_sparse=True,
+        )
+    )
+
+    assert result.decision.final_price == 90000.0
+
+
+def test_luxury_transition_area_blends_the_first_area_discount():
+    result = evaluate_algorithm(
+        AlgorithmInput(
+            quote_price_lists=[[100000.0]],
+            area=122.5,
+            luxury_data_sparse=True,
+        )
+    )
+
+    # Half of the 5% luxury add-on is applied after the general 9-fold discount.
+    assert result.decision.final_price == 87750.0
+
+
+def test_luxury_single_peak_uses_the_area_step_without_deal():
+    result = evaluate_algorithm(
+        AlgorithmInput(
+            quote_price_lists=[[100000.0]],
+            area=225.0,
+            luxury_data_sparse=True,
+        )
+    )
+
+    assert result.decision.final_price == 74700.0
+
+
+def test_luxury_multi_peak_keeps_the_lowest_peak_without_extra_discount():
+    result = evaluate_algorithm(
+        AlgorithmInput(
+            quote_price_lists=[[100000.0] * 6, [150000.0] * 6],
+            area=225.0,
+            luxury_data_sparse=True,
+        )
+    )
+
+    assert result.decision.final_price == 100000.0
+    assert result.decision.branch == "WEIGHTED_MEDIAN_MULTI"
+
+
+def test_luxury_deal_result_does_not_receive_an_extra_discount():
+    result = evaluate_algorithm(
+        AlgorithmInput(
+            quote_price_lists=[[100000.0]],
+            deal_price_lists=[[80000.0]],
+            area=225.0,
+            luxury_data_sparse=True,
+        )
+    )
+
+    assert result.decision.final_price == 90000.0
+    assert result.decision.branch == "WEIGHTED_MEDIAN_COMBINED"
+    assert result.candidates[0].final_price == 90000.0
