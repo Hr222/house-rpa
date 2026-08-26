@@ -1,169 +1,76 @@
-# AGENTS.md — jeethink-rpa 模块约束
+# AGENTS.md — jeethink-rpa 开发协作规范
 
-> 本文件供 AI 编码助手阅读,仅约束 **jeethink-rpa** 模块(Python RPA 工程)。
-> 与仓库根的 `AGENTS.md`(Java/Vue/uni-app 三端)完全独立,互不干涉。
-> 改动代码前先读完本文;与本文冲突的需求,以**用户当次指令**为准。
+> 本文件仅约束 `jeethink-rpa` Python 工程，与仓库根目录的 `AGENTS.md` 独立。
+> 改动前先阅读本文；当本文、项目文档和用户当次指令冲突时，以用户当次指令为准。
 
-## 1. 模块定位
+## 1. 项目定位
 
-jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + nodriver),
-做房产询价的浏览器自动化采集。已接入贝壳(ke)、安居客(ajk)、链家(lj)、房天下(fang)、乐有家(lyj) 共 5 个平台,按多平台可扩展设计。
+jeethink-rpa 是房产实时询价工程。它使用 FastAPI 和 nodriver，面向多平台采集房产数据，并与小区主数据、房源记录模块协作完成询价和数据沉淀。
 
-- 入口服务:`scripts/rpa/api_server.py`
-- 平台扩展指南:`docs/平台扩展对接文档.md`
-- 系统架构与运行时状态:`docs/系统架构与运行时状态.md`
-- 业务说明:`README.md`
+当前接入贝壳、安居客、链家、房天下、乐有家。入口服务是 `scripts/rpa/api_server.py`。
 
-## 2. 技术栈与 API 约定
+## 2. 开始工作前
 
-- Python 3.14,nodriver(反检测浏览器库,**非 selenium/playwright**)。
-- 分层:`api → runtime → service → platform adapter → parser/algorithm`。
-- 平台适配器统一继承 `app/rpa/platforms/base.py:PlatformAdapter`。
-- 最终取值走 `app/rpa/core/algorithm.py`，**纯函数，所有平台共用**；保留算法策略接口和注册表，当前只注册 `DEFAULT` 加权落点中位数算法。
-- 多城市支持:`app/rpa/platforms/city_map.py` 维护 5 平台 × 广东 21 城 URL 前缀映射,
-  各 adapter `collect()` / `reset_to_start_page()` 接收 `city` 参数,
-  薄壳在采集前调 `check_city_support()` + `ensure_city_navigated()` 确保城市正确。
+先根据任务读取对应文档，不在 `AGENTS.md` 重复架构、接口和业务规则：
 
-## 3. ★ 业务流程不可擅改(最高约束)
-
-> 这是本模块最重要的约束,优先级高于一切技术优化建议。
-
-**业务流程是固定的。没有用户的明确指令,AI 不得擅自:**
-- 增删采集步骤(如自作主张加循环检测、删掉某步)
-- 改变步骤顺序
-- 修改 `service.py` / `core/models.py` / `runtime.py` / `api.py`（除非用户明确授权本次修改）
-- 改变加权落点中位数算法的决策规则或阈值（新增算法函数不算擅改，但需用户明确指令）
-
-**平台差异 ≠ 改流程。** 某平台因特性"略过"某步(如安居客无成交→不点详情),
-是平台适配,不是流程变更。代码注释里必须写清楚"为什么略过"。
-
-判定标准:
-- 看到"被风控/被拦"就想加重试循环 → ❌ 擅改流程
-- 某平台没有某数据源所以跳过该步采集 → ✅ 平台适配(需注释说明)
-
-### 统一状态与风控边界
-
-- `app/rpa/core/status.py` 集中定义服务状态、平台健康状态、平台采集结果状态和任务状态。
-- `PlatformHealthStatus` 表示平台能否继续工作；`PlatformResultStatus` 只表示本次询价结果，二者不得直接混用。
-- 平台适配器保留平台专属风控规则；`app/rpa/platforms/base.py` 集中维护公共 URL/HTML 风控标识并作为兜底入口。
-- 验证码或人机验证的单次结果使用 `WAIT_MANUAL_VERIFY`，并将平台健康状态置为 `WAIT_MANUAL_VERIFY`；登录失效的单次结果使用 `LOGIN_EXPIRED`，并将平台健康状态置为 `WAIT_LOGIN`。普通采集异常使用 `ERROR`，不得用普通 `ERROR` 覆盖平台健康状态。
-- 任务结束回写不得覆盖任务开始后发生的人工确认或保活状态变化。
-- 人工回车确认期间，平台就绪检查与保活使用同一互斥控制；一次确认批次完成前，保活不得抢先改写平台健康状态。
-
-## 4. 对接新平台的标准流程
-
-严格按 `docs/平台扩展对接文档.md` 执行,核心步骤:
-
-1. **MVP 先行**:在 `scripts/rpa/` 下用**单个测试脚本**(如 `ajk_mvp_test.py`)逐步验证,
-   不一次写完整采集。每步验证通过再往下。
-2. **不每步新建脚本**:整个 MVP 验证过程在**同一个脚本**里迭代,
-   不要每一步新建一个脚本文件(运维负担大)。
-3. **HTML 先核对再写解析**:解析 DOM 前必须核对真实 dump 出来的 HTML,
-   **不许盲写选择器/正则**。拿不到 HTML 就让人工 dump 或用 `--debug` 导出。
-4. **nodriver API 用法**:
-   - `Tab.evaluate(expression)` 执行的是 **JS 表达式**,箭头函数必须用 **IIFE** `(() => {...})()` 立即调用
-   - `Element` **没有** `select_all`(那是 `Tab` 的),Element 用 `query_selector_all`
-   - `Element.apply(js_function)` 会自动调用箭头函数并传入元素,**不需要** IIFE
-   - `evaluate` 要拿返回值传 `return_by_value=True`
-5. **正式落地四件套**(MVP 验证通过后):
-   - `app/rpa/platforms/<code>_constants.py` — 平台固有常量(首页 URL、档位等)
-   - `app/rpa/parsers/<code>.py` — HTML 解析(纯函数,从结果页/成交页提取数据,可独立单测)
-   - `app/rpa/platforms/adapters/<code>.py` — 真实采集逻辑(浏览器操作,MVP 验证过的函数移植过来;解析调 `parsers`)
-   - `app/rpa/platforms/<code>.py` — 薄壳适配器,委托给 adapter
-6. **注册两处**:`app/rpa/platforms/__init__.py` 导出 + `app/rpa/registry.py` 追加。
-7. **不改核心层**:`core/models` / `core/algorithm` / `service` / `runtime` / `api` 一行不改；若用户明确授权修改既有运行时状态管理，才可按本次指令调整 `runtime.py`，不得借机改变采集流程或算法。
-8. **算法模式固定**：API 不再接收 `algorithmMode`；内部统一使用 `DEFAULT` 表示当前唯一注册的加权落点中位数算法。算法策略接口和注册表保留，未来新增算法时再按明确需求注册。新平台采集流程与现有一致。
-
-## 5. 平台特性差异记录
-
-各平台已确认的差异,AI 对接时需知晓:
-
-| 平台 | code | 面积筛选 | 分页 | 成交记录 | 小区均价 | 详情页 |
-|---|---|---|---|---|---|---|
-| 贝壳 | ke | 动态读取档位+点击链接 | 有,翻页 | 详情页有 | 详情页有,采 | 必须点 |
-| 安居客 | ajk | 动态读取档位+点击链接 | 无,单页全展示 | **无** | 结果页社区卡片(从业者认为有水分) | 不用点 |
-| 链家 | lj | 动态读取档位+点击链接 | 有,翻页 | 详情→成交列表翻页 | 不取 | 必须点 |
-| 房天下 | fang | 动态读取档位+点击链接 | 有,翻页 | 详情→小区成交 tab | 不取 | Ctrl+点击 |
-| 乐有家 | lyj | 动态读取档位+点击链接 | 有,翻页 | **无** | 结果页社区信息卡 | 不用点 |
-
-### 小区数据质量规则(已落地,勿回退)
-- 搜索结果先用 `has_matching_community_snapshots()` 校验至少命中一条目标小区快照。
-- 有分页的平台每页解析后立即调用 `filter_snapshots_by_community()`,只累计目标小区房源。
-- 第 1 页非空但全部无关:停止该平台采集并返回 `NO_DATA`;第 2 页及以后非空但全部无关:丢弃该页、立即停止后续翻页,保留此前有效数据。
-- 混合页面只保留匹配快照并继续翻页;空页必须继续走 `check_empty_listing_page()`,不得混同为无关小区页。
-- 返回 `SUCCESS` 前调用 `prepare_listing_data()`,保证 `listing_snapshots` 与 `quote_prices` 来自同一批过滤数据。
-- 小区名匹配统一走 `community_name_match()`,匹配输入只允许请求小区名和抓取快照的 `ListingSnapshot.community_name`;禁止读取整页 HTML、房源标题或搜索词参与匹配,也禁止通过硬编码规则绕过通用匹配机制。
-
-### 安居客特殊处理(已落地,勿改)
-- **无成交记录**:业务上把**挂牌均价顶替 `deal_prices`**，保留平台结果结构兼容性；当前加权落点中位数算法不使用成交数据。
-  代码在 `ajk` adapter `_do_collect`,注释已标明。
-- **无分页**:滚动到底即可(`_scroll_to_bottom`)。
-- **不点详情**:挂牌均价在结果页社区卡片就有(`parse_community_avg_price`)。
-
-### 乐有家特殊处理(已落地,勿改)
-- 与安居客同理:**无成交记录**，业务上用**小区均价顶替 `deal_prices`**；当前加权落点中位数算法不使用成交数据。
-- 搜索走 URL 参数(`/esf/?c={小区名}`),不走输入框回车。
-
-### 多城市支持(已落地)
-- API 入参 `city` 为**必填**(城市, 小区, 面积三要素)。
-- `app/rpa/platforms/city_map.py` 维护显式映射表(各平台 URL 前缀命名规则不统一,不能规则推导)。
-- 各平台城市覆盖数:**ajk 21/21、fang 21/21、ke 12/21、lj 10/21、lyj 9/21**。
-- 平台不支持城市时:跳过询价只做保活刷新,返回 `NO_DATA`;全部平台都不支持时 note="不支持该城市"。
-- 城市切换:薄壳 `collect()` 中先 `ensure_city_navigated()` 检查域名,不同城才导航,避免错误城市搜索。
-
-## 6. 编码风格
-
-- 每个文件头部 `# -*- coding: utf-8 -*-` + 简短 docstring。
-- 日志用 `logging.getLogger(__name__)`,关键步骤打 info,异常打 warning/error 带上下文。
-- 函数前缀约定:模块内部用 `_` 前缀(如 `_human_click`),对外标准接口不加(如 `collect`/`probe_ready`)。
-- 真人节奏:nodriver 操作间用 `asyncio.sleep` 加随机间隔,模拟真人,降低风控触发。
-- 调试 HTML 导出走 `app/rpa/utils/debug_utils.py:dump_html`,默认不导出,`--debug` 或 `RPA_DEBUG=1` 开启。
-
-## 7. 验证要求
-
-项目已稳定,改动后**按改动点跑对应测试即可,不必每次跑全量 pytest**;但不得跳过验证。改动文件 → 对应测试目标的映射(基于实际 `tests/` 目录):
-
-| 改动文件 | 跑哪个测试 |
+| 任务 | 必读文档 |
 |---|---|
-| `app/rpa/core/algorithm.py` | `tests/core/test_algorithm.py` |
-| `app/rpa/service.py` | `tests/service/test_service.py` |
-| `app/rpa/api.py` | `tests/api/test_api.py` |
-| `app/rpa/runtime.py` | `tests/runtime/`(`test_callback` / `test_restore` / `test_status_management`) |
-| `app/rpa/parsers/<code>.py` | `tests/parsers/test_<code>.py` + `tests/parsers/test_<code>_area.py` |
-| `app/rpa/platforms/base.py` | `tests/platforms/test_base_community.py` + `test_base_risk.py` |
-| `app/rpa/platforms/adapters/ajk.py` | `tests/platforms/test_ajk_adapter.py` |
-| `app/rpa/platforms/adapters/fang.py` | `tests/platforms/test_fang_risk.py` |
-| `app/rpa/utils/task_store.py` | `tests/persistence/test_task_store.py` |
-| `app/rpa/excel/*` | `tests/excel/test_export_operation_log_excel.py` |
+| 了解项目和运行方式 | `README.md` |
+| RPA 分层、状态、并发、风控 | `docs/系统架构与运行时状态.md` |
+| 新平台或平台 HTML 改造 | `docs/平台扩展对接文档.md` |
+| 小区主数据 | `docs/小区基础数据模块.md` |
+| 房源记录和入库 | `docs/房源记录模块.md` |
+| HTTP 接口 | `docs/API接口文档.md` |
+| 当前阶段需求 | `work/` 中与任务对应的文件（目录存在时） |
 
-- `ke` / `lj` / `lyj` 的 adapter 目前没有专属测试,改动时以 MVP 脚本(`scripts/rpa/<code>_mvp_test.py`)人工验证为主,并酌情跑相邻的 `parsers` 测试兜底。
-- 跨模块改动:把涉及的测试目录一起跑,例如 `python -m pytest tests/core/ tests/parsers/ -v`。
-- 全量 `python -m pytest tests/ -v` 仅在改动面大 / 怀疑广泛回归、或发版前按需执行。
+`work/` 是临时工作文档目录，记录已确认但可能尚未实现的需求；需求完成后会删除。不要把其中内容当作现有代码行为，也不要让永久代码依赖该目录。
 
-此外仍需:
-1. 新增平台后 `python -c "from app.rpa.registry import build_default_adapters; ..."` 验证注册正常
-2. MVP 脚本能跑通完整链路,人工核对采集数据合理
+## 3. 开发流程与约束
 
-## 8. 文件职责速查
+新功能、业务流程调整或跨模块改动必须按以下顺序推进，环节不能跳过：
 
-| 文件 | 职责 | 改动频率 |
-|---|---|---|
-| `app/rpa/core/algorithm.py` | 最终取值决策(纯函数，加权落点中位数算法) | 极低,业务规则锁定 |
-| `app/rpa/core/status.py` | 集中定义服务、平台健康、平台结果、任务状态及平台健康转移事件 | 低 |
-| `docs/系统架构与运行时状态.md` | 系统分层、状态模型、并发协调、风控边界和排错入口 | 低 |
-| `app/rpa/service.py` | 平台调度+汇总 | 低 |
-| `app/rpa/runtime.py` | 浏览器/队列/保活/状态机 | 低 |
-| `app/rpa/api.py` | FastAPI 接口 | 低 |
-| `app/rpa/core/models.py` | 数据模型(平台无关) | 低 |
-| `app/rpa/parsers/<code>.py` | 各平台 HTML 解析(纯函数,独立单测) | 跟随各平台页面变化 |
-| `app/rpa/platforms/base.py` | 平台适配器基类+通用函数(风控/点击/面积筛选/小区过滤/城市检查/城市导航/空页检测) | 低,通用能力沉淀 |
-| `app/rpa/platforms/city_map.py` | 跨平台城市映射表(5平台×广东21城URL前缀) | 新城市/新平台接入时 |
-| `app/rpa/platforms/adapters/ke.py` | 贝壳采集 | 跟随贝壳页面变化 |
-| `app/rpa/platforms/adapters/ajk.py` | 安居客采集 | 跟随安居客页面变化 |
-| `app/rpa/platforms/adapters/lj.py` | 链家采集 | 跟随链家页面变化 |
-| `app/rpa/platforms/adapters/fang.py` | 房天下采集 | 跟随房天下页面变化 |
-| `app/rpa/platforms/adapters/lyj.py` | 乐有家采集 | 跟随乐有家页面变化 |
-| `app/rpa/platforms/<code>.py` | 平台薄壳适配器 | 新平台接入时 |
-| `app/rpa/platforms/<code>_constants.py` | 平台固有常量 | 新平台接入时 |
-| `scripts/rpa/<code>_mvp_test.py` | MVP 验证脚本 | 对接期间,验证完保留 |
-| `docs/平台扩展对接文档.md` | 对接指南 | 新平台流程有变时 |
+1. **沟通**：理解用户目标、范围和术语；区分用户请求、现有代码和文档描述。
+2. **需求评审**：检查当前实现和影响模块，说明已确认规则、风险、缺口和明确不在范围内的内容。
+3. **技术方案**：给出模块职责、数据流、接口或模型影响、关键边界、测试重点和取舍；此时不改代码，也不擅自写正式文档。
+4. **实施计划**：将已确认方案拆成可独立验收的工作块，说明实施顺序和验证方式。
+5. **用户拍板**：用户确认方案和计划后，才可以按其授权写入 `work/` 文档；只有用户明确要求“开始开发”或“实现”后，才可以改代码。
+
+用户可以分别授权文档和代码。方案确认不自动等于代码授权；需求仍在讨论时，不得提前创建文档或实现。
+
+- 先区分现有代码、文档约定和当前需求；不明确的行为不得自行补全为新功能。
+- 复用项目已有分层、模型和工具；不要为了未确认的后续需求预建同步、下架或大而全的抽象。
+- 既有平台采集顺序、算法决策、状态机和风控边界，未经用户明确授权不得改变。
+- 平台页面改造先核对真实 HTML，再修改 parser；按现有 MVP 脚本逐步验证，不盲写选择器或正则。
+- parser 保持纯函数；浏览器、登录态和风控处理留在 adapter；不要让平台 adapter 直接写业务数据库。
+- Python 文件以 `# -*- coding: utf-8 -*-` 和简短 docstring 开头。日志使用 `logging.getLogger(__name__)`，关键步骤记录上下文，异常使用 warning/error。
+- 代码实现后，再同步已经实现内容的正式文档。
+
+## 4. 测试与验证
+
+测试保持精简，只覆盖当前业务重点。当前保留 8 个测试模块、13 个测试。
+
+| 改动范围 | 运行目标 |
+|---|---|
+| `app/community_data/*` | `tests/community_data/test_community_data.py` |
+| `app/rpa/parsers/ajk.py` | `tests/parsers/test_ajk.py` |
+| `app/rpa/parsers/fang.py` | `tests/parsers/test_fang.py` |
+| `app/rpa/parsers/ke.py` | `tests/parsers/test_ke.py` |
+| `app/rpa/parsers/lj.py` | `tests/parsers/test_lj.py` |
+| `app/rpa/parsers/lyj.py` | `tests/parsers/test_lyj.py` |
+| `app/rpa/platforms/base.py` 小区归属 | `tests/platforms/test_base_community.py` |
+| `app/property_records/*` | `tests/property_records/test_property_records.py` |
+
+- 改动后必须运行与改动直接相关的测试，不必默认跑全量。
+- 新能力只添加验证关键业务边界的最小测试，不恢复已删除的低价值测试套件。
+- 平台 HTML 改造先用对应 MVP 脚本验证真实页面，再运行相邻 parser 测试。
+- 全量 `python -m pytest tests/ -v` 仅在改动面大、怀疑广泛回归或发版前执行。
+
+## 5. Git 提交规范
+
+- 只有用户明确要求时才创建提交。
+- 提交前检查 `git status --short`、`git diff` 和暂存区；不得覆盖或夹带用户已有的无关改动、未跟踪脚本、输出和运行产物。
+- 只暂存本次任务相关文件，不使用 `git add .` 扩大范围。
+- 提交前执行 `git diff --cached --check`；代码改动还要运行对应测试。纯文档整理可不跑测试，但必须说明原因。
+- 提交信息使用简洁中文，一个提交只处理一个完整工作块。
+- 提交后说明提交哈希、提交内容、验证结果，以及未纳入的用户文件。
+- 禁止使用 `git reset --hard`、`git checkout --` 等破坏性操作覆盖用户改动。
