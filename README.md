@@ -12,6 +12,7 @@
 - [9. 启动流程](#9-启动流程)
 - [10. 运行方式](#10-运行方式)
 - [11. API 约定](#11-api-约定)
+- [小区基础数据模块文档](docs/小区基础数据模块.md)
 - [12. 崩溃恢复与弱持久化](#12-崩溃恢复与弱持久化)
 - [13. 日志与调试](#13-日志与调试)
 - [14. 当前约束](#14-当前约束)
@@ -106,9 +107,9 @@
 
 ### 最终取值：挂牌价与成交价汇总
 
-代码位置：`app/core/algorithm.py:WeightedMedianAlgorithm`。系统固定使用这一套算法，不再通过请求参数切换算法。
+代码位置：`app/rpa/core/algorithm.py:WeightedMedianAlgorithm`。系统固定使用这一套算法，不再通过请求参数切换算法。
 
-代码位置：`app/core/algorithm.py:WeightedMedianAlgorithm`
+代码位置：`app/rpa/core/algorithm.py:WeightedMedianAlgorithm`
 
 - 每个平台总权重相等，平台内每条有效在售价格按数量分配权重。
 - 以相对中位数 ±10% 识别各自密集的价格峰；只有无法与其他报价组成价格簇的单点才作为孤立噪声排除。
@@ -125,19 +126,19 @@
 
 整体分为 5 层：
 
-1. **API 层** — `app/api.py`
+1. **API 层** — `app/rpa/api.py`
    FastAPI 入口，接收 HTTP 请求，对外暴露健康检查、状态查询、询价接口、参数管理。
 
-2. **Runtime 层** — `app/runtime.py`
+2. **Runtime 层** — `app/rpa/runtime.py`
    管理浏览器实例、平台会话、任务队列、服务状态、保活流程、崩溃恢复。
 
-3. **Service 层** — `app/service.py`
+3. **Service 层** — `app/rpa/service.py`
    调度多个平台适配器，汇总平台结果并计算最终报价。
 
-4. **Platform Adapter 层** — `app/platforms/`
+4. **Platform Adapter 层** — `app/rpa/platforms/`
    每个平台两件套：薄壳适配器（`platforms/<code>.py`）+ 采集逻辑（`platforms/adapters/<code>.py`）。
 
-5. **Parser / Algorithm 层** — `app/parsers/` + `app/core/algorithm.py`
+5. **Parser / Algorithm 层** — `app/rpa/parsers/` + `app/rpa/core/algorithm.py`
    页面解析和纯算法决策，不承担浏览器控制。
 
 ```
@@ -159,6 +160,13 @@ jeethink-rpa/
 │  │  ├─ models.py          # 数据模型（平台无关）
 │  │  ├─ algorithm.py       # 最终取值决策（纯函数）
 │  │  └─ price_utils.py     # 价格格式化工具
+│  ├─ community_data/       # 小区主数据、别名、坐标和附近查询模块
+│  │  ├─ models.py          # 小区记录与地理编码状态
+│  │  ├─ normalization.py   # 名称规范化和期数分组
+│  │  ├─ database.py        # SQLite 数据访问
+│  │  ├─ geocoder.py        # 腾讯地图地理编码
+│  │  ├─ config.py          # 附近半径等环境配置
+│  │  └─ service.py         # 两个公开查询接口的业务编排
 │  ├─ platforms/
 │  │  ├─ base.py            # 平台适配器抽象基类
 │  │  ├─ city_map.py        # 跨平台城市映射表（网页平台 + 行舟深房深圳支持）
@@ -217,7 +225,7 @@ Frida 配置、`package.json`、`package-lock.json`、上游许可证和来源�
 
 ## 7. 核心模块说明
 
-### `app/core/config.py`
+### `app/rpa/core/config.py`
 
 运行配置中心，包含：
 
@@ -226,7 +234,7 @@ Frida 配置、`package.json`、`package-lock.json`、上游许可证和来源�
 - 风控参数（保活间隔、详情页停留时间等）
 - 算法参数：`get_weighted_median_discount()` / `set_weighted_median_discount()` — 加权落点中位数折扣，支持弱持久化
 
-### `app/core/models.py`
+### `app/rpa/core/models.py`
 
 平台无关的数据模型：
 
@@ -235,13 +243,13 @@ Frida 配置、`package.json`、`package-lock.json`、上游许可证和来源�
 - `InquiryResult` — 最终询价结果（含决策分支、最终价格）
 - `ListingSnapshot` / `DealRecord` — 房源摘要 / 成交记录
 
-### `app/core/algorithm.py`
+### `app/rpa/core/algorithm.py`
 
 纯函数，无 IO，所有平台共用。算法策略接口和注册表继续保留，当前只注册加权落点中位数算法：
 - `aggregate_weighted_median_quote(...)` — 按平台等权寻找主要在售价格落点并计算加权中位数
 - `evaluate_algorithm(AlgorithmInput(...))` — 固定使用加权落点中位数并返回最终价格和结果分支
 
-### `app/api.py`
+### `app/rpa/api.py`
 
 FastAPI 入口。接口清单：
 
@@ -256,7 +264,7 @@ FastAPI 入口。接口清单：
 | GET | `/admin/algorithm/weighted-median-discount` | 查询加权落点中位数折扣 |
 | PUT | `/admin/algorithm/weighted-median-discount` | 更新加权落点中位数折扣 |
 
-### `app/runtime.py`
+### `app/rpa/runtime.py`
 
 服务运行时核心。职责：
 
@@ -271,14 +279,14 @@ FastAPI 入口。接口清单：
 - 崩溃恢复：全部平台首次就绪后，从 `persist/` 恢复未完成任务（只一次）。
 - 需要人工处理时尝试将浏览器置前。
 
-### `app/service.py`
+### `app/rpa/service.py`
 
 平台调度与结果汇总层。
 
 - `build_inquiry_result()` — 汇总所有 `SUCCESS` 平台的在售数据，固定调用加权落点中位数算法计算最终价。
 - `RPAInquiryService` — 管理各平台 session，执行 `run_inquiry()`。
 
-### `app/platforms/base.py`
+### `app/rpa/platforms/base.py`
 
 平台适配器抽象基类 `PlatformAdapter`。每个平台必须实现：
 
@@ -313,7 +321,7 @@ FastAPI 入口。接口清单：
 | `filter_snapshots_by_community(snapshots, community_name)` | 只按 `ListingSnapshot.community_name` 过滤抓取数据，供逐页过滤和返回前防御校验共用 |
 | `prepare_listing_data(snapshots, community_name)` | 过滤目标小区快照，并从同一批快照生成 `quote_prices`，保证明细与价格同源 |
 
-### `app/platforms/<code>.py` + `adapters/<code>.py`
+### `app/rpa/platforms/<code>.py` + `adapters/<code>.py`
 
 平台适配器两件套：
 
@@ -322,7 +330,7 @@ FastAPI 入口。接口清单：
 - 采集逻辑（`platforms/adapters/<code>.py`）：搜索、筛选、分页、解析、风控检测等真实逻辑。
   `collect()` 和 `reset_to_start_page()` 均接收 `city` 参数。
 
-### `app/platforms/city_map.py`
+### `app/rpa/platforms/city_map.py`
 
 跨平台城市映射表，维护网页平台的城市 URL 前缀，并维护行舟深房仅支持深圳的能力边界。
 
@@ -331,9 +339,9 @@ FastAPI 入口。接口清单：
 - `get_city_prefix(platform_code, city)` → URL 前缀，不支持时返回 `None`
 - `is_city_supported(platform_code, city)` → 是否支持
 
-### `app/parsers/<code>.py`
+### `app/rpa/parsers/<code>.py`
 
-每个平台一个独立 HTML 解析器，与 adapter 的浏览器操作分离。adapter 通过 `from app.parsers import <code> as parsers` 调用。
+每个平台一个独立 HTML 解析器，与 adapter 的浏览器操作分离。adapter 通过 `from app.rpa.parsers import <code> as parsers` 调用。
 
 - `parsers/ke.py` — 贝壳（BeautifulSoup + 正则兜底）：在售记录/摘要、详情链接、小区均价、成交记录、面积档位解析、面积 ±20% 筛选
 - `parsers/ajk.py` — 安居客：在售快照、挂牌均价（顶替成交）、面积档位解析
@@ -342,7 +350,7 @@ FastAPI 入口。接口清单：
 - `parsers/lyj.py` — 乐有家：在售快照、小区均价（顶替成交）、面积档位解析
 - `parsers/xzsfbj.py` — 行舟深房：小区索引、接口在售/成交响应、住宅期数匹配、面积 ±1㎡ + 近半年筛选
 
-### `app/utils/`
+### `app/rpa/utils/`
 
 | 文件 | 职责 |
 |------|------|
@@ -354,7 +362,7 @@ FastAPI 入口。接口清单：
 
 ## 8. 配置与常量边界
 
-### 运行配置（`app/core/config.py`）
+### 运行配置（`app/rpa/core/config.py`）
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
@@ -409,7 +417,7 @@ pip install -r requirements.txt
 ### 启动服务
 
 ```bash
-python -m app.scripts.api_server
+python -m scripts.rpa.api_server
 ```
 
 常用参数（所有脚本统一）：
@@ -419,17 +427,17 @@ python -m app.scripts.api_server
 
 ```bash
 # 调试 + 人工登录确认
-python -m app.scripts.api_server --debug --manual-login
+python -m scripts.rpa.api_server --debug --manual-login
 ```
 
 ### 单平台 MVP 测试
 
 ```bash
-python -m app.scripts.ke_mvp_test --debug --manual-login       # 贝壳
-python -m app.scripts.ajk_mvp_test --debug --manual-login      # 安居客
-python -m app.scripts.lj_mvp_test --debug --manual-login       # 链家
-python -m app.scripts.fang_mvp_test --debug --manual-login     # 房天下
-python -m app.scripts.lyj_mvp_test --debug --manual-login      # 乐有家
+python -m scripts.rpa.ke_mvp_test --debug --manual-login       # 贝壳
+python -m scripts.rpa.ajk_mvp_test --debug --manual-login      # 安居客
+python -m scripts.rpa.lj_mvp_test --debug --manual-login       # 链家
+python -m scripts.rpa.fang_mvp_test --debug --manual-login     # 房天下
+python -m scripts.rpa.lyj_mvp_test --debug --manual-login      # 乐有家
 ```
 
 ### 行舟深房（xzsfbj）环境准备
@@ -475,7 +483,7 @@ python -m app.scripts.lyj_mvp_test --debug --manual-login      # 乐有家
    只需确认本地依赖后按回车；真正采集该平台时才会提示打开小程序并自动捕获 token。
 
    ```powershell
-   .\.venv\Scripts\python.exe app\scripts\xzsfbj_mvp_test.py `
+   .\.venv\Scripts\python.exe scripts\rpa\xzsfbj_mvp_test.py `
      --community "月亮湾花园" --area 91.5 --debug
    ```
 
@@ -492,6 +500,43 @@ python test_inquiry.py
 ```
 
 ## 11. API 约定
+
+### 小区基础数据模块
+
+小区基础数据模块位于 `app/community_data/`，使用独立 SQLite 数据库保存我们自己的小区主数据，
+不依赖 RPA 浏览器运行时。它目前只通过 Python 包入口暴露两个小区查询接口，不新增 HTTP 路由。
+正式查询只通过数据库完成；数据库没有记录时才新增记录并调用腾讯地图补充坐标。
+
+对外 Python 插口：
+
+```python
+from app.community_data import find_nearby_communities, resolve_communities
+
+records = resolve_communities("深圳", "南山区", "某某花园")
+nearby = find_nearby_communities("深圳", "南山区", "某某花园")
+```
+
+一期、二期、三期使用不同的 `community_id` 保存，并共享 `community_group_id`。两个接口均支持
+Excel `rename` 中的别名查询。附近接口的 `limit` 默认是 3，按小区组计数，再展开返回组内各期记录，
+因此返回条数可能大于 `limit`。`filter_by_build_year` 默认是 `True`：只返回与查询小区
+建成年份相差不超过 5 年的记录，并始终优先按地理距离排序；距离相同时再参考年份差距。传入
+`filter_by_build_year=False` 时不限制建成年份，按地理距离返回小区组及其全部期数。
+候选必须位于 `.env` 的 `COMMUNITY_NEARBY_RADIUS_METERS` 指定方圆内，默认 10,000 米；半径内
+数量不足 `limit` 时返回实际数量。距离采用同一 GCJ-02 坐标系上的 Haversine 球面距离，单位为米。
+
+`xqData.json` 只用于一次性初始化，初始化完成并核对数据库后即可清理，正式模块不读取该文件。
+
+完整的数据模型、维护脚本、配置和验证说明见[小区基础数据模块文档](docs/小区基础数据模块.md)。
+
+初始化脚本默认只导入、不调用腾讯地图：
+
+```powershell
+python scripts/community_data/initialize_database.py `
+  --xq-data path\to\xqData.json `
+  --limit 1
+```
+
+确认数据后，需要显式通过 `--geocode-limit N` 才会消耗腾讯地图调用额度。
 
 ### 创建询价任务
 

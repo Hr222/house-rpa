@@ -5,7 +5,7 @@
 房天下用"平米"单位，DOM 结构与安居客不同。
 """
 
-from app.parsers.fang import parse_area_segments
+from app.rpa.parsers.fang import parse_area_segments
 
 
 # 深圳真实 HTML 片段（9 档）

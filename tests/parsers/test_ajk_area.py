@@ -4,7 +4,7 @@
 验证 parse_area_segments 能从结果页 HTML 正确读取各城市的面积档位。
 """
 
-from app.parsers.ajk import parse_area_segments
+from app.rpa.parsers.ajk import parse_area_segments
 
 
 # 深圳真实 HTML 片段（9 档）

@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-from app.excel.export_operation_log_excel import (
+from app.rpa.excel.export_operation_log_excel import (
     DealRow,
     EvaluationRow,
     InquiryRecord,
@@ -19,7 +19,7 @@ from app.excel.export_operation_log_excel import (
     finalize_record,
     parse_records,
 )
-from app.utils.listing_dedup import (
+from app.rpa.utils.listing_dedup import (
     _cross_platform_match,
     deduplicate_listings,
     deduplicate_same_platform,
@@ -687,26 +687,26 @@ def test_analysis_summary_explains_multi_peak_and_selected_lowest_peak():
 
 def test_log_analysis_preserves_weak_reference_metadata():
     lines = [
-        "2026-07-27 12:00:00 [INFO] app.service - 查询城市: 深圳, 小区: 示例花园, 面积: 100.0㎡",
-        "2026-07-27 12:00:01 [INFO] app.service - 乐有家: {小区名称: 示例花园, 标题: 房源1, 面积: 100.0平米, 几房几厅: 3房2厅, 售价: 50000元/平, 总价: 500万}",
-        "2026-07-27 12:00:01 [INFO] app.service - 乐有家: {小区名称: 示例花园, 标题: 房源2, 面积: 102.0平米, 几房几厅: 3房2厅, 售价: 50000元/平, 总价: 510万}",
-        "2026-07-27 12:00:01 [INFO] app.service - 乐有家: {小区名称: 示例花园, 标题: 房源3, 面积: 103.0平米, 几房几厅: 3房2厅, 售价: 50000元/平, 总价: 515万}",
-        "2026-07-27 12:00:01 [INFO] app.service - 乐有家弱参考: referenceCode=WEAK_AREA_REFERENCE referenceAreaTolerance=3.00 referenceAreaMin=97.00 referenceAreaMax=103.00 referenceListingCount=2",
-        "2026-07-27 12:00:02 [INFO] app.service - 在售均价(单位:元/平): 50000",
-        "2026-07-27 12:00:02 [INFO] app.service - 成交均价(单位:元/平): None",
-        "2026-07-27 12:00:02 [INFO] app.service - 最终取值(单位:元/平): 45000",
+        "2026-07-27 12:00:00 [INFO] app.rpa.service - 查询城市: 深圳, 小区: 示例花园, 面积: 100.0㎡",
+        "2026-07-27 12:00:01 [INFO] app.rpa.service - 乐有家: {小区名称: 示例花园, 标题: 房源1, 面积: 100.0平米, 几房几厅: 3房2厅, 售价: 50000元/平, 总价: 500万}",
+        "2026-07-27 12:00:01 [INFO] app.rpa.service - 乐有家: {小区名称: 示例花园, 标题: 房源2, 面积: 102.0平米, 几房几厅: 3房2厅, 售价: 50000元/平, 总价: 510万}",
+        "2026-07-27 12:00:01 [INFO] app.rpa.service - 乐有家: {小区名称: 示例花园, 标题: 房源3, 面积: 103.0平米, 几房几厅: 3房2厅, 售价: 50000元/平, 总价: 515万}",
+        "2026-07-27 12:00:01 [INFO] app.rpa.service - 乐有家弱参考: referenceCode=WEAK_AREA_REFERENCE referenceAreaTolerance=3.00 referenceAreaMin=97.00 referenceAreaMax=103.00 referenceListingCount=2",
+        "2026-07-27 12:00:02 [INFO] app.rpa.service - 在售均价(单位:元/平): 50000",
+        "2026-07-27 12:00:02 [INFO] app.rpa.service - 成交均价(单位:元/平): None",
+        "2026-07-27 12:00:02 [INFO] app.rpa.service - 最终取值(单位:元/平): 45000",
     ]
 
     lines.insert(
         -3,
-        "2026-07-27 12:00:02 [INFO] app.service - "
+        "2026-07-27 12:00:02 [INFO] app.rpa.service - "
         "finalWeakReference: referenceCode=WEAK_AREA_REFERENCE "
         "referenceAreaTolerance=3.00 referenceAreaMin=97.00 "
         "referenceAreaMax=103.00 referenceListingCount=2",
     )
     lines.insert(
         -3,
-        "2026-07-27 12:00:02 [INFO] app.service - "
+        "2026-07-27 12:00:02 [INFO] app.rpa.service - "
         "finalBranch: branchCode=WEIGHTED_MEDIAN",
     )
     records = parse_records(lines)
@@ -730,16 +730,16 @@ def test_log_analysis_preserves_weak_reference_metadata():
 
 def test_log_parser_reconstructs_house_id_and_negative_weak_area_min():
     lines = [
-        "2026-07-27 12:00:00 [INFO] app.service - "
+        "2026-07-27 12:00:00 [INFO] app.rpa.service - "
         f"{U_QUERY_CITY}: Shenzhen, {U_COMMUNITY}: target, {U_AREA}: 1.0㎡",
-        "2026-07-27 12:00:01 [INFO] app.service - "
+        "2026-07-27 12:00:01 [INFO] app.rpa.service - "
         "PlatformA: {小区名称: target, 标题: listing, 面积: 1.0平米, "
         "几房几厅: 1房1厅, 售价: 50000元/平, 总价: 5万, 房源编号: house-1}",
-        "2026-07-27 12:00:01 [INFO] app.service - "
+        "2026-07-27 12:00:01 [INFO] app.rpa.service - "
         "finalWeakReference: referenceCode=WEAK_AREA_REFERENCE "
         "referenceAreaTolerance=20.00 referenceAreaMin=-19.00 "
         "referenceAreaMax=21.00 referenceListingCount=1",
-        "2026-07-27 12:00:01 [INFO] app.service - finalBranch: branchCode=WEIGHTED_MEDIAN",
+        "2026-07-27 12:00:01 [INFO] app.rpa.service - finalBranch: branchCode=WEIGHTED_MEDIAN",
     ]
 
     record = parse_records(lines)[0]
@@ -752,11 +752,11 @@ def test_log_parser_reconstructs_house_id_and_negative_weak_area_min():
 def test_log_parser_preserves_final_no_data_branch_codes():
     for branch in ("NO_DATA", "NO_MATCHING_AREA"):
         lines = [
-            "2026-07-27 12:00:00 [INFO] app.service - "
+            "2026-07-27 12:00:00 [INFO] app.rpa.service - "
             f"{U_QUERY_CITY}: Shenzhen, {U_COMMUNITY}: target, {U_AREA}: 100.0㎡",
-            "2026-07-27 12:00:01 [INFO] app.service - "
+            "2026-07-27 12:00:01 [INFO] app.rpa.service - "
             f"PlatformA: {{{U_STATUS}: {branch}, {U_REASON}: no usable listings}}",
-            f"2026-07-27 12:00:01 [INFO] app.service - finalBranch: branchCode={branch}",
+            f"2026-07-27 12:00:01 [INFO] app.rpa.service - finalBranch: branchCode={branch}",
         ]
 
         record = parse_records(lines)[0]

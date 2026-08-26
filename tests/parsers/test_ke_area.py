@@ -5,7 +5,7 @@
 贝壳标题是"建筑面积"（不是"面积"），档位文本在 <span class="name"> 里，单位"㎡"。
 """
 
-from app.parsers.ke import parse_area_segments
+from app.rpa.parsers.ke import parse_area_segments
 
 
 # 深圳真实 HTML 片段（8 档）

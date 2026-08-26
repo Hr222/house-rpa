@@ -3,7 +3,7 @@
 
 from datetime import date, timedelta
 
-from app.parsers.xzsfbj import (
+from app.rpa.parsers.xzsfbj import (
     filter_deal_records,
     find_community_candidates,
     match_community,

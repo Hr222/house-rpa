@@ -7,8 +7,8 @@ from datetime import date, timedelta
 
 import pytest
 
-from app.platforms.adapters import xzsfbj as adapter_module
-from app.platforms.adapters.xzsfbj import (
+from app.rpa.platforms.adapters import xzsfbj as adapter_module
+from app.rpa.platforms.adapters.xzsfbj import (
     ApiResponseError,
     Blocked,
     DealPageRisk,
@@ -16,10 +16,10 @@ from app.platforms.adapters.xzsfbj import (
     XzsfbjApiAdapter,
     _check_api_error,
 )
-from app.core.models import InquiryRequest, ListingSnapshot, PlatformResult
-from app.core.status import PlatformHealthStatus, PlatformResultStatus
-from app.platforms import xzsfbj_constants as constants
-from app.platforms.xzsfbj import XzsfbjPlatformAdapter
+from app.rpa.core.models import InquiryRequest, ListingSnapshot, PlatformResult
+from app.rpa.core.status import PlatformHealthStatus, PlatformResultStatus
+from app.rpa.platforms import xzsfbj_constants as constants
+from app.rpa.platforms.xzsfbj import XzsfbjPlatformAdapter
 
 
 def test_registry_adapter_uses_interface_session_and_city_boundary():

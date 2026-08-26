@@ -9,7 +9,7 @@
 jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + nodriver),
 做房产询价的浏览器自动化采集。已接入贝壳(ke)、安居客(ajk)、链家(lj)、房天下(fang)、乐有家(lyj) 共 5 个平台,按多平台可扩展设计。
 
-- 入口服务:`app/scripts/api_server.py`
+- 入口服务:`scripts/rpa/api_server.py`
 - 平台扩展指南:`docs/平台扩展对接文档.md`
 - 系统架构与运行时状态:`docs/系统架构与运行时状态.md`
 - 业务说明:`README.md`
@@ -18,9 +18,9 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 
 - Python 3.14,nodriver(反检测浏览器库,**非 selenium/playwright**)。
 - 分层:`api → runtime → service → platform adapter → parser/algorithm`。
-- 平台适配器统一继承 `app/platforms/base.py:PlatformAdapter`。
-- 最终取值走 `app/core/algorithm.py`，**纯函数，所有平台共用**；保留算法策略接口和注册表，当前只注册 `DEFAULT` 加权落点中位数算法。
-- 多城市支持:`app/platforms/city_map.py` 维护 5 平台 × 广东 21 城 URL 前缀映射,
+- 平台适配器统一继承 `app/rpa/platforms/base.py:PlatformAdapter`。
+- 最终取值走 `app/rpa/core/algorithm.py`，**纯函数，所有平台共用**；保留算法策略接口和注册表，当前只注册 `DEFAULT` 加权落点中位数算法。
+- 多城市支持:`app/rpa/platforms/city_map.py` 维护 5 平台 × 广东 21 城 URL 前缀映射,
   各 adapter `collect()` / `reset_to_start_page()` 接收 `city` 参数,
   薄壳在采集前调 `check_city_support()` + `ensure_city_navigated()` 确保城市正确。
 
@@ -43,9 +43,9 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 
 ### 统一状态与风控边界
 
-- `app/core/status.py` 集中定义服务状态、平台健康状态、平台采集结果状态和任务状态。
+- `app/rpa/core/status.py` 集中定义服务状态、平台健康状态、平台采集结果状态和任务状态。
 - `PlatformHealthStatus` 表示平台能否继续工作；`PlatformResultStatus` 只表示本次询价结果，二者不得直接混用。
-- 平台适配器保留平台专属风控规则；`app/platforms/base.py` 集中维护公共 URL/HTML 风控标识并作为兜底入口。
+- 平台适配器保留平台专属风控规则；`app/rpa/platforms/base.py` 集中维护公共 URL/HTML 风控标识并作为兜底入口。
 - 验证码或人机验证的单次结果使用 `WAIT_MANUAL_VERIFY`，并将平台健康状态置为 `WAIT_MANUAL_VERIFY`；登录失效的单次结果使用 `LOGIN_EXPIRED`，并将平台健康状态置为 `WAIT_LOGIN`。普通采集异常使用 `ERROR`，不得用普通 `ERROR` 覆盖平台健康状态。
 - 任务结束回写不得覆盖任务开始后发生的人工确认或保活状态变化。
 - 人工回车确认期间，平台就绪检查与保活使用同一互斥控制；一次确认批次完成前，保活不得抢先改写平台健康状态。
@@ -54,7 +54,7 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 
 严格按 `docs/平台扩展对接文档.md` 执行,核心步骤:
 
-1. **MVP 先行**:在 `app/scripts/` 下用**单个测试脚本**(如 `ajk_mvp_test.py`)逐步验证,
+1. **MVP 先行**:在 `scripts/rpa/` 下用**单个测试脚本**(如 `ajk_mvp_test.py`)逐步验证,
    不一次写完整采集。每步验证通过再往下。
 2. **不每步新建脚本**:整个 MVP 验证过程在**同一个脚本**里迭代,
    不要每一步新建一个脚本文件(运维负担大)。
@@ -66,11 +66,11 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
    - `Element.apply(js_function)` 会自动调用箭头函数并传入元素,**不需要** IIFE
    - `evaluate` 要拿返回值传 `return_by_value=True`
 5. **正式落地四件套**(MVP 验证通过后):
-   - `app/platforms/<code>_constants.py` — 平台固有常量(首页 URL、档位等)
-   - `app/parsers/<code>.py` — HTML 解析(纯函数,从结果页/成交页提取数据,可独立单测)
-   - `app/platforms/adapters/<code>.py` — 真实采集逻辑(浏览器操作,MVP 验证过的函数移植过来;解析调 `parsers`)
-   - `app/platforms/<code>.py` — 薄壳适配器,委托给 adapter
-6. **注册两处**:`app/platforms/__init__.py` 导出 + `app/registry.py` 追加。
+   - `app/rpa/platforms/<code>_constants.py` — 平台固有常量(首页 URL、档位等)
+   - `app/rpa/parsers/<code>.py` — HTML 解析(纯函数,从结果页/成交页提取数据,可独立单测)
+   - `app/rpa/platforms/adapters/<code>.py` — 真实采集逻辑(浏览器操作,MVP 验证过的函数移植过来;解析调 `parsers`)
+   - `app/rpa/platforms/<code>.py` — 薄壳适配器,委托给 adapter
+6. **注册两处**:`app/rpa/platforms/__init__.py` 导出 + `app/rpa/registry.py` 追加。
 7. **不改核心层**:`core/models` / `core/algorithm` / `service` / `runtime` / `api` 一行不改；若用户明确授权修改既有运行时状态管理，才可按本次指令调整 `runtime.py`，不得借机改变采集流程或算法。
 8. **算法模式固定**：API 不再接收 `algorithmMode`；内部统一使用 `DEFAULT` 表示当前唯一注册的加权落点中位数算法。算法策略接口和注册表保留，未来新增算法时再按明确需求注册。新平台采集流程与现有一致。
 
@@ -106,7 +106,7 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 
 ### 多城市支持(已落地)
 - API 入参 `city` 为**必填**(城市, 小区, 面积三要素)。
-- `app/platforms/city_map.py` 维护显式映射表(各平台 URL 前缀命名规则不统一,不能规则推导)。
+- `app/rpa/platforms/city_map.py` 维护显式映射表(各平台 URL 前缀命名规则不统一,不能规则推导)。
 - 各平台城市覆盖数:**ajk 21/21、fang 21/21、ke 12/21、lj 10/21、lyj 9/21**。
 - 平台不支持城市时:跳过询价只做保活刷新,返回 `NO_DATA`;全部平台都不支持时 note="不支持该城市"。
 - 城市切换:薄壳 `collect()` 中先 `ensure_city_navigated()` 检查域名,不同城才导航,避免错误城市搜索。
@@ -117,7 +117,7 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 - 日志用 `logging.getLogger(__name__)`,关键步骤打 info,异常打 warning/error 带上下文。
 - 函数前缀约定:模块内部用 `_` 前缀(如 `_human_click`),对外标准接口不加(如 `collect`/`probe_ready`)。
 - 真人节奏:nodriver 操作间用 `asyncio.sleep` 加随机间隔,模拟真人,降低风控触发。
-- 调试 HTML 导出走 `app/utils/debug_utils.py:dump_html`,默认不导出,`--debug` 或 `RPA_DEBUG=1` 开启。
+- 调试 HTML 导出走 `app/rpa/utils/debug_utils.py:dump_html`,默认不导出,`--debug` 或 `RPA_DEBUG=1` 开启。
 
 ## 7. 验证要求
 
@@ -125,45 +125,45 @@ jeethink-rpa 是一个**独立的 Python RPA 工程**(Python 3.14 + FastAPI + no
 
 | 改动文件 | 跑哪个测试 |
 |---|---|
-| `app/core/algorithm.py` | `tests/core/test_algorithm.py` |
-| `app/service.py` | `tests/service/test_service.py` |
-| `app/api.py` | `tests/api/test_api.py` |
-| `app/runtime.py` | `tests/runtime/`(`test_callback` / `test_restore` / `test_status_management`) |
-| `app/parsers/<code>.py` | `tests/parsers/test_<code>.py` + `tests/parsers/test_<code>_area.py` |
-| `app/platforms/base.py` | `tests/platforms/test_base_community.py` + `test_base_risk.py` |
-| `app/platforms/adapters/ajk.py` | `tests/platforms/test_ajk_adapter.py` |
-| `app/platforms/adapters/fang.py` | `tests/platforms/test_fang_risk.py` |
-| `app/utils/task_store.py` | `tests/persistence/test_task_store.py` |
-| `app/excel/*` | `tests/excel/test_export_operation_log_excel.py` |
+| `app/rpa/core/algorithm.py` | `tests/core/test_algorithm.py` |
+| `app/rpa/service.py` | `tests/service/test_service.py` |
+| `app/rpa/api.py` | `tests/api/test_api.py` |
+| `app/rpa/runtime.py` | `tests/runtime/`(`test_callback` / `test_restore` / `test_status_management`) |
+| `app/rpa/parsers/<code>.py` | `tests/parsers/test_<code>.py` + `tests/parsers/test_<code>_area.py` |
+| `app/rpa/platforms/base.py` | `tests/platforms/test_base_community.py` + `test_base_risk.py` |
+| `app/rpa/platforms/adapters/ajk.py` | `tests/platforms/test_ajk_adapter.py` |
+| `app/rpa/platforms/adapters/fang.py` | `tests/platforms/test_fang_risk.py` |
+| `app/rpa/utils/task_store.py` | `tests/persistence/test_task_store.py` |
+| `app/rpa/excel/*` | `tests/excel/test_export_operation_log_excel.py` |
 
-- `ke` / `lj` / `lyj` 的 adapter 目前没有专属测试,改动时以 MVP 脚本(`app/scripts/<code>_mvp_test.py`)人工验证为主,并酌情跑相邻的 `parsers` 测试兜底。
+- `ke` / `lj` / `lyj` 的 adapter 目前没有专属测试,改动时以 MVP 脚本(`scripts/rpa/<code>_mvp_test.py`)人工验证为主,并酌情跑相邻的 `parsers` 测试兜底。
 - 跨模块改动:把涉及的测试目录一起跑,例如 `python -m pytest tests/core/ tests/parsers/ -v`。
 - 全量 `python -m pytest tests/ -v` 仅在改动面大 / 怀疑广泛回归、或发版前按需执行。
 
 此外仍需:
-1. 新增平台后 `python -c "from app.registry import build_default_adapters; ..."` 验证注册正常
+1. 新增平台后 `python -c "from app.rpa.registry import build_default_adapters; ..."` 验证注册正常
 2. MVP 脚本能跑通完整链路,人工核对采集数据合理
 
 ## 8. 文件职责速查
 
 | 文件 | 职责 | 改动频率 |
 |---|---|---|
-| `app/core/algorithm.py` | 最终取值决策(纯函数，加权落点中位数算法) | 极低,业务规则锁定 |
-| `app/core/status.py` | 集中定义服务、平台健康、平台结果、任务状态及平台健康转移事件 | 低 |
+| `app/rpa/core/algorithm.py` | 最终取值决策(纯函数，加权落点中位数算法) | 极低,业务规则锁定 |
+| `app/rpa/core/status.py` | 集中定义服务、平台健康、平台结果、任务状态及平台健康转移事件 | 低 |
 | `docs/系统架构与运行时状态.md` | 系统分层、状态模型、并发协调、风控边界和排错入口 | 低 |
-| `app/service.py` | 平台调度+汇总 | 低 |
-| `app/runtime.py` | 浏览器/队列/保活/状态机 | 低 |
-| `app/api.py` | FastAPI 接口 | 低 |
-| `app/core/models.py` | 数据模型(平台无关) | 低 |
-| `app/parsers/<code>.py` | 各平台 HTML 解析(纯函数,独立单测) | 跟随各平台页面变化 |
-| `app/platforms/base.py` | 平台适配器基类+通用函数(风控/点击/面积筛选/小区过滤/城市检查/城市导航/空页检测) | 低,通用能力沉淀 |
-| `app/platforms/city_map.py` | 跨平台城市映射表(5平台×广东21城URL前缀) | 新城市/新平台接入时 |
-| `app/platforms/adapters/ke.py` | 贝壳采集 | 跟随贝壳页面变化 |
-| `app/platforms/adapters/ajk.py` | 安居客采集 | 跟随安居客页面变化 |
-| `app/platforms/adapters/lj.py` | 链家采集 | 跟随链家页面变化 |
-| `app/platforms/adapters/fang.py` | 房天下采集 | 跟随房天下页面变化 |
-| `app/platforms/adapters/lyj.py` | 乐有家采集 | 跟随乐有家页面变化 |
-| `app/platforms/<code>.py` | 平台薄壳适配器 | 新平台接入时 |
-| `app/platforms/<code>_constants.py` | 平台固有常量 | 新平台接入时 |
-| `app/scripts/<code>_mvp_test.py` | MVP 验证脚本 | 对接期间,验证完保留 |
+| `app/rpa/service.py` | 平台调度+汇总 | 低 |
+| `app/rpa/runtime.py` | 浏览器/队列/保活/状态机 | 低 |
+| `app/rpa/api.py` | FastAPI 接口 | 低 |
+| `app/rpa/core/models.py` | 数据模型(平台无关) | 低 |
+| `app/rpa/parsers/<code>.py` | 各平台 HTML 解析(纯函数,独立单测) | 跟随各平台页面变化 |
+| `app/rpa/platforms/base.py` | 平台适配器基类+通用函数(风控/点击/面积筛选/小区过滤/城市检查/城市导航/空页检测) | 低,通用能力沉淀 |
+| `app/rpa/platforms/city_map.py` | 跨平台城市映射表(5平台×广东21城URL前缀) | 新城市/新平台接入时 |
+| `app/rpa/platforms/adapters/ke.py` | 贝壳采集 | 跟随贝壳页面变化 |
+| `app/rpa/platforms/adapters/ajk.py` | 安居客采集 | 跟随安居客页面变化 |
+| `app/rpa/platforms/adapters/lj.py` | 链家采集 | 跟随链家页面变化 |
+| `app/rpa/platforms/adapters/fang.py` | 房天下采集 | 跟随房天下页面变化 |
+| `app/rpa/platforms/adapters/lyj.py` | 乐有家采集 | 跟随乐有家页面变化 |
+| `app/rpa/platforms/<code>.py` | 平台薄壳适配器 | 新平台接入时 |
+| `app/rpa/platforms/<code>_constants.py` | 平台固有常量 | 新平台接入时 |
+| `scripts/rpa/<code>_mvp_test.py` | MVP 验证脚本 | 对接期间,验证完保留 |
 | `docs/平台扩展对接文档.md` | 对接指南 | 新平台流程有变时 |

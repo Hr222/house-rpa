@@ -6,7 +6,7 @@ DOM 样例取自 parsers/fang.py 的函数 docstring。
 
 from datetime import datetime, timedelta
 
-from app.parsers.fang import (
+from app.rpa.parsers.fang import (
     filter_deal_records,
     parse_current_page,
     parse_deal_records,

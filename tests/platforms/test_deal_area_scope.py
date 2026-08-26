@@ -3,8 +3,8 @@
 
 from datetime import datetime, timedelta
 
-from app.platforms.adapters.fang import _filter_deals_for_request_area as filter_fang
-from app.platforms.adapters.lj import _filter_deals_for_request_area as filter_lj
+from app.rpa.platforms.adapters.fang import _filter_deals_for_request_area as filter_fang
+from app.rpa.platforms.adapters.lj import _filter_deals_for_request_area as filter_lj
 
 
 def test_fang_and_lj_deals_use_request_area_plus_minus_five():

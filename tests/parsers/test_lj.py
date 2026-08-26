@@ -6,7 +6,7 @@ DOM 样例取自 parsers/lj.py 的函数 docstring。
 
 from datetime import datetime, timedelta
 
-from app.parsers.lj import (
+from app.rpa.parsers.lj import (
     filter_deal_records,
     parse_deal_records,
     parse_deal_total_pages,

@@ -5,7 +5,7 @@ import asyncio
 import threading
 import time
 
-from app.platforms.base import (
+from app.rpa.platforms.base import (
     detect_block_with_common,
     detect_common_block,
     is_manual_verify_reason,
@@ -162,7 +162,7 @@ def test_wait_and_reload_continues_only_after_risk_page_recovers(monkeypatch):
 
     tab = FakeTab()
     monkeypatch.setattr("builtins.input", lambda prompt: None)
-    monkeypatch.setattr("app.platforms.base.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("app.rpa.platforms.base.asyncio.sleep", no_sleep)
 
     def detect_block(url, html):
         if "captcha" in url or "请完成验证" in html:

@@ -2,7 +2,7 @@
 
 from fastapi.testclient import TestClient
 
-from app.api import create_app
+from app.rpa.api import create_app
 
 
 class FakeRuntime:

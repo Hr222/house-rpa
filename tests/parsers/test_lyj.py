@@ -4,7 +4,7 @@
 DOM 样例取自 parsers/lyj.py 的函数 docstring。
 """
 
-from app.parsers.lyj import (
+from app.rpa.parsers.lyj import (
     parse_community_avg_price,
     parse_current_page,
     parse_listing_snapshots,

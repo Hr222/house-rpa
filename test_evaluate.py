@@ -3,7 +3,7 @@
 
 用法：
   1. 先启动 RPA 服务并确认所有平台就绪：
-     python -m app.scripts.api_server --debug --manual-login
+     python -m scripts.rpa.api_server --debug --manual-login
   2. 再跑本脚本：
      python test_evaluate.py
 
@@ -21,7 +21,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # ─── 配置 ──────────────────────────────────────────────
 BASE_URL = "http://127.0.0.1:8000"
-INPUT_FILE = Path(__file__).parent / "test_data/房产评估汇总表_第三批.xlsx"
+INPUT_FILE = Path(__file__).parent / "test_data/房产评估汇总表_仅广州.xlsx"
 OUTPUT_DIR = Path(__file__).parent / "results"
 POLL_INTERVAL = 6       # 轮询间隔秒数（>5 避免连续 429）
 MAX_WAIT = 600          # 单任务软等待阈值；超过后只报警，不判失败，继续阻塞等待

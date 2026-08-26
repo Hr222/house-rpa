@@ -2,9 +2,9 @@
 
 import asyncio
 
-import app.service as service_module
-from app.core.models import InquiryRequest, ListingSnapshot, PlatformResult
-from app.service import RPAInquiryService, build_inquiry_result
+import app.rpa.service as service_module
+from app.rpa.core.models import InquiryRequest, ListingSnapshot, PlatformResult
+from app.rpa.service import RPAInquiryService, build_inquiry_result
 
 
 def test_build_inquiry_result_averages_listing_and_deal_results():

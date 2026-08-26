@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from unittest import mock
 
-from app.runtime import RPARuntime, PlatformRuntimeState
+from app.rpa.runtime import RPARuntime, PlatformRuntimeState
 
 
 def _make_runtime_no_browsers():
@@ -68,8 +68,8 @@ def test_restore_runs_once_when_all_ready(tmp_path):
     _write_task_file(persist, "crash-001", administrative_district="南山区")
     _write_task_file(persist, "crash-002")
 
-    with mock.patch("app.utils.task_store.config.PERSIST_DIR", persist), \
-         mock.patch("app.runtime.config.PERSIST_DIR", persist):
+    with mock.patch("app.rpa.utils.task_store.config.PERSIST_DIR", persist), \
+         mock.patch("app.rpa.runtime.config.PERSIST_DIR", persist):
         rt = _make_runtime_no_browsers()
         assert rt._restored is False
 
@@ -99,8 +99,8 @@ def test_restore_runs_only_once(tmp_path):
     persist.mkdir()
     _write_task_file(persist, "crash-001")
 
-    with mock.patch("app.utils.task_store.config.PERSIST_DIR", persist), \
-         mock.patch("app.runtime.config.PERSIST_DIR", persist):
+    with mock.patch("app.rpa.utils.task_store.config.PERSIST_DIR", persist), \
+         mock.patch("app.rpa.runtime.config.PERSIST_DIR", persist):
         rt = _make_runtime_no_browsers()
         for s in rt.platform_states.values():
             s.status = "READY"
@@ -123,8 +123,8 @@ def test_no_restore_until_all_ready(tmp_path):
     persist.mkdir()
     _write_task_file(persist, "crash-001")
 
-    with mock.patch("app.utils.task_store.config.PERSIST_DIR", persist), \
-         mock.patch("app.runtime.config.PERSIST_DIR", persist):
+    with mock.patch("app.rpa.utils.task_store.config.PERSIST_DIR", persist), \
+         mock.patch("app.rpa.runtime.config.PERSIST_DIR", persist):
         rt = _make_runtime_no_browsers()
         # 只让 ke 就绪，ajk 仍 WAIT_LOGIN
         rt.platform_states["ke"].status = "READY"

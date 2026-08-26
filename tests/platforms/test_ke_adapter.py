@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """贝壳 adapter 的成交面积回归测试。"""
 
-from app.core.models import DealRecord
-from app.platforms.adapters.ke import _filter_deal_prices_for_request_area
+from app.rpa.core.models import DealRecord
+from app.rpa.platforms.adapters.ke import _filter_deal_prices_for_request_area
 
 
 def test_deal_prices_use_request_area_not_listing_segment():

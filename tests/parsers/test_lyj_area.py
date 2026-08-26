@@ -5,7 +5,7 @@
 乐有家用"㎡"单位，档位文本在 <span class="name"> 里。
 """
 
-from app.parsers.lyj import parse_area_segments
+from app.rpa.parsers.lyj import parse_area_segments
 
 
 # 深圳真实 HTML 片段（8 档）

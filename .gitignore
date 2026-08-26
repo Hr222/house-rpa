@@ -13,6 +13,7 @@ __pycache__/
 *.egg-info/
 .venv/
 .tmp/
+.tmp*
 venv/
 env/
 .pytest_cache/

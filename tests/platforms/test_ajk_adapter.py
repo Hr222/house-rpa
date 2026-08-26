@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """安居客 adapter 回归测试。"""
 
-from app.core.models import ListingSnapshot
-from app.platforms.base import filter_snapshots_by_community
+from app.rpa.core.models import ListingSnapshot
+from app.rpa.platforms.base import filter_snapshots_by_community
 
 
 def test_filter_listing_snapshots_keeps_prefix_match_and_drops_unrelated():

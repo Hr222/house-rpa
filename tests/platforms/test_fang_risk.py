@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """房天下风控规则回归测试。"""
 
-from app.platforms.adapters.fang import detect_block
+from app.rpa.platforms.adapters.fang import detect_block
 
 
 def test_normal_detail_sms_code_form_is_not_captcha():

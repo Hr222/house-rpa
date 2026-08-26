@@ -21,10 +21,10 @@ import openpyxl
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from app.core.algorithm import AlgorithmInput, evaluate_algorithm
-from app.core.models import PlatformResult
-from app.core.price_utils import round_price
-from app.scripts import xzsfbj_mvp_test as xzsfbj_mvp
+from app.rpa.core.algorithm import AlgorithmInput, evaluate_algorithm
+from app.rpa.core.models import PlatformResult
+from app.rpa.core.price_utils import round_price
+from scripts.rpa import xzsfbj_mvp_test as xzsfbj_mvp
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -202,7 +202,7 @@ def _format_optional(value: float | None) -> str:
 
 def _create_analysis_logger(path: Path) -> tuple[logging.Logger, logging.Handler]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("app.service")
+    logger = logging.getLogger("app.rpa.service")
     handler = logging.FileHandler(path, encoding="utf-8")
     handler.setFormatter(
         logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s")

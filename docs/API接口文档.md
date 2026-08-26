@@ -5,6 +5,7 @@
 ## 目录
 
 - [接口总览](#接口总览)
+- [小区基础数据模块（Python）](#小区基础数据模块python)
 - [健康检查](#健康检查)
   - [`GET /health/live`](#get-healthlive)
   - [`GET /health/ready`](#get-healthready)
@@ -35,6 +36,31 @@
 | GET | `/inquiries/{taskId}` | 查询任务结果（兜底，受限流） |
 | GET | `/admin/algorithm/weighted-median-discount` | 查询加权落点中位数折扣 |
 | PUT | `/admin/algorithm/weighted-median-discount` | 更新加权落点中位数折扣 |
+
+> `app/community_data` 的两个小区查询接口是 Python 接口，不是 HTTP 路由，因此不列入上面的 HTTP 接口总览。详见[小区基础数据模块](小区基础数据模块.md)。
+
+## 小区基础数据模块（Python）
+
+模块入口：
+
+```python
+from app.community_data import find_nearby_communities, resolve_communities
+```
+
+公开接口只有：
+
+```python
+resolve_communities(city, administrative_district, community_name)
+find_nearby_communities(
+    city,
+    administrative_district,
+    community_name,
+    limit=3,
+    filter_by_build_year=True,
+)
+```
+
+两个接口都支持 Excel `rename` 别名和小区分期。附近接口默认限制在 `COMMUNITY_NEARBY_RADIUS_METERS` 配置的 10km 半径内，并按中心小区建成年份前后 5 年筛选；距离优先，年份差只作为同距离时的参考。它们不依赖浏览器，也不改变 RPA 任务状态。
 
 ---
 

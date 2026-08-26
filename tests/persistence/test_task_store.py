@@ -8,13 +8,13 @@ from unittest import mock
 
 import pytest
 
-from app.utils.task_store import save_task, delete_task, load_pending_tasks
+from app.rpa.utils.task_store import save_task, delete_task, load_pending_tasks
 
 
 @pytest.fixture
 def persist_dir():
     with tempfile.TemporaryDirectory() as tmp:
-        with mock.patch("app.utils.task_store.config.PERSIST_DIR", Path(tmp)):
+        with mock.patch("app.rpa.utils.task_store.config.PERSIST_DIR", Path(tmp)):
             yield Path(tmp)
 
 

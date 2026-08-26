@@ -4,7 +4,7 @@
 DOM 样例取自 parsers/ajk.py 的函数 docstring，验证解析逻辑正确性。
 """
 
-from app.parsers.ajk import parse_community_avg_price, parse_listing_snapshots
+from app.rpa.parsers.ajk import parse_community_avg_price, parse_listing_snapshots
 
 
 def test_parse_listing_snapshots_extracts_basic_fields():

@@ -4,7 +4,7 @@
 链家 DOM 与贝壳一致（同代码库），唯一差异：标题是"面积"（贝壳是"建筑面积"）。
 """
 
-from app.parsers.lj import parse_area_segments
+from app.rpa.parsers.lj import parse_area_segments
 
 
 # 深圳真实 HTML 片段（8 档）

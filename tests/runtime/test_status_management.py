@@ -5,15 +5,15 @@ import asyncio
 
 import pytest
 
-from app.core.models import InquiryResult, PlatformResult
-from app.core.status import (
+from app.rpa.core.models import InquiryResult, PlatformResult
+from app.rpa.core.status import (
     PlatformHealthEvent,
     PlatformHealthStatus,
     PlatformResultStatus,
     ServiceStatus,
     transition_platform_health,
 )
-from app.runtime import PlatformRuntimeState, RPARuntime
+from app.rpa.runtime import PlatformRuntimeState, RPARuntime
 
 
 def _runtime_with_ke_ready() -> RPARuntime:
@@ -184,7 +184,7 @@ def test_console_confirmation_skips_manual_verify_during_active_task(monkeypatch
         raise StopConsoleLoop
 
     monkeypatch.setattr("builtins.input", unexpected_input)
-    monkeypatch.setattr("app.runtime.asyncio.sleep", stop_after_task_skip)
+    monkeypatch.setattr("app.rpa.runtime.asyncio.sleep", stop_after_task_skip)
 
     with pytest.raises(StopConsoleLoop):
         asyncio.run(runtime._console_confirmation_loop())
@@ -238,7 +238,7 @@ def test_aggregation_risk_probe_waits_for_main_page_recovery(monkeypatch):
     async def no_sleep(_seconds):
         return None
 
-    monkeypatch.setattr("app.platforms.base.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("app.rpa.platforms.base.asyncio.sleep", no_sleep)
     asyncio.run(runtime._check_platform_risk_before_aggregation())
 
     assert runtime.platform_states["ke"].status == PlatformHealthStatus.READY
@@ -247,7 +247,7 @@ def test_aggregation_risk_probe_waits_for_main_page_recovery(monkeypatch):
 
 def test_browser_windows_tile_only_once_after_initial_login(monkeypatch):
     calls = []
-    monkeypatch.setattr("app.runtime.tile_browser_windows", lambda pids: calls.append(pids))
+    monkeypatch.setattr("app.rpa.runtime.tile_browser_windows", lambda pids: calls.append(pids))
 
     runtime = RPARuntime()
     runtime.browsers = {

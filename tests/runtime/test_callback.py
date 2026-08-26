@@ -10,7 +10,7 @@ import asyncio
 
 import httpx
 
-from app.utils.callback import notify_result
+from app.rpa.utils.callback import notify_result
 
 
 def _make_handler_and_calls(status_sequence):
@@ -40,7 +40,7 @@ async def _noop_sleep(*_a, **_k):
 def test_notify_success_on_first_try(monkeypatch):
     """服务端 200 → 首次即成功。"""
     handler, calls = _make_handler_and_calls([200])
-    monkeypatch.setattr("app.utils.callback.asyncio.sleep", _noop_sleep)
+    monkeypatch.setattr("app.rpa.utils.callback.asyncio.sleep", _noop_sleep)
 
     ok = asyncio.run(notify_result(
         "http://cb.test/callback", "t1", {"x": 1},
@@ -53,7 +53,7 @@ def test_notify_success_on_first_try(monkeypatch):
 def test_notify_retries_then_succeeds(monkeypatch):
     """前两次 500、第三次 200 → 重试后成功。"""
     handler, calls = _make_handler_and_calls([500, 500, 200])
-    monkeypatch.setattr("app.utils.callback.asyncio.sleep", _noop_sleep)
+    monkeypatch.setattr("app.rpa.utils.callback.asyncio.sleep", _noop_sleep)
 
     ok = asyncio.run(notify_result(
         "http://cb.test/callback", "t2", {"x": 1},
@@ -66,7 +66,7 @@ def test_notify_retries_then_succeeds(monkeypatch):
 def test_notify_all_fail_returns_false(monkeypatch):
     """全部失败 → 返回 False 且不抛异常。"""
     handler, calls = _make_handler_and_calls([500, 500, 500])
-    monkeypatch.setattr("app.utils.callback.asyncio.sleep", _noop_sleep)
+    monkeypatch.setattr("app.rpa.utils.callback.asyncio.sleep", _noop_sleep)
 
     ok = asyncio.run(notify_result(
         "http://cb.test/callback", "t3", {"x": 1},

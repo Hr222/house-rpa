@@ -6,8 +6,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from app.core import config
-from app.utils.logging_utils import DailyFileHandler, setup_logging
+from app.rpa.core import config
+from app.rpa.utils.logging_utils import DailyFileHandler, setup_logging
 
 
 def test_daily_file_handler_writes_only_configured_level(tmp_path):

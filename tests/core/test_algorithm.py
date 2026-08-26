@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """加权落点中位数算法测试。"""
 
-from app.core.algorithm import (
+from app.rpa.core.algorithm import (
     ALGORITHM_REGISTRY,
     AlgorithmInput,
     aggregate_weighted_median_quote,
@@ -243,6 +243,66 @@ def test_weighted_median_uses_deal_price_mode_without_listing_discount():
 
     assert result.deal_avg == 40500.0
     assert result.decision.final_price == 45250.0
+
+
+def test_non_luxury_deal_combination_keeps_equal_average():
+    result = evaluate_algorithm(
+        AlgorithmInput(
+            quote_price_lists=[[100000.0]],
+            deal_price_lists=[[85000.0] * 3],
+            area=119.9,
+        )
+    )
+
+    assert result.decision.final_price == 92500.0
+
+
+def test_luxury_deal_with_insufficient_support_keeps_equal_average():
+    result = evaluate_algorithm(
+        AlgorithmInput(
+            quote_price_lists=[[100000.0]],
+            deal_price_lists=[[85000.0] * 2],
+            area=225.0,
+        )
+    )
+
+    assert result.decision.final_price == 92500.0
+
+
+def test_luxury_deal_with_ten_to_twenty_percent_gap_uses_deal_peak():
+    result = evaluate_algorithm(
+        AlgorithmInput(
+            quote_price_lists=[[100000.0]],
+            deal_price_lists=[[85000.0] * 3],
+            area=225.0,
+        )
+    )
+
+    assert result.decision.final_price == 85000.0
+
+
+def test_luxury_deal_with_twenty_to_thirty_percent_gap_uses_weighted_mix():
+    result = evaluate_algorithm(
+        AlgorithmInput(
+            quote_price_lists=[[100000.0]],
+            deal_price_lists=[[80000.0] * 3],
+            area=225.0,
+        )
+    )
+
+    assert result.decision.final_price == 86000.0
+
+
+def test_luxury_deal_with_gap_above_thirty_percent_keeps_equal_average():
+    result = evaluate_algorithm(
+        AlgorithmInput(
+            quote_price_lists=[[100000.0]],
+            deal_price_lists=[[70000.0] * 3],
+            area=225.0,
+        )
+    )
+
+    assert result.decision.final_price == 85000.0
 
 
 def test_weighted_median_multi_peak_returns_lowest_peak_without_discount():

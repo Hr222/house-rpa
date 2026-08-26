@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """平台基类小区匹配辅助函数测试。"""
 
-from app.core.models import ListingSnapshot
-from app.platforms.base import (
+from app.rpa.core.models import ListingSnapshot
+from app.rpa.platforms.base import (
     community_name_match,
     deal_area_bounds,
     filter_snapshots_by_area,
