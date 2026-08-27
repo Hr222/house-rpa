@@ -82,7 +82,7 @@ find_nearby_communities(
 
 ### `GET /health/ready`
 
-服务就绪检查。全部平台确认就绪后返回 200，否则 503。
+服务就绪检查。全部平台确认就绪且编排层已完成残留任务恢复入队后返回 200，否则 503。
 
 **响应 200（已就绪）：**
 
@@ -96,6 +96,7 @@ find_nearby_communities(
     "message": "ready",
     "currentTaskId": null,
     "queueSize": 0,
+    "inquiryRecoveryComplete": true,
     "platforms": [
       {
         "code": "ke",
@@ -117,10 +118,11 @@ find_nearby_communities(
 ```json
 {
   "code": "SERVICE_NOT_READY",
-  "message": "RPA 服务尚未就绪",
+  "message": "询价服务尚未就绪",
   "data": {
     "serviceStatusCode": "WAIT_LOGIN",
     "serviceStatus": "等待登录",
+    "inquiryRecoveryComplete": false,
     "message": "等待各平台人工完成登录…",
     "platforms": [...]
   }
@@ -166,7 +168,9 @@ find_nearby_communities(
 
 ### `POST /inquiries` — 创建询价任务
 
-发起一次房产询价。服务将自动在 5 个平台上采集数据，取最终报价。
+发起一次房产询价。服务先查询人工维护的小区主数据：只有唯一小区才会创建
+完整询价快照并创建 RPA 采集任务；调用方不提交 `communityId`。快照由编排层持有
+`community_id`，RPA 不接收该字段。
 
 **请求体：**
 
@@ -200,6 +204,42 @@ find_nearby_communities(
     "taskId": "order-001",
     "status": "排队中",
     "statusCode": "QUEUED"
+  }
+}
+```
+
+**响应 200（未找到小区）：**
+
+不会创建任务，不进入 RPA。
+
+```json
+{
+  "code": "COMMUNITY_NOT_FOUND",
+  "message": "未找到小区",
+  "data": {}
+}
+```
+
+**响应 200（小区期数未明确）：**
+
+不会创建任务。调用方应以候选中的具体正式名称（例如“示例花园一期”）重新提交。
+
+```json
+{
+  "code": "COMMUNITY_PHASE_REQUIRED",
+  "message": "小区期数未明确",
+  "data": {
+    "candidates": [
+      {
+        "communityGroupId": 1,
+        "communityId": 2,
+        "canonicalName": "示例花园一期",
+        "phase": "一期",
+        "aliases": ["示例花园1期"],
+        "city": "深圳",
+        "administrativeDistrict": "南山区"
+      }
+    ]
   }
 }
 ```
@@ -259,7 +299,7 @@ find_nearby_communities(
 | `referenceAreaMin` / `referenceAreaMax` | 可选；弱参考实际使用的面积范围，单位㎡ |
 | `referenceListingCount` | 可选；进入弱参考的房源数量，单条严格命中时也会计为 1 |
 
-弱参考不是新的状态码或决策分支。公开询价响应不会返回 `platformResults`；平台级弱参考字段仅保留在运行时内部结果、操作日志和 Excel 分析数据中。最终公开结果只有在选中的价格峰确实包含该平台补充数据时才输出顶层弱参考字段。最大面积容差默认 `20㎡`，可通过环境配置 `RPA_WEAK_AREA_MAX_TOLERANCE` 调整，当前暂不提供 API 修改入口。
+弱参考不是新的状态码或决策分支。公开询价响应不会返回 `platformResults`；平台原始结果不携带弱参考字段，弱参考只存在于编排层算法结果、操作日志和 Excel 分析数据中。最终公开结果只有在选中的价格峰确实包含补充数据时才输出顶层弱参考字段。最大面积容差默认 `20㎡`，可通过环境配置 `RPA_WEAK_AREA_MAX_TOLERANCE` 调整，当前暂不提供 API 修改入口。
 
 **响应 200（已完成但无数据）：**
 

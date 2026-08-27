@@ -7,7 +7,7 @@
 
 jeethink-rpa 是房产实时询价工程。它使用 FastAPI 和 nodriver，面向多平台采集房产数据，并与小区主数据、房源记录模块协作完成询价和数据沉淀。
 
-当前接入贝壳、安居客、链家、房天下、乐有家。入口服务是 `scripts/rpa/api_server.py`。
+当前接入贝壳、安居客、链家、房天下、乐有家。入口服务是 `scripts/api_server.py`。
 
 ## 2. 开始工作前
 

@@ -29,7 +29,7 @@
 - 平台被风控或登录失效时，服务状态可明确降级。
 - 调试模式下可导出关键 HTML，方便定位页面结构变化。
 - 日志按自然日切分，适合 7x24 值守机运行。
-- 任务入队时持久化，进程崩溃后重启自动恢复未完成任务。
+- 编排层在确认 `community_id` 后弱持久化完整询价任务，进程崩溃后重启自动恢复未完成任务。
 - 算法参数（无成交折扣）支持运行时动态更新，弱持久化重启不丢失。
 
 ## 2. 已接入平台及差异
@@ -64,19 +64,20 @@
 2. 人工在前台完成各平台登录。
 3. 通过 API `POST /admin/platforms/{code}/confirm-ready` 或终端回车确认就绪。
 4. 接收询价请求：`city`（城市名）、`administrativeDistrict`（行政区）、`communityName`（小区名）、`area`（精确面积）。
-5. 检查各平台是否支持该城市：不支持的平台跳过询价只做保活刷新；支持的继续。
-6. 城市导航：如果当前浏览器不在目标城市域名下，先导航到目标城市首页。
-7. 刷新常驻页面，执行轻量保活。
-8. 搜索目标小区，并校验搜索结果里至少存在一条目标小区快照。
-9. 结果页按面积筛选。
-10. 抓取主结果区，过滤推荐/广告区块，并立即按目标小区过滤房源快照。
-11. 如有分页，按真实点击页码采集：第 1 页非空但全部无关时返回 `NO_DATA`；第 2 页起非空但全部无关时立即停止，混合页只保留匹配房源并继续；空页走独立空页检测。
-12. 返回平台结果前再次过滤，并从同一批快照生成 `listing_snapshots` 与 `quote_prices`。
-13. 如需详情页，打开小区详情。
-14. 抓取小区均价和成交案例（平台有则采，无则跳过或顶替）。
-15. 对成交案例按面积筛选后计算成交均价。
-16. 按业务规则计算最终单价。
-17. 返回结果，页面回到待命状态。
+5. 由独立询价编排层查询人工维护的小区主数据：未找到或有多个期数时直接返回；只有唯一小区才创建 RPA 任务，并以小区正式名继续采集。
+6. 检查各平台是否支持该城市：不支持的平台跳过询价只做保活刷新；支持的继续。
+7. 城市导航：如果当前浏览器不在目标城市域名下，先导航到目标城市首页。
+8. 刷新常驻页面，执行轻量保活。
+9. 搜索目标小区，并校验搜索结果里至少存在一条目标小区快照。
+10. 结果页按面积筛选。
+11. 抓取主结果区，过滤推荐/广告区块，并立即按目标小区过滤房源快照。
+12. 如有分页，按真实点击页码采集：第 1 页非空但全部无关时返回 `NO_DATA`；第 2 页起非空但全部无关时立即停止，混合页只保留匹配房源并继续；空页走独立空页检测。
+13. 返回平台结果前再次过滤，并从同一批快照生成 `listing_snapshots` 与 `quote_prices`。
+14. 如需详情页，打开小区详情。
+15. 抓取小区均价和成交案例（平台有则采，无则跳过或顶替）。
+16. 对成交案例按面积筛选后计算成交均价。
+17. 按业务规则计算最终单价。
+18. 返回结果，页面回到待命状态。
 
 > 如果所有平台都不支持该城市，直接返回 `NO_DATA`，note 为"不支持该城市"。
 
@@ -107,9 +108,7 @@
 
 ### 最终取值：挂牌价与成交价汇总
 
-代码位置：`app/rpa/core/algorithm.py:WeightedMedianAlgorithm`。系统固定使用这一套算法，不再通过请求参数切换算法。
-
-代码位置：`app/rpa/core/algorithm.py:WeightedMedianAlgorithm`
+代码位置：`app/algorithm/weighted_median.py:WeightedMedianAlgorithm`。系统固定使用这一套算法，不再通过请求参数切换算法。
 
 - 每个平台总权重相等，平台内每条有效在售价格按数量分配权重。
 - 以相对中位数 ±10% 识别各自密集的价格峰；只有无法与其他报价组成价格簇的单点才作为孤立噪声排除。
@@ -124,30 +123,44 @@
 
 ## 5. 架构分层
 
-整体分为 5 层：
+整体分为 8 层：
 
-1. **API 层** — `app/rpa/api.py`
+1. **API 层** — `app/api.py`
    FastAPI 入口，接收 HTTP 请求，对外暴露健康检查、状态查询、询价接口、参数管理。
 
-2. **Runtime 层** — `app/rpa/runtime.py`
-   管理浏览器实例、平台会话、任务队列、服务状态、保活流程、崩溃恢复。
+2. **询价编排层** — `app/inquiry/`
+   查询人工维护的小区主数据，处理未找到与多期结果；唯一小区才创建并弱持久化完整询价任务，并在收到原始结果后组织最终询价结果。
 
-3. **Service 层** — `app/rpa/service.py`
-   调度多个平台适配器，汇总平台结果并计算最终报价。
+3. **Runtime 层** — `app/rpa/runtime.py`
+   管理浏览器实例、平台会话、进程内任务队列、服务状态和保活流程；不持有任务弱持久化或崩溃恢复。
 
-4. **Platform Adapter 层** — `app/rpa/platforms/`
+4. **RPA Service 层** — `app/rpa/service.py`
+   调度多个平台适配器，返回原始 `RPACollectionResult`，不计算最终报价。
+
+5. **Platform Adapter 层** — `app/rpa/platforms/`
    每个平台两件套：薄壳适配器（`platforms/<code>.py`）+ 采集逻辑（`platforms/adapters/<code>.py`）。
 
-5. **Parser / Algorithm 层** — `app/rpa/parsers/` + `app/rpa/core/algorithm.py`
-   页面解析和纯算法决策，不承担浏览器控制。
+6. **Parser 层** — `app/rpa/parsers/`
+   从 HTML 或平台接口响应中提取结构化数据，不承担浏览器控制。
+
+7. **Algorithm 层** — `app/algorithm/`
+   负责同/跨平台去重、面积弱参考、价格峰和最终取值决策。
+
+8. **询价分析层** — `app/inquiry_analysis/`
+   离线读取历史询价日志和评估工作簿，按当前算法重建结果并导出分析 Excel；不参与浏览器运行时或平台采集。
 
 ```
 外部请求方 → FastAPI (api.py)
-  → RPARuntime (runtime.py)
+  → InquiryOrchestrator (app/inquiry/orchestrator.py)
+    → community_data 查询
+    → InquiryTaskManager (完整上下文快照 / 崩溃恢复)
+    → RPARuntime (runtime.py)
     → RPAInquiryService (service.py)
       → PlatformAdapter (platforms/ke.py 等)
         → Adapter (platforms/adapters/ke.py 等)
-          → Parser (parsers/ke.py) + Algorithm (core/algorithm.py)
+          → Parser (parsers/ke.py)
+    ← RPACollectionResult
+    → Algorithm (app/algorithm/)
 ```
 
 ## 6. 目录说明
@@ -167,6 +180,14 @@ jeethink-rpa/
 │  │  ├─ geocoder.py        # 腾讯地图地理编码
 │  │  ├─ config.py          # 附近半径等环境配置
 │  │  └─ service.py         # 两个公开查询接口的业务编排
+│  ├─ inquiry/              # 询价应用编排层和已确认小区上下文
+│  │  ├─ models.py
+│  │  └─ orchestrator.py
+│  │  ├─ task_manager.py    # 任务弱持久化、恢复与终态清理
+│  │  └─ task_store.py      # 完整询价快照 JSON
+│  ├─ inquiry_analysis/     # 历史询价日志与评估工作簿的离线分析
+│  │  ├─ export_operation_log_excel.py
+│  │  └─ presentation.py    # 分析工作簿状态展示文案
 │  ├─ platforms/
 │  │  ├─ base.py            # 平台适配器抽象基类
 │  │  ├─ city_map.py        # 跨平台城市映射表（网页平台 + 行舟深房深圳支持）
@@ -194,7 +215,6 @@ jeethink-rpa/
 │  ├─ utils/
 │  │  ├─ logging_utils.py   # 日志配置（按日切分）
 │  │  ├─ debug_utils.py     # 调试 HTML 导出
-│  │  ├─ task_store.py      # 任务持久化（崩溃恢复兜底）
 │  │  ├─ callback.py        # 结果回调推送（主动通知客户端）
 │  │  └─ window_control.py  # Windows 浏览器置前控制
 │  ├─ scripts/
@@ -232,24 +252,29 @@ Frida 配置、`package.json`、`package-lock.json`、上游许可证和来源�
 - 调试开关（`DEBUG_MODE`）
 - 浏览器路径、API 监听地址
 - 风控参数（保活间隔、详情页停留时间等）
-- 算法参数：`get_weighted_median_discount()` / `set_weighted_median_discount()` — 加权落点中位数折扣，支持弱持久化
 
 ### `app/rpa/core/models.py`
 
 平台无关的数据模型：
 
 - `InquiryRequest` — 询价请求
-- `PlatformResult` — 单平台采集结果（含在售列表、成交列表、房源快照）
-- `InquiryResult` — 最终询价结果（含决策分支、最终价格）
+- `PlatformResult` — 单平台原始结构化采集结果（含在售列表、成交列表、房源快照）
+- `RPACollectionResult` — 一次采集完成后交给编排层的原始平台结果
 - `ListingSnapshot` / `DealRecord` — 房源摘要 / 成交记录
 
-### `app/rpa/core/algorithm.py`
+### `app/algorithm/`
 
-纯函数，无 IO，所有平台共用。算法策略接口和注册表继续保留，当前只注册加权落点中位数算法：
+纯函数，无网络 IO，所有平台共用。算法策略接口和注册表继续保留，当前只注册加权落点中位数算法：
 - `aggregate_weighted_median_quote(...)` — 按平台等权寻找主要在售价格落点并计算加权中位数
 - `evaluate_algorithm(AlgorithmInput(...))` — 固定使用加权落点中位数并返回最终价格和结果分支
+- `selection.py` — 严格面积选择、弱参考和同平台去重
+- `listing_dedup.py` — 跨平台保守去重
 
-### `app/rpa/api.py`
+### `app/inquiry_analysis/`
+
+离线分析模块，不依赖浏览器、平台 adapter 或 Runtime。`export_operation_log_excel.py` 读取历史询价日志和可选评估工作簿，复用 `app/algorithm/` 重建候选峰和最终值，再输出分析 Excel。分析 skill 只调用该模块的唯一实现。
+
+### `app/api.py`
 
 FastAPI 入口。接口清单：
 
@@ -276,15 +301,22 @@ FastAPI 入口。接口清单：
 - 人工回车确认批次与平台保活互斥，避免保活在批量确认过程中抢先改写状态，导致部分平台被跳过。
 - 管理任务队列（`asyncio.Queue`，串行消费）。
 - 定时保活循环（默认 120s）。
-- 崩溃恢复：全部平台首次就绪后，从 `persist/` 恢复未完成任务（只一次）。
+- 在任务到达终态时通知编排层；不读取、写入或删除询价任务快照。
 - 需要人工处理时尝试将浏览器置前。
+
+### `app/inquiry/task_manager.py`
+
+- 确认唯一小区后创建 `InquiryTaskSnapshot`，快照顶层与完整 `ConfirmedCommunityContext` 中均保存一致的 `community_id`。
+- 快照写入成功后才向 RPA Runtime 入队；入队失败时删除刚写入的快照。
+- 服务重启后等待 RPA 就绪，按快照创建时间恢复残留任务；恢复完成前拒绝新的询价请求。
+- RPA 正常完成或失败时删除快照；服务停止取消中的任务保留快照供下次恢复。
 
 ### `app/rpa/service.py`
 
-平台调度与结果汇总层。
+平台采集调度层。
 
-- `build_inquiry_result()` — 汇总所有 `SUCCESS` 平台的在售数据，固定调用加权落点中位数算法计算最终价。
-- `RPAInquiryService` — 管理各平台 session，执行 `run_inquiry()`。
+- `RPAInquiryService` — 管理各平台 session，执行 `run_inquiry()` 并返回 `RPACollectionResult`。
+- `app/inquiry/aggregation.py:build_inquiry_result()` — 在编排层汇总 `SUCCESS` 平台的原始数据，调用加权落点中位数算法计算最终价。
 
 ### `app/rpa/platforms/base.py`
 
@@ -356,7 +388,6 @@ FastAPI 入口。接口清单：
 |------|------|
 | `logging_utils.py` | 日志：控制台 + 文件，按自然日切换 |
 | `debug_utils.py` | 调试 HTML 导出，`--debug` 或 `RPA_DEBUG=1` 开启 |
-| `task_store.py` | 任务持久化：入队写 JSON，完成删，崩溃恢复 |
 | `callback.py` | 结果回调推送：任务结束主动 POST 给客户端（带重试） |
 | `window_control.py` | Windows 浏览器置前（Win32 API） |
 
@@ -392,8 +423,8 @@ FastAPI 入口。接口清单：
 3. 浏览器置前，等待人工登录。
 4. 人工完成登录后，通过 API 或终端回车确认平台就绪。
 5. 全部平台就绪后，服务状态切换为 `READY`。
-6. 恢复崩溃前残留的未完成任务。
-7. 开始接收 `/inquiries` 请求。
+6. 编排层恢复崩溃前残留的完整询价快照。
+7. 恢复任务入队完成后，开始接收 `/inquiries` 请求。
 
 未就绪时收到询价请求，返回 `503 SERVICE_NOT_READY`。
 
@@ -695,11 +726,11 @@ python scripts/community_data/initialize_database.py `
 
 ### 任务持久化
 
-- 每个询价任务入队时写一个 `persist/{taskId}.json`，内容为 `InquiryRequest` 的序列化。
-- 任务执行完成（成功或失败）后立即删除对应文件。
-- 进程崩溃重启后，当**全部平台首次确认就绪**时（`_refresh_service_status` 检测到 all READY），
-  自动遍历 `persist/*.json` 恢复所有残留任务重新入队（`_restored` 标志保证只恢复一次）。
-  恢复先于服务置 READY，保证残留任务排在就绪后接的新单之前（先来后到）。
+- 只有编排层确认唯一小区后才写 `persist/inquiries/{taskId}.json`；快照顶层包含 `task_id`、`community_id`、创建时间、`InquiryRequest` 和完整 `ConfirmedCommunityContext`，两处 `community_id` 必须一致。
+- 快照写入成功后才将不含 `community_id` 的采集请求交给 RPA；RPA 不读取、写入或删除该文件。
+- 任务执行完成（成功或失败）后，RPA 以终态通知编排层，由编排层删除对应快照。服务停止取消中的任务不删除快照。
+- 进程崩溃重启后，编排层在 RPA 全部就绪后按创建时间遍历 `persist/inquiries/*.json` 恢复任务。恢复入队完成前，`/health/ready` 与新询价均保持未就绪，避免新任务插队。
+- 旧的 `persist/{taskId}.json` 不兼容完整小区上下文，不参与读取、迁移或删除。
 
 ### 算法参数持久化
 
@@ -712,7 +743,8 @@ python scripts/community_data/initialize_database.py `
 ```
 persist/                  # 项目根目录下
 ├── runtime.json          # 算法参数（常驻）
-└── {taskId}.json         # 任务数据（入队写，完成删）
+└── inquiries/
+    └── {taskId}.json     # 完整询价快照（编排层写入与删除）
 ```
 
 ## 13. 日志与调试
@@ -753,7 +785,7 @@ persist/                  # 项目根目录下
 - 平台需要人工前置登录。
 - 命中平台人机验证时，仍需要人工介入。
 - 任务串行执行；每个平台分配独立浏览器实例，采集时多平台并行（`asyncio.gather`）。
-- 服务层汇总所有 `SUCCESS` 平台的在售数据，再走加权落点中位数算法计算最终价。
+- 编排层汇总所有 `SUCCESS` 平台的原始数据，再走加权落点中位数算法计算最终价。
 - 各平台均有独立 HTML 解析器（`parsers/<code>.py`），与 adapter 的浏览器操作分离。
 - **多城市支持**：API 入参 `city` 为必填字段，当前覆盖广东省 21 个地级市。各平台城市覆盖数不同（见 [§2](#2-已接入平台及差异)），不支持某城市的平台自动跳过询价只做保活刷新，全部平台都不支持时返回 `NO_DATA`。城市切换导航在薄壳层完成（`base.py:ensure_city_navigated`），adapter 内 `reset_to_start_page` 只做同城刷新。
 
