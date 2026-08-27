@@ -12,11 +12,19 @@ import time
 from abc import ABC, abstractmethod
 from typing import Awaitable, Callable, Optional
 
+from app.algorithm.area_rules import (
+    LISTING_AREA_TOLERANCE,
+    deal_area_bounds,
+    listing_area_bounds,
+)
 from app.rpa.core import config
-from app.rpa.core.algorithm import find_weighted_price_candidates
-from app.rpa.core.models import InquiryRequest, ListingSnapshot, PlatformResult, PlatformSession
+from app.rpa.core.models import (
+    InquiryRequest,
+    ListingSnapshot,
+    PlatformResult,
+    PlatformSession,
+)
 from app.rpa.core.status import PlatformHealthStatus, PlatformResultStatus
-from app.rpa.utils.listing_dedup import deduplicate_same_platform
 
 log = logging.getLogger(__name__)
 
@@ -150,7 +158,7 @@ class PlatformAdapter(ABC):
         session: PlatformSession,
         request: InquiryRequest,
     ) -> PlatformResult:
-        """执行单次采集。"""
+        """执行单次采集并返回平台原始结构化结果。"""
 
     async def check_ready(self, session: PlatformSession) -> tuple[bool, str]:
         """统一就绪检测：基类负责登录检测，子类只需实现 _probe_page。"""
@@ -527,25 +535,6 @@ def filter_snapshots_by_community(snapshots: list, community_name: str) -> list:
     ]
 
 
-LISTING_AREA_TOLERANCE = 1.0
-# 成交允许比在售更宽的可比面积范围；弱参考和在售仍固定使用 ±1㎡。
-DEAL_AREA_TOLERANCE = 5.0
-WEAK_AREA_REFERENCE = "WEAK_AREA_REFERENCE"
-
-
-def listing_area_bounds(area: float, tolerance: float = LISTING_AREA_TOLERANCE) -> tuple[float, float]:
-    """计算在售房源的精确面积范围（默认请求面积 ±1㎡）。"""
-    return area - tolerance, area + tolerance
-
-
-def deal_area_bounds(
-    area: float,
-    tolerance: float = DEAL_AREA_TOLERANCE,
-) -> tuple[float, float]:
-    """计算真实成交的可比面积范围，默认请求面积 ±5㎡。"""
-    return listing_area_bounds(area, tolerance)
-
-
 def filter_snapshots_by_area(
     snapshots: list[ListingSnapshot],
     area: float,
@@ -568,84 +557,6 @@ def _quote_prices_from_snapshots(snapshots: list[ListingSnapshot]) -> list[float
     ]
 
 
-def _has_effective_price_peak(snapshots: list[ListingSnapshot]) -> bool:
-    """返回当前价格算法是否找到了至少一个可用价格峰。"""
-    quote_prices = _quote_prices_from_snapshots(snapshots)
-    if not quote_prices:
-        return False
-    candidates = find_weighted_price_candidates([quote_prices])
-    return bool(candidates)
-
-
-def select_snapshots_by_area_with_reference(
-    snapshots: list[ListingSnapshot],
-    area: float,
-    tolerance: float = LISTING_AREA_TOLERANCE,
-    max_tolerance: Optional[float] = None,
-) -> tuple[list[ListingSnapshot], float, int]:
-    """选择能够形成有效价格峰值的面积范围。
-
-    如果严格范围已经包含有效峰值，则保留严格范围；否则取封顶范围内的全部目标小区
-    房源交给现有价格峰算法。第三个返回值表示严格范围之外新增的、带有价格的房源数量。
-    单条候选也会保留，但调用方会将其标记为弱参考。
-    """
-    max_tolerance = (
-        config.WEAK_AREA_MAX_TOLERANCE
-        if max_tolerance is None
-        else float(max_tolerance)
-    )
-    strict_matches = deduplicate_same_platform(
-        filter_snapshots_by_area(snapshots, area, tolerance)
-    )
-    if _has_effective_price_peak(strict_matches):
-        return strict_matches, tolerance, 0
-
-    if max_tolerance <= tolerance:
-        return strict_matches, tolerance, 0
-
-    candidate_matches = deduplicate_same_platform(
-        filter_snapshots_by_area(snapshots, area, max_tolerance)
-    )
-    if not _has_effective_price_peak(candidate_matches):
-        return strict_matches, tolerance, 0
-
-    strict_ids = {id(snapshot) for snapshot in strict_matches}
-    extra_count = sum(
-        1
-        for snapshot in candidate_matches
-        if id(snapshot) not in strict_ids
-        and snapshot.unit_price is not None
-        and snapshot.unit_price > 0
-    )
-    applied_tolerance = max(
-        [
-            tolerance,
-            *(
-                abs(snapshot.area - area)
-                for snapshot in candidate_matches
-                if snapshot.area is not None
-            ),
-        ]
-    )
-    return candidate_matches, applied_tolerance, extra_count
-
-
-def filter_snapshots_by_area_with_fallback(
-    snapshots: list[ListingSnapshot],
-    area: float,
-    tolerance: float = LISTING_AREA_TOLERANCE,
-    fallback_tolerance: Optional[float] = None,
-) -> tuple[list[ListingSnapshot], float]:
-    """保留兼容性 API，同时使用有效峰值搜索逻辑。"""
-    matches, applied_tolerance, _ = select_snapshots_by_area_with_reference(
-        snapshots,
-        area,
-        tolerance,
-        fallback_tolerance,
-    )
-    return matches, applied_tolerance
-
-
 def listing_filter_summary(
     snapshots: list[ListingSnapshot],
     community_name: str,
@@ -654,22 +565,19 @@ def listing_filter_summary(
 ) -> str:
     """生成在售房源过滤日志，区分小区命中和面积命中。"""
     community_snapshots = filter_snapshots_by_community(snapshots, community_name)
-    area_snapshots, applied_tolerance = filter_snapshots_by_area_with_fallback(
+    area_snapshots = filter_snapshots_by_area(
         community_snapshots,
         area,
         tolerance,
     )
-    deduplicated_snapshots = deduplicate_same_platform(area_snapshots)
-    area_min, area_max = listing_area_bounds(area, applied_tolerance)
+    area_min, area_max = listing_area_bounds(area, tolerance)
     missing_area_count = sum(item.area is None for item in community_snapshots)
     return (
         f"原始 {len(snapshots)} 条 -> 命中小区 {len(community_snapshots)} 条 -> "
         f"命中面积 {len(area_snapshots)} 条 "
         f"(请求面积 {area:.2f}㎡, 范围 {area_min:.2f}~{area_max:.2f}㎡, "
-        f"匹配容差±{applied_tolerance:g}㎡, "
+        f"匹配容差±{tolerance:g}㎡, "
         f"面积缺失 {missing_area_count} 条)"
-    ) + (
-        f" -> \u540c\u5e73\u53f0\u53bb\u91cd\u540e {len(deduplicated_snapshots)} \u6761"
     )
 
 
@@ -684,17 +592,7 @@ def listing_no_data_reason(
     if not community_snapshots:
         return f"面积筛选后未匹配到小区: {community_name}"
 
-    area_matches, applied_tolerance = filter_snapshots_by_area_with_fallback(
-        community_snapshots,
-        area,
-        tolerance,
-    )
-    area_min, area_max = listing_area_bounds(area, applied_tolerance)
-    if applied_tolerance > tolerance and area_matches:
-        return (
-            f"命中小区但无请求面积±{tolerance:g}㎡房源，已使用±{applied_tolerance:g}㎡兜底，"
-            f"命中 {len(area_matches)} 条"
-        )
+    area_min, area_max = listing_area_bounds(area, tolerance)
     return (
         f"命中小区但无请求面积±{tolerance:g}㎡房源: "
         f"请求面积={area:.2f}㎡, 范围={area_min:.2f}~{area_max:.2f}㎡, "
@@ -710,70 +608,20 @@ def listing_no_data_status(
 ) -> str:
     """区分普通无数据与命中小区但面积不匹配。"""
     community_snapshots = filter_snapshots_by_community(snapshots, community_name)
-    if community_snapshots and not filter_snapshots_by_area_with_fallback(
+    if community_snapshots and not filter_snapshots_by_area(
         community_snapshots, area, tolerance
-    )[0]:
+    ):
         return PlatformResultStatus.NO_MATCHING_AREA
     return PlatformResultStatus.NO_DATA
-
-
-def prepare_listing_data_with_reference(
-    snapshots: list[ListingSnapshot],
-    community_name: str,
-    area: Optional[float] = None,
-    area_tolerance: float = LISTING_AREA_TOLERANCE,
-) -> tuple[list[ListingSnapshot], list[float], dict[str, object]]:
-    """过滤目标小区和面积房源，必要时寻找封顶范围内的弱参考数据。
-
-    只有一条可用挂牌价时也保留该数据，但统一标记为弱参考，避免单条数据被误当成
-    稳定价格峰。
-    """
-    filtered = filter_snapshots_by_community(snapshots, community_name)
-    applied_tolerance = area_tolerance
-    reference_listing_count = 0
-    if area is not None:
-        filtered, applied_tolerance, reference_listing_count = select_snapshots_by_area_with_reference(
-            filtered,
-            area,
-            area_tolerance,
-        )
-    filtered = deduplicate_same_platform(filtered)
-    quote_prices = _quote_prices_from_snapshots(filtered)
-    reference: dict[str, object] = {}
-    single_listing_reference = area is not None and len(quote_prices) == 1
-    if (
-        area is not None
-        and quote_prices
-        and (
-            single_listing_reference
-            or (applied_tolerance > area_tolerance and reference_listing_count > 0)
-        )
-    ):
-        area_min, area_max = listing_area_bounds(area, applied_tolerance)
-        reference = {
-            "reference_code": WEAK_AREA_REFERENCE,
-            "reference_area_tolerance": round(applied_tolerance, 2),
-            "reference_area_min": round(area_min, 2),
-            "reference_area_max": round(area_max, 2),
-            "reference_listing_count": 1 if single_listing_reference else reference_listing_count,
-        }
-    return filtered, quote_prices, reference
 
 
 def prepare_listing_data(
     snapshots: list[ListingSnapshot],
     community_name: str,
-    area: Optional[float] = None,
-    area_tolerance: float = LISTING_AREA_TOLERANCE,
 ) -> tuple[list[ListingSnapshot], list[float]]:
-    """过滤目标小区和面积房源，兼容保留原二元组返回接口。"""
-    filtered, quote_prices, _ = prepare_listing_data_with_reference(
-        snapshots,
-        community_name,
-        area,
-        area_tolerance,
-    )
-    return filtered, quote_prices
+    """按小区归属返回原始快照和其单价镜像，不做算法筛选。"""
+    filtered = filter_snapshots_by_community(snapshots, community_name)
+    return filtered, _quote_prices_from_snapshots(filtered)
 
 
 async def wait_and_reload_after_block(tab, detect_func, label: str = "页面") -> str:

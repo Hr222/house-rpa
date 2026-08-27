@@ -112,23 +112,6 @@ PLATFORM_RESULT_STATUS_TEXT = {
     PlatformResultStatus.ERROR: "本次采集异常",
 }
 
-# 操作日志可能同时出现平台结果状态和任务失败状态，供 Excel 分析统一展示。
-OPERATION_STATUS_TEXT = {
-    **PLATFORM_RESULT_STATUS_TEXT,
-    TaskStatus.FAILED: "失败",
-}
-
-# 决策分支不是平台状态，但也是跨运行时、回调和 Excel 的统一展示字段。
-BRANCH_TEXT = {
-    "NO_DATA": "无可用数据",
-    "NO_MATCHING_AREA": "无匹配面积房源",
-    "FAILED": "无可用结果",
-    "WEIGHTED_MEDIAN": "主要价格落点中位数折扣",
-    "WEIGHTED_MEDIAN_MULTI": "多个高频价格落点，取最低价格峰中位数，不打折",
-    "WEIGHTED_MEDIAN_COMBINED": "挂牌价与成交价等权平均",
-}
-
-
 def transition_platform_health(
     event: PlatformHealthEvent,
 ) -> PlatformHealthStatus:

@@ -1,45 +1,22 @@
 # -*- coding: utf-8 -*-
-"""询价算法，纯函数，无 IO。"""
+"""加权落点中位数询价算法，纯函数，无 IO。"""
 
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from math import isclose
 from statistics import median as statistics_median
-from typing import Iterable, Optional, Protocol
+from typing import Iterable, Optional
 
-from app.rpa.core.models import PriceCandidate
-
-
-@dataclass
-class Decision:
-    final_price: Optional[float]
-    branch: str
-
-
-@dataclass
-class AlgorithmInput:
-    quote_price_lists: list[list[float]]
-    weighted_median_discount: float = 0.9
-    deal_price_lists: list[list[float]] = field(default_factory=list)
-    area: Optional[float] = None
-    luxury_data_sparse: bool = False
-
-
-class AlgorithmStrategy(Protocol):
-    """为未来算法实现保留的稳定扩展点。"""
-
-    def evaluate(self, inputs: AlgorithmInput) -> "AlgorithmEvaluation":
-        ...
-
-
-@dataclass
-class AlgorithmEvaluation:
-    quote_avg: Optional[float]
-    deal_avg: Optional[float]
-    decision: Decision
-    candidates: list[PriceCandidate] = field(default_factory=list)
+from app.algorithm.models import (
+    AlgorithmEvaluation,
+    AlgorithmInput,
+    AlgorithmStrategy,
+    Decision,
+    PriceCandidate,
+    WeightedMedianDiagnostic,
+)
 
 
 WEIGHTED_MEDIAN_MIN_COVERAGE = 0.60
@@ -73,16 +50,6 @@ class _WeightedInterval:
     start: int
     end: int
     weight: float
-    max_relative_deviation: float
-
-
-@dataclass(frozen=True)
-class WeightedMedianDiagnostic:
-    """解释最佳候选价格簇，供用户侧诊断使用。"""
-
-    prices: tuple[float, ...]
-    center: float
-    coverage: float
     max_relative_deviation: float
 
 
