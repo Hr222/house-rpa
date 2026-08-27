@@ -10,14 +10,17 @@ import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional, Protocol
 
 import nodriver as uc
 
 from app.rpa.core import config
-from app.rpa.core.models import InquiryRequest, InquiryResult, PlatformSession
+from app.rpa.core.models import (
+    InquiryRequest,
+    PlatformSession,
+    RPACollectionResult,
+)
 from app.rpa.core.status import (
-    BRANCH_TEXT,
     PLATFORM_HEALTH_STATUS_TEXT,
     PLATFORM_RESULT_STATUS_TEXT,
     SERVICE_STATUS_TEXT,
@@ -38,11 +41,24 @@ from app.rpa.platforms.base import (
 )
 from app.rpa.registry import build_default_adapters
 from app.rpa.service import RPAInquiryService
-from app.rpa.utils.task_store import delete_task, save_task, load_pending_tasks
 from app.rpa.utils.callback import notify_result
 from app.rpa.utils.window_control import tile_browser_windows
 
 log = logging.getLogger(__name__)
+
+
+class CollectionCompletion(Protocol):
+    """Opaque completion data assembled by the top-level inquiry layer."""
+
+    task_result: dict
+    callback_payload: dict
+
+
+CollectionCompletionHandler = Callable[
+    [InquiryRequest, RPACollectionResult],
+    Awaitable[CollectionCompletion],
+]
+TaskTerminalHandler = Callable[[str, TaskStatus], Awaitable[None]]
 
 
 def _to_lower_camel(name: str) -> str:
@@ -62,18 +78,6 @@ def _camelize_dict(data: dict) -> dict:
     return _camelize(data)
 
 
-def _reference_payload(result: InquiryResult) -> dict:
-    if not result.reference_code:
-        return {}
-    return {
-        "referenceCode": result.reference_code,
-        "referenceAreaTolerance": result.reference_area_tolerance,
-        "referenceAreaMin": result.reference_area_min,
-        "referenceAreaMax": result.reference_area_max,
-        "referenceListingCount": result.reference_listing_count,
-    }
-
-
 @dataclass(slots=True)
 class PlatformRuntimeState:
     code: str
@@ -90,11 +94,20 @@ class PlatformRuntimeState:
 class InquiryTaskRecord:
     task_id: str
     request: InquiryRequest
+    completion_handler: Optional[CollectionCompletionHandler] = field(
+        default=None,
+        repr=False,
+    )
+    terminal_handler: Optional[TaskTerminalHandler] = field(
+        default=None,
+        repr=False,
+    )
     status: TaskStatus = TaskStatus.QUEUED
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
-    result: Optional[InquiryResult] = None
+    result: Optional[dict] = None
+    callback_payload: Optional[dict] = None
     error: Optional[str] = None
 
 
@@ -117,12 +130,14 @@ class RPARuntime:
         browser_factory: Optional[Callable[[], object]] = None,
         keepalive_interval: int = config.PLATFORM_KEEPALIVE_INTERVAL,
         enable_console_ready_confirmation: bool = False,
+        completion_handler: Optional[CollectionCompletionHandler] = None,
     ):
         self.adapters = adapters or build_default_adapters()
         self.adapter_map = {adapter.code: adapter for adapter in self.adapters}
         self.browser_factory = browser_factory or _default_browser_factory
         self.keepalive_interval = keepalive_interval
         self.enable_console_ready_confirmation = enable_console_ready_confirmation
+        self.completion_handler = completion_handler
 
         self.browsers: dict[str, object] = {}
         self.service: Optional[RPAInquiryService] = None
@@ -142,7 +157,6 @@ class RPARuntime:
         self.status = ServiceStatus.BOOTING
         self.message = "启动中"
         self._last_get_at: dict[str, float] = {}  # GET 限流：taskId -> 上次查询时间戳
-        self._restored: bool = False  # 崩溃恢复标志：全部就绪后只恢复一次残留任务
 
     def _browser_adapters(self):
         """返回确实需要独立 Chrome 实例的平台。"""
@@ -254,17 +268,33 @@ class RPARuntime:
         """记录一次 GET 查询的时间戳。"""
         self._last_get_at[task_id] = time.time()
 
-    async def enqueue_inquiry(self, request: InquiryRequest) -> dict:
+    def set_completion_handler(
+        self,
+        completion_handler: CollectionCompletionHandler,
+    ) -> None:
+        """Set the top-level completion hook used by restored RPA tasks."""
+        self.completion_handler = completion_handler
+
+    async def enqueue_inquiry(
+        self,
+        request: InquiryRequest,
+        *,
+        completion_handler: Optional[CollectionCompletionHandler] = None,
+        terminal_handler: Optional[TaskTerminalHandler] = None,
+    ) -> dict:
         if not self.is_ready():
             raise RuntimeError("SERVICE_NOT_READY")
 
         task_id = request.request_id or uuid.uuid4().hex
         request.request_id = task_id
-        record = InquiryTaskRecord(task_id=task_id, request=request)
+        record = InquiryTaskRecord(
+            task_id=task_id,
+            request=request,
+            completion_handler=completion_handler,
+            terminal_handler=terminal_handler,
+        )
         self.tasks[task_id] = record
         await self.queue.put(task_id)
-        # 持久化兜底：入队后写 JSON，进程崩溃后可恢复
-        save_task(task_id, asdict(request))
         return self._serialize_task(record)
 
     async def confirm_platform_ready(self, code: str) -> dict:
@@ -317,11 +347,6 @@ class RPARuntime:
         if all(item.status == PlatformHealthStatus.READY for item in states):
             if self.status != ServiceStatus.READY:
                 self._tile_browser_windows_once()
-                # 首次全部就绪：恢复崩溃前未完成的任务（只执行一次）。
-                # 恢复先于 self.status 置 READY，保证残留任务排在就绪后接的新单之前。
-                if not self._restored:
-                    self._restore_pending_tasks()
-                    self._restored = True
             self.status = ServiceStatus.READY
             self.message = "所有平台已就绪"
             return
@@ -368,11 +393,19 @@ class RPARuntime:
                     code: state.version
                     for code, state in self.platform_states.items()
                 }
-                result = await self.service.run_inquiry(
+                collection = await self.service.run_inquiry(
                     record.request,
-                    before_aggregate=self._check_platform_risk_before_aggregation,
+                    before_collection_complete=self._check_platform_risk_before_aggregation,
                 )
-                record.result = result
+                self._apply_platform_results(collection, platform_versions)
+                completion_handler = (
+                    record.completion_handler or self.completion_handler
+                )
+                if completion_handler is None:
+                    raise RuntimeError("INQUIRY_COMPLETION_HANDLER_NOT_CONFIGURED")
+                completion = await completion_handler(record.request, collection)
+                record.result = completion.task_result
+                record.callback_payload = completion.callback_payload
                 record.status = TaskStatus.COMPLETED
                 # ★ 采集完成瞬间立刻打印 request + 纯采集耗时（不含详情窗口后台关闭等待）
                 elapsed = time.time() - record.started_at
@@ -381,7 +414,6 @@ class RPARuntime:
                     _camelize_dict(asdict(record.request)),
                     elapsed,
                 )
-                self._apply_platform_results(result, platform_versions)
             except Exception as exc:
                 log.exception("task failed: %s", task_id)
                 record.status = TaskStatus.FAILED
@@ -392,8 +424,7 @@ class RPARuntime:
                 record.finished_at = time.time()
                 self.current_task_id = None
                 self.queue.task_done()
-                # 任务完成（成功或失败），删除持久化文件
-                delete_task(task_id)
+                await self._notify_task_terminal(record)
                 # 主动推送结果给客户端（配置了 CALLBACK_URL 才生效）
                 await self._notify_callback(record)
 
@@ -607,11 +638,11 @@ class RPARuntime:
 
     def _apply_platform_results(
         self,
-        result: InquiryResult,
+        collection: RPACollectionResult,
         task_platform_versions: Optional[dict[str, int]] = None,
     ):
         """保存本次结果；只有明确的平台异常才更新健康状态。"""
-        for item in result.platform_results:
+        for item in collection.platform_results:
             code = next((key for key, adapter in self.adapter_map.items() if adapter.name == item.name), None)
             if code is None or code not in self.platform_states:
                 continue
@@ -652,39 +683,6 @@ class RPARuntime:
         self._refresh_service_status()
 
     def _serialize_task(self, record: InquiryTaskRecord) -> dict:
-        result_payload = None
-        if record.result is not None:
-            result_payload = {
-                "success": record.result.success,
-                "finalPrice": record.result.final_price,
-                "branchCode": record.result.branch,
-                "branch": BRANCH_TEXT.get(record.result.branch, record.result.branch),
-                "quoteAvg": record.result.quote_avg,
-                "dealAvg": record.result.deal_avg,
-                "platform": (
-                    self._serialize_platform_result(record.result.platform)
-                    if record.result.platform is not None
-                    else None
-                ),
-                "platform_results": [
-                    self._serialize_platform_result(item) for item in record.result.platform_results
-                ],
-                "data": {
-                    "quoteAvg": record.result.quote_avg,
-                    "dealAvg": record.result.deal_avg,
-                    "finalPrice": record.result.final_price,
-                },
-            }
-            if record.result.candidates:
-                candidates = [
-                    _camelize(asdict(item)) for item in record.result.candidates
-                ]
-                result_payload["candidates"] = candidates
-                result_payload["data"]["candidates"] = candidates
-            reference = _reference_payload(record.result)
-            result_payload.update(reference)
-            result_payload["data"].update(reference)
-
         return {
             "taskId": record.task_id,
             "statusCode": record.status,
@@ -694,7 +692,7 @@ class RPARuntime:
             "finishedAt": record.finished_at,
             "error": record.error,
             "request": _camelize_dict(asdict(record.request)),
-            "result": result_payload,
+            "result": record.result,
         }
 
     def _serialize_platform_state(self, state: PlatformRuntimeState) -> dict:
@@ -714,28 +712,16 @@ class RPARuntime:
         platform_label = f"[{code}] " if code else ""
         log.debug("静默处理浏览器窗口: %s%s", platform_label, reason)
 
-    def _restore_pending_tasks(self):
-        """启动时恢复崩溃前未完成的任务（持久化兜底）。
-
-        正常情况下 persist 目录为空，仅在进程异常退出时残留 JSON 文件。
-        """
-        pending = load_pending_tasks()
-        if not pending:
+    async def _notify_task_terminal(self, record: InquiryTaskRecord) -> None:
+        """通知上层任务已明确结束；取消任务不会进入此通知。"""
+        if record.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
             return
-        for task_data in pending:
-            task_id = task_data.pop("task_id")
-            request = InquiryRequest(
-                community_name=task_data["community_name"],
-                area=task_data["area"],
-                city=task_data.get("city", "深圳"),
-                # 旧的持久化任务没有行政区，恢复时保留 None，避免启动失败。
-                administrative_district=task_data.get("administrative_district"),
-                request_id=task_id,
-            )
-            record = InquiryTaskRecord(task_id=task_id, request=request)
-            self.tasks[task_id] = record
-            self.queue.put_nowait(task_id)
-        log.info("restored %d pending task(s) from crash", len(pending))
+        if record.terminal_handler is None:
+            return
+        try:
+            await record.terminal_handler(record.task_id, record.status)
+        except Exception:
+            log.exception("任务终态通知失败: task_id=%s", record.task_id)
 
     def _build_callback_payload(self, record: InquiryTaskRecord) -> dict:
         """组装回调 body：任务号 + 状态 + 计算结果。"""
@@ -743,21 +729,10 @@ class RPARuntime:
             "taskId": record.task_id,
             "statusCode": record.status,
             "status": TASK_STATUS_TEXT.get(record.status, record.status),
-            "success": record.result is not None and record.result.success,
+            "success": False,
         }
-        if record.status == TaskStatus.COMPLETED and record.result is not None:
-            payload["quoteAvg"] = record.result.quote_avg
-            payload["dealAvg"] = record.result.deal_avg
-            payload["finalPrice"] = record.result.final_price
-            payload["branchCode"] = record.result.branch
-            payload["branch"] = BRANCH_TEXT.get(record.result.branch, record.result.branch)
-            if record.result.candidates:
-                payload["candidates"] = [
-                    _camelize(asdict(item)) for item in record.result.candidates
-                ]
-            if record.result.note:
-                payload["note"] = record.result.note
-            payload.update(_reference_payload(record.result))
+        if record.status == TaskStatus.COMPLETED and record.callback_payload is not None:
+            payload.update(record.callback_payload)
         elif record.status == TaskStatus.FAILED:
             payload["error"] = record.error
         return payload

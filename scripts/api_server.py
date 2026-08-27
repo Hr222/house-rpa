@@ -9,7 +9,7 @@ import socket
 import uvicorn
 
 from app.rpa.core import config
-from app.rpa.api import create_app
+from app.api import create_app
 from app.rpa.utils.debug_utils import set_debug_mode
 from app.rpa.utils.logging_utils import setup_logging
 from app.rpa.runtime import RPARuntime

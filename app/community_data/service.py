@@ -27,7 +27,7 @@ class Geocoder(Protocol):
 
 
 class CommunityDataService:
-    """实现数据库优先、缺失时新增并补坐标的简单流程。"""
+    """提供人工维护小区主数据的查询与显式维护能力。"""
 
     def __init__(
         self,
@@ -43,26 +43,7 @@ class CommunityDataService:
         administrative_district: str,
         community_name: str,
     ) -> list[CommunityRecord]:
-        """查询小区；数据库没有记录时新增并调用腾讯地图。"""
-        records = self.database.find(city, administrative_district, community_name)
-        if records:
-            return records
-
-        record = self.database.insert_or_get(
-            CommunitySeed(
-                city=city,
-                administrative_district=administrative_district,
-                name=community_name,
-            )
-        )
-        try:
-            result = self.geocoder.geocode(record.address)
-        except Exception as exc:
-            log.warning("小区地理编码失败: community_id=%s, error=%s", record.community_id, exc)
-            self.database.mark_geocode_failed(record.community_id, str(exc))
-        else:
-            self.database.update_geocode(record.community_id, result)
-
+        """只查询人工维护的小区记录，不在请求链路自动新增或地理编码。"""
         return self.database.find(city, administrative_district, community_name)
 
     def add_seed(self, seed: CommunitySeed) -> CommunityRecord:

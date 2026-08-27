@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""FastAPI 入口。"""
+"""顶层 FastAPI 组合入口。"""
 
 from __future__ import annotations
 
@@ -12,8 +12,15 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app.rpa.core import config
-from app.rpa.core.models import InquiryRequest
+from app.algorithm import (
+    get_weighted_median_discount,
+    is_weighted_median_discount_default,
+    set_weighted_median_discount,
+)
+from app.inquiry.completion import InquiryCompletionOrchestrator
+from app.inquiry.models import InquirySubmissionStatus
+from app.inquiry.orchestrator import InquiryOrchestrator
+from app.inquiry.task_manager import InquiryTaskManager
 from app.rpa.core.status import TaskStatus
 from app.rpa.runtime import RPARuntime
 
@@ -42,17 +49,38 @@ class WeightedMedianDiscountPayload(BaseModel):
     }
 
 
-def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = True) -> FastAPI:
-    runtime = runtime or RPARuntime()
+def create_app(
+    *,
+    runtime: Optional[RPARuntime] = None,
+    manage_runtime: bool = True,
+    inquiry_orchestrator: Optional[InquiryOrchestrator] = None,
+    inquiry_task_manager: Optional[InquiryTaskManager] = None,
+) -> FastAPI:
+    completion_orchestrator = InquiryCompletionOrchestrator()
+    if runtime is None:
+        runtime = RPARuntime()
+    if inquiry_orchestrator is None:
+        inquiry_task_manager = inquiry_task_manager or InquiryTaskManager(
+            runtime,
+            completion_orchestrator,
+        )
+        inquiry_orchestrator = InquiryOrchestrator(
+            inquiry_task_manager,
+        )
+    else:
+        inquiry_task_manager = inquiry_task_manager or inquiry_orchestrator.task_manager
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.runtime = runtime
+        app.state.inquiry_task_manager = inquiry_task_manager
         if manage_runtime:
             await runtime.start()
+        await inquiry_task_manager.start()
         try:
             yield
         finally:
+            await inquiry_task_manager.stop()
             if manage_runtime:
                 await runtime.stop()
 
@@ -66,17 +94,21 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
     async def health_ready():
         current_runtime: RPARuntime = app.state.runtime
         snapshot = current_runtime.snapshot()
-        if current_runtime.is_ready():
+        task_manager: InquiryTaskManager = app.state.inquiry_task_manager
+        snapshot["inquiryRecoveryComplete"] = task_manager.recovery_complete
+        if current_runtime.is_ready() and task_manager.recovery_complete:
             return {"code": "OK", "message": "服务已就绪", "data": snapshot}
         return JSONResponse(
             status_code=503,
-            content={"code": "SERVICE_NOT_READY", "message": "RPA 服务尚未就绪", "data": snapshot},
+            content={"code": "SERVICE_NOT_READY", "message": "询价服务尚未就绪", "data": snapshot},
         )
 
     @app.get("/admin/status")
     async def admin_status():
         current_runtime: RPARuntime = app.state.runtime
-        return {"code": "OK", "message": "查询成功", "data": current_runtime.snapshot()}
+        snapshot = current_runtime.snapshot()
+        snapshot["inquiryRecoveryComplete"] = app.state.inquiry_task_manager.recovery_complete
+        return {"code": "OK", "message": "查询成功", "data": snapshot}
 
     @app.post("/admin/platforms/{code}/confirm-ready")
     async def confirm_ready(code: str):
@@ -92,33 +124,66 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
     @app.post("/inquiries", status_code=202)
     async def create_inquiry(payload: InquiryCreatePayload):
         current_runtime: RPARuntime = app.state.runtime
-        request = InquiryRequest(
-            community_name=payload.community_name,
-            area=payload.area,
-            city=payload.city,
-            administrative_district=payload.administrative_district,
-            request_id=payload.request_id,
-        )
         try:
-            task = await current_runtime.enqueue_inquiry(request)
-            return {
-                "code": "ACCEPTED",
-                "message": "询价任务已受理",
-                "data": {
-                    "taskId": task["taskId"],
-                    "status": task["status"],
-                    "statusCode": task["statusCode"],
-                },
-            }
+            submission = await inquiry_orchestrator.submit(
+                city=payload.city,
+                administrative_district=payload.administrative_district,
+                community_name=payload.community_name,
+                area=payload.area,
+                request_id=payload.request_id,
+            )
         except RuntimeError:
             return JSONResponse(
                 status_code=503,
                 content={
                     "code": "SERVICE_NOT_READY",
-                    "message": "RPA 服务尚未就绪",
+                    "message": "询价服务尚未就绪",
                     "data": current_runtime.snapshot(),
                 },
             )
+        if submission.status == InquirySubmissionStatus.COMMUNITY_NOT_FOUND:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "code": "COMMUNITY_NOT_FOUND",
+                    "message": "未找到小区",
+                    "data": {},
+                },
+            )
+        if submission.status == InquirySubmissionStatus.COMMUNITY_PHASE_REQUIRED:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "code": "COMMUNITY_PHASE_REQUIRED",
+                    "message": "小区期数未明确",
+                    "data": {
+                        "candidates": [
+                            {
+                                "communityGroupId": candidate.community_group_id,
+                                "communityId": candidate.community_id,
+                                "canonicalName": candidate.canonical_name,
+                                "phase": candidate.phase,
+                                "aliases": list(candidate.aliases),
+                                "city": candidate.city,
+                                "administrativeDistrict": candidate.administrative_district,
+                            }
+                            for candidate in submission.candidates
+                        ]
+                    },
+                },
+            )
+        task = submission.task
+        if task is None:
+            raise RuntimeError("询价编排未返回任务")
+        return {
+            "code": "ACCEPTED",
+            "message": "询价任务已受理",
+            "data": {
+                "taskId": task["taskId"],
+                "status": task["status"],
+                "statusCode": task["statusCode"],
+            },
+        }
 
     @app.get("/inquiries/{task_id}")
     async def get_inquiry(task_id: str):
@@ -174,15 +239,15 @@ def create_app(*, runtime: Optional[RPARuntime] = None, manage_runtime: bool = T
             "code": "OK",
             "message": "查询成功",
             "data": {
-                "weightedMedianDiscount": config.get_weighted_median_discount(),
-                "isDefault": config.is_weighted_median_discount_default(),
+                "weightedMedianDiscount": get_weighted_median_discount(),
+                "isDefault": is_weighted_median_discount_default(),
             },
         }
 
     @app.put("/admin/algorithm/weighted-median-discount")
     async def update_weighted_median_discount(payload: WeightedMedianDiscountPayload):
         try:
-            new_value = config.set_weighted_median_discount(payload.weighted_median_discount)
+            new_value = set_weighted_median_discount(payload.weighted_median_discount)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return {

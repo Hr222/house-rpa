@@ -7,7 +7,7 @@ from pathlib import Path
 
 from app.community_data.database import CommunityDatabase
 from app.community_data.geocoder import GeocodeResult
-from app.community_data.models import CommunitySeed, GEOCODE_SUCCESS
+from app.community_data.models import CommunitySeed
 from app.community_data.service import CommunityDataService
 
 
@@ -74,14 +74,10 @@ def test_phase_alias_resolves_existing_record_without_creating_duplicate(tmp_pat
     assert len(service.database.list_pending_geocode()) == 1
 
 
-def test_missing_record_calls_geocoder_once_and_persists(tmp_path: Path) -> None:
+def test_missing_record_returns_empty_without_persisting_or_geocoding(tmp_path: Path) -> None:
     service, geocoder = make_service(tmp_path)
     records = service.resolve_communities("深圳", "南山区", "新小区")
 
-    assert len(records) == 1
-    assert len(geocoder.calls) == 1
-    assert records[0].geocode_status == GEOCODE_SUCCESS
-    assert records[0].longitude is not None
-
-    service.resolve_communities("深圳", "南山区", "新小区")
-    assert len(geocoder.calls) == 1
+    assert records == []
+    assert geocoder.calls == []
+    assert service.database.find("深圳", "南山区", "新小区") == []
