@@ -33,8 +33,8 @@ description: Analyze real-estate capture evaluation workbooks together with deta
 1. 找到用户指定的评估文件，通常是 `results/评估对比_*.xlsx`。
 2. 找到同一批数据对应的详细日志，通常是 `logs/*info*.log`。
 3. 优先使用项目现有解析逻辑：
-   - `app/rpa/excel/export_operation_log_excel.py` 的 `read_log_lines()`、`parse_records()`、`finalize_record()`。
-   - `app.rpa.core.algorithm.find_weighted_price_candidates()` 重建价格峰。
+   - `app/inquiry_analysis/export_operation_log_excel.py` 的 `read_log_lines()`、`parse_records()`、`finalize_record()`。
+   - `app.algorithm.weighted_median.find_weighted_price_candidates()` 重建价格峰。
    - 生成逐小区日志分析工作簿时，使用：
      `python .agents/skills/analyze-captured-data/scripts/export_operation_log_excel.py <log> --evaluation-excel <evaluation.xlsx>`。
      输出默认写入项目 `results/`，并以评估文件名生成 `<评估文件名>_分析.xlsx`。
@@ -106,7 +106,7 @@ description: Analyze real-estate capture evaluation workbooks together with deta
 ## 分析文件输出
 
 - 评估文件为 `results/评估对比_20260724_173024.xlsx` 时，日志明细分析文件必须输出为 `results/评估对比_20260724_173024_分析.xlsx`。
-- Skill 自带入口脚本为 `.agents/skills/analyze-captured-data/scripts/export_operation_log_excel.py`；它调用项目中的唯一实现 `app/rpa/excel/export_operation_log_excel.py`，避免 Skill 与项目代码出现两份实现。
+- Skill 自带入口脚本为 `.agents/skills/analyze-captured-data/scripts/export_operation_log_excel.py`；它调用项目中的唯一实现 `app/inquiry_analysis/export_operation_log_excel.py`，避免 Skill 与项目代码出现两份实现。
 - 输出工作簿的第一张表为 `分析汇总`，列顺序必须固定为以下 20 列：
 
   `行号`、`城市`、`行政区`、`请求面积(㎡)`、`小区`、`评估单价`、`最终取值`、`最终偏差`、`决策分支`、`所有候选峰（频率）`、`分析结论`、`评价口径`、`原始房源数`、`同平台去重后`、`跨平台去重后`、`跨平台重复组`、`严格±1㎡候选`、`弱参考信息`、`严格范围房源数`、`弱参考补充数`。

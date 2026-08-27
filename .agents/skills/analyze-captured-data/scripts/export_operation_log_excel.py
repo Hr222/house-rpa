@@ -9,7 +9,9 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-PROJECT_SCRIPT = PROJECT_ROOT / "app" / "excel" / "export_operation_log_excel.py"
+PROJECT_SCRIPT = (
+    PROJECT_ROOT / "app" / "inquiry_analysis" / "export_operation_log_excel.py"
+)
 
 if not PROJECT_SCRIPT.is_file():
     raise SystemExit(f"Project exporter not found: {PROJECT_SCRIPT}")

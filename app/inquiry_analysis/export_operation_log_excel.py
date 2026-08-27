@@ -17,20 +17,17 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-# 支持 `python app/rpa/excel/export_operation_log_excel.py ...` 直接执行。
-# 否则 sys.path 只有 app/rpa/excel，可能误导入虚拟环境中的同名第三方 app 包。
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+# 支持 `python app/inquiry_analysis/export_operation_log_excel.py ...` 直接执行。
+# 否则 sys.path 只有 app/inquiry_analysis，可能误导入虚拟环境中的同名第三方 app 包。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.rpa.core.algorithm import find_weighted_price_candidates
-from app.rpa.core.status import (
-    BRANCH_TEXT,
-    OPERATION_STATUS_TEXT,
-    PlatformResultStatus,
-)
-from app.rpa.platforms.base import deal_area_bounds
-from app.rpa.utils.listing_dedup import ListingDeduplicationResult, deduplicate_listings
+from app.algorithm.area_rules import deal_area_bounds
+from app.algorithm.branch_text import BRANCH_TEXT
+from app.algorithm.weighted_median import find_weighted_price_candidates
+from app.inquiry_analysis.presentation import OPERATION_STATUS_TEXT
+from app.algorithm.listing_dedup import ListingDeduplicationResult, deduplicate_listings
 
 U_QUERY_CITY = "\u67e5\u8be2\u57ce\u5e02"
 U_COMMUNITY = "\u5c0f\u533a"
@@ -86,7 +83,7 @@ U_TOTAL_PREFIX = "\uff08\u5171"
 U_TOTAL_SUFFIX = "\u6761\uff09"
 U_LOG_INCOMPLETE = "\u65e5\u5fd7\u4e2d\u672a\u89e3\u6790\u5230\u5b8c\u6574\u7ed3\u679c"
 U_NO_USABLE_DATA = "\u672a\u6293\u53d6\u5230\u53ef\u7528\u4e8e\u8ba1\u7b97\u7684\u6709\u6548\u6570\u636e\uff0c\u6700\u7ec8\u65e0\u53ef\u7528\u62a5\u4ef7"
-U_STATUS_SUCCESS = PlatformResultStatus.SUCCESS.value
+U_STATUS_SUCCESS = "SUCCESS"
 U_PINGMI_LABEL = "\u5e73\u7c73"
 U_FAILED = "FAILED"
 U_WEIGHTED_MEDIAN = "WEIGHTED_MEDIAN"
@@ -1521,7 +1518,7 @@ def derive_output_path(
     """在项目 results 目录下推导配套分析工作簿路径。"""
     if output_path is not None:
         return output_path
-    project_root = Path(__file__).resolve().parents[3]
+    project_root = Path(__file__).resolve().parents[2]
     results_dir = project_root / "results"
     source_stem = (
         evaluation_excel_path.stem
