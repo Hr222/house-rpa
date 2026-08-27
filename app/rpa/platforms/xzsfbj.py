@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import logging
 
-from app.rpa.core.models import InquiryRequest, PlatformResult, PlatformSession
+from app.rpa.core.models import (
+    InquiryRequest,
+    PlatformResult,
+    PlatformSession,
+)
 from app.rpa.platforms import xzsfbj_constants as constants
 from app.rpa.platforms.adapters.xzsfbj import XzsfbjApiAdapter
 from app.rpa.platforms.base import PlatformAdapter

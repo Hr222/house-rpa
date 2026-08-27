@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """行舟深房（xzsfbj）采集 MVP 脚本。
 
-复用 rpa 现有组件（print_mvp_result / prepare_listing_data_with_reference /
-short_circuit_result），结构对齐 ke_mvp_test.py。
+复用 RPA 采集组件和独立 algorithm 模块，结构对齐 ke_mvp_test.py。
 
 链路：WMPF CDP 捕获 token → xqData.json 匹配 regionId → AES 加密 → httpx 调接口
 → prepare_listing_data 过滤 → print_mvp_result 输出。
@@ -41,7 +40,10 @@ import websockets
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.rpa.utils.logging_utils import setup_logging
 from app.rpa.core import config
-from app.rpa.core.algorithm import AlgorithmInput, evaluate_algorithm
+from app.algorithm.models import AlgorithmInput
+from app.algorithm.config import get_weighted_median_discount
+from app.algorithm.selection import select_listings_for_estimation
+from app.algorithm.weighted_median import evaluate_algorithm
 from app.rpa.core.status import (
     PlatformResultStatus,
     PLATFORM_RESULT_STATUS_TEXT,
@@ -51,7 +53,7 @@ from app.rpa.core.price_utils import round_price
 from app.rpa.platforms.base import (
     listing_no_data_reason,
     listing_no_data_status,
-    prepare_listing_data_with_reference,
+    prepare_listing_data,
     short_circuit_result,
 )
 from app.rpa.platforms import xzsfbj_constants as constants
@@ -69,6 +71,28 @@ from app.rpa.utils.mvp_result import print_mvp_result
 setup_logging()
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("app.rpa.platforms.adapters.xzsfbj")
+
+
+def select_listing_data_for_mvp(
+    snapshots: list[ListingSnapshot],
+    community_name: str,
+    area: float | None,
+) -> tuple[list[ListingSnapshot], list[float], dict[str, object]]:
+    """Keep the MVP output format while delegating weak references to algorithm."""
+    community_snapshots, raw_prices = prepare_listing_data(snapshots, community_name)
+    if area is None:
+        return community_snapshots, raw_prices, {}
+    selection = select_listings_for_estimation(community_snapshots, area)
+    reference: dict[str, object] = {}
+    if selection.uses_weak_reference:
+        reference = {
+            "reference_code": "WEAK_AREA_REFERENCE",
+            "reference_area_tolerance": selection.applied_tolerance,
+            "reference_area_min": area - selection.applied_tolerance,
+            "reference_area_max": area + selection.applied_tolerance,
+            "reference_listing_count": selection.reference_listing_count,
+        }
+    return list(selection.snapshots), list(selection.quote_prices), reference
 
 # ---- 常量（均已实测验证）----
 BASE_URL = "https://www.xzsfbj.com.cn"
@@ -2060,12 +2084,12 @@ def _captured_sales_to_result(
             last_snapshot.unit_price,
         )
     if ui_area_range is None:
-        snapshots, quote_prices, reference = prepare_listing_data_with_reference(
+        snapshots, quote_prices, reference = select_listing_data_for_mvp(
             raw_snapshots, community, area
         )
     else:
         area_min, area_max = ui_area_range
-        community_snapshots, _, _ = prepare_listing_data_with_reference(
+        community_snapshots, _, _ = select_listing_data_for_mvp(
             raw_snapshots, community, None
         )
         snapshots = [
@@ -2126,11 +2150,6 @@ def _captured_sales_to_result(
         listing_snapshots=snapshots,
         deal_source="无",
         request_id="ui-mvp",
-        reference_code=reference.get("reference_code"),
-        reference_area_tolerance=reference.get("reference_area_tolerance"),
-        reference_area_min=reference.get("reference_area_min"),
-        reference_area_max=reference.get("reference_area_max"),
-        reference_listing_count=reference.get("reference_listing_count"),
     )
 
 
@@ -2949,7 +2968,7 @@ async def _do_collect_one(client, headers, community, area, started_at, request_
             layout=s.get("layout", ""),
         ))
 
-    filtered_snapshots, quote_prices, reference = prepare_listing_data_with_reference(
+    filtered_snapshots, quote_prices, reference = select_listing_data_for_mvp(
         raw_snapshots, cname, area
     )
     if not filtered_snapshots:
@@ -2989,7 +3008,6 @@ async def _do_collect_one(client, headers, community, area, started_at, request_
         reason=deal_incomplete_reason,
         request_id=request_id,
         elapsed_seconds=round(time.time() - started_at, 2),
-        **reference,
     )
 
 
@@ -3207,7 +3225,7 @@ def _print_result(community_name, area, result):
         evaluation = evaluate_algorithm(
             inputs=AlgorithmInput(
                 quote_price_lists=[result.quote_prices],
-                weighted_median_discount=config.get_weighted_median_discount(),
+                weighted_median_discount=get_weighted_median_discount(),
                 deal_price_lists=[result.deal_prices] if result.deal_source == "成交记录" else [],
             ),
         )

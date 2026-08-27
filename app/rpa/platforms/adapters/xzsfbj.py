@@ -32,12 +32,11 @@ from app.rpa.platforms.base import (
     listing_no_data_reason,
     listing_no_data_status,
     notify_manual_verify_state,
-    prepare_listing_data_with_reference,
+    prepare_listing_data,
     short_circuit_result,
     wait_for_manual_unblock,
 )
 from app.rpa.utils.debug_utils import is_debug_mode
-from app.rpa.utils.listing_dedup import deduplicate_same_platform
 
 log = logging.getLogger(__name__)
 
@@ -552,8 +551,8 @@ class XzsfbjApiAdapter:
             log.info("在售房源...")
             sales = await self._fetch_sales(client, headers, region_id)
             raw_snapshots = parsers.parse_listing_snapshots(sales, community_name)
-            filtered_snapshots, quote_prices, reference = prepare_listing_data_with_reference(
-                raw_snapshots, community_name, area
+            filtered_snapshots, quote_prices = prepare_listing_data(
+                raw_snapshots, community_name
             )
             if not filtered_snapshots:
                 return short_circuit_result(
@@ -598,7 +597,6 @@ class XzsfbjApiAdapter:
                 reason=deal_incomplete_reason,
                 request_id=request_id,
                 elapsed_seconds=round(time.time() - started_at, 2),
-                **reference,
             )
         except Blocked as exc:
             log.warning("行舟深房命中风控: %s", exc)
@@ -640,15 +638,15 @@ class XzsfbjApiAdapter:
     ) -> PlatformResult:
         """Merge residential phases into one standard platform result.
 
-        xzsfbj stores each phase under a separate regionId.  This platform
-        detail stays inside the adapter: service/core.algorithm receive one
-        normal PlatformResult and naturally weight every listing/deal record.
+        xzsfbj stores each phase under a separate regionId. This platform
+        detail remains inside the adapter; the inquiry layer receives one
+        normal raw PlatformResult.
         """
-        snapshots = deduplicate_same_platform(
+        snapshots = [
             snapshot
             for result in results
             for snapshot in result.listing_snapshots
-        )
+        ]
         quote_prices = [
             float(snapshot.unit_price)
             for snapshot in snapshots
@@ -666,35 +664,6 @@ class XzsfbjApiAdapter:
             for record in result.deal_records
         ]
 
-        reference_results = [
-            result
-            for result in results
-            if result.reference_code
-            and result.reference_area_min is not None
-            and result.reference_area_max is not None
-        ]
-        reference: dict[str, object] = {}
-        if reference_results:
-            reference = {
-                "reference_code": reference_results[0].reference_code,
-                "reference_area_tolerance": max(
-                    result.reference_area_tolerance or 0.0
-                    for result in reference_results
-                ),
-                "reference_area_min": min(
-                    result.reference_area_min for result in reference_results
-                    if result.reference_area_min is not None
-                ),
-                "reference_area_max": max(
-                    result.reference_area_max for result in reference_results
-                    if result.reference_area_max is not None
-                ),
-                "reference_listing_count": sum(
-                    result.reference_listing_count or 0
-                    for result in reference_results
-                ),
-            }
-
         partial_reasons = [result.reason for result in results if result.reason]
         reason = f"已合并 {len(results)} 个住宅期数"
         if partial_reasons:
@@ -711,7 +680,6 @@ class XzsfbjApiAdapter:
             reason=reason,
             request_id=request_id,
             elapsed_seconds=round(time.time() - started_at, 2),
-            **reference,
         )
 
     async def collect(self, request: InquiryRequest) -> PlatformResult:

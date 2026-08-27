@@ -29,7 +29,12 @@ class LjPlatformAdapter(PlatformAdapter):
             ready=True,
         )
 
-    async def collect(self, browser, session: PlatformSession, request: InquiryRequest):
+    async def collect(
+        self,
+        browser,
+        session: PlatformSession,
+        request: InquiryRequest,
+    ):
         # 城市支持检查：不支持则跳过询价，只做保活刷新
         skip = self.check_city_support(request.city, request.request_id)
         if skip is not None:

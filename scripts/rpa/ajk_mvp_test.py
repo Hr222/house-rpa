@@ -23,7 +23,8 @@ from app.rpa.core import config
 from app.rpa.utils.debug_utils import dump_html as shared_dump_html
 from app.rpa.utils.debug_utils import set_debug_mode
 from app.rpa.core.models import ListingSnapshot
-from app.rpa.core.algorithm import AlgorithmInput, evaluate_algorithm
+from app.algorithm.models import AlgorithmInput
+from app.algorithm.weighted_median import evaluate_algorithm
 from app.rpa.utils.mvp_result import print_mvp_result
 from app.rpa.utils.logging_utils import setup_logging
 

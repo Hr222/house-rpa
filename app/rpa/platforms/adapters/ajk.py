@@ -29,7 +29,7 @@ from app.rpa.platforms.base import (
     listing_filter_summary,
     listing_no_data_reason,
     listing_no_data_status,
-    prepare_listing_data_with_reference,
+    prepare_listing_data,
     short_circuit_result,
     wait_and_reload_after_block,
 )
@@ -420,8 +420,8 @@ async def _do_collect(
 
     # 6. 解析在售房源
     parsed_snapshots = parsers.parse_listing_snapshots(area_html)
-    snapshots, quote_prices, reference = prepare_listing_data_with_reference(
-        parsed_snapshots, community_name, area
+    snapshots, quote_prices = prepare_listing_data(
+        parsed_snapshots, community_name
     )
     log.info(
         "安居客在售房源最终校验: %s",
@@ -463,5 +463,4 @@ async def _do_collect(
         detail_url=None,
         elapsed_seconds=round(time.time() - started_at, 2),
         listing_snapshots=snapshots,
-        **reference,
     )

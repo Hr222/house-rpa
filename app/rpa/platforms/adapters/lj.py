@@ -28,6 +28,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
+from app.algorithm.area_rules import deal_area_bounds
 from app.rpa.core import config
 from app.rpa.core.status import PlatformResultStatus
 from app.rpa.utils.debug_utils import dump_html
@@ -42,11 +43,10 @@ from app.rpa.platforms.base import (
     short_circuit_result,
     has_matching_community_snapshots,
     filter_snapshots_by_community,
-    deal_area_bounds,
     listing_filter_summary,
     listing_no_data_reason,
     listing_no_data_status,
-    prepare_listing_data_with_reference,
+    prepare_listing_data,
     check_empty_listing_page,
 )
 from app.rpa.platforms.lj_constants import START_URL
@@ -659,8 +659,8 @@ async def _do_collect(
     log.info("在售分页完成: 每页 %s", page_counts)
 
     # 6. 返回前防御校验，确保在售价格与房源明细来自同一批目标小区数据
-    snapshots, quote_prices, reference = prepare_listing_data_with_reference(
-        collected_snapshots, community_name, area
+    snapshots, quote_prices = prepare_listing_data(
+        collected_snapshots, community_name
     )
     log.info(
         "链家在售房源最终校验: %s",
@@ -784,5 +784,4 @@ async def _do_collect(
         detail_url=None,
         elapsed_seconds=_elapsed(),
         listing_snapshots=snapshots,
-        **reference,
     )

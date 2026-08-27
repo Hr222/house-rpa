@@ -37,7 +37,7 @@ from app.rpa.platforms.base import (
     listing_filter_summary,
     listing_no_data_reason,
     listing_no_data_status,
-    prepare_listing_data_with_reference,
+    prepare_listing_data,
     wait_and_reload_after_block,
     check_empty_listing_page,
 )
@@ -458,10 +458,9 @@ async def _do_collect(
 
     # 返回前防御校验，确保在售价格与房源明细来自同一批目标小区数据
     collected_snapshots = listing_snapshots
-    listing_snapshots, quote_prices, reference = prepare_listing_data_with_reference(
+    listing_snapshots, quote_prices = prepare_listing_data(
         collected_snapshots,
         community_name,
-        area,
     )
     log.info(
         "乐有家在售房源最终校验: %s",
@@ -503,5 +502,4 @@ async def _do_collect(
         detail_url=None,
         elapsed_seconds=round(time.time() - started_at, 2),
         listing_snapshots=listing_snapshots,
-        **reference,
     )

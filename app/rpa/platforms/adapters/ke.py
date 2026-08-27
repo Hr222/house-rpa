@@ -10,6 +10,7 @@ import re
 import time
 from typing import Optional
 
+from app.algorithm.area_rules import deal_area_bounds
 from app.rpa.core import config
 from app.rpa.core.status import PlatformResultStatus
 from app.rpa.parsers import ke as parsers
@@ -24,11 +25,10 @@ from app.rpa.platforms.base import (
     short_circuit_result,
     has_matching_community_snapshots,
     filter_snapshots_by_community,
-    deal_area_bounds,
     listing_filter_summary,
     listing_no_data_reason,
     listing_no_data_status,
-    prepare_listing_data_with_reference,
+    prepare_listing_data,
     check_empty_listing_page,
 )
 from app.rpa.platforms.city_map import get_start_url
@@ -568,10 +568,9 @@ async def _do_collect(
         total_pages,
         community_name,
     )
-    listing_snapshots, quote_prices, reference = prepare_listing_data_with_reference(
+    listing_snapshots, quote_prices = prepare_listing_data(
         collected_snapshots,
         community_name,
-        area,
     )
     log.info(
         "贝壳在售房源最终校验: %s",
@@ -610,7 +609,6 @@ async def _do_collect(
             detail_url=detail_url,
             elapsed_seconds=round(time.time() - started_at, 2),
             listing_snapshots=listing_snapshots,
-            **reference,
         )
 
     # 详情页风控兜底（检测→等人回车→重取，直到页面恢复）
@@ -648,7 +646,6 @@ async def _do_collect(
             detail_url=detail_url,
             elapsed_seconds=round(time.time() - started_at, 2),
             listing_snapshots=listing_snapshots,
-            **reference,
         )
 
     if detail_tab is not main_page:
@@ -675,7 +672,6 @@ async def _do_collect(
         detail_url=detail_url,
         elapsed_seconds=round(time.time() - started_at, 2),
         listing_snapshots=listing_snapshots,
-        **reference,
     )
 
 
