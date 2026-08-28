@@ -41,3 +41,6 @@ test_data/
 debug_*.png
 debug_*.html
 debug/
+
+# 运行产物导出目录
+outputs/
