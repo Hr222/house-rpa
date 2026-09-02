@@ -24,26 +24,15 @@ class DealRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class CommunityDealPage:
-    """一个小区在某来源平台上的成交列表入口。"""
-
-    id: Optional[int]
-    community_id: int
-    city: str
-    administrative_district: str
-    source_platform: str
-    source_community_name: str
-    deal_page_url: str
-
-
-@dataclass(frozen=True, slots=True)
-class CommunityListingPage:
-    """一个小区在某来源平台上的挂牌列表入口。"""
+class CommunityPlatformPage:
+    """一个小区在网页平台上的挂牌和成交入口。"""
 
     id: Optional[int]
     community_id: int
     source_platform: str
-    listing_page_url: str
+    source_community_name: Optional[str]
+    listing_page_url: Optional[str]
+    deal_page_url: Optional[str]
 
 
 @dataclass(frozen=True, slots=True)

@@ -8,8 +8,7 @@ from app.property_records.ingestion import (
     normalize_source_platform,
 )
 from app.property_records.models import (
-    CommunityDealPage,
-    CommunityListingPage,
+    CommunityPlatformPage,
     DealRecord,
     ListingRecord,
     ListingRecordLog,
@@ -17,8 +16,7 @@ from app.property_records.models import (
 )
 
 __all__ = [
-    "CommunityDealPage",
-    "CommunityListingPage",
+    "CommunityPlatformPage",
     "DealRecord",
     "ListingRecord",
     "ListingRecordLog",

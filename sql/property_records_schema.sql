@@ -62,63 +62,38 @@ CREATE INDEX IF NOT EXISTS idx_deal_records_source_community
     ON deal_records (source_platform, community_id, deal_date);
 
 -- ============================================================================
--- 小区成交页面入口
+-- 小区平台页面入口
 -- ============================================================================
 
-CREATE TABLE IF NOT EXISTS community_deal_pages (
-    -- 成交页面入口在本模块内的唯一编号。
+CREATE TABLE IF NOT EXISTS community_platform_pages (
+    -- 小区平台页面入口在本模块内的唯一编号。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
 
     -- community 模块返回的正式小区记录 ID。
     community_id INTEGER NOT NULL,
 
-    -- 冗余保存页面对应的城市和行政区，归属仍以 community_id 为准。
-    city TEXT NOT NULL,
-    administrative_district TEXT NOT NULL,
-
-    -- 成交页面来源平台代码：lj=链家，fang=房天下。
-    source_platform TEXT NOT NULL
-        CHECK (source_platform IN ('lj', 'fang')),
-
-    -- 来源平台页面展示的小区名称。
-    source_community_name TEXT NOT NULL,
-
-    -- 小区级成交列表页面地址；不是单条成交记录地址。
-    deal_page_url TEXT NOT NULL,
-
-    -- 同一小区在同一平台只保留一个可供下次批量更新的成交入口。
-    UNIQUE (community_id, source_platform)
-);
-
-CREATE INDEX IF NOT EXISTS idx_community_deal_pages_community
-    ON community_deal_pages (community_id);
-
--- ============================================================================
--- 小区挂牌页面入口
--- ============================================================================
-
-CREATE TABLE IF NOT EXISTS community_listing_pages (
-    -- 挂牌页面入口在本模块内的唯一编号。
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-    -- community 模块返回的正式小区记录 ID。
-    community_id INTEGER NOT NULL,
-
-    -- 挂牌来源平台代码：ke=贝壳，ajk=安居客，fang=房天下，
-    -- lj=链家，lyj=乐有家。
+    -- 网页平台代码：ke=贝壳，ajk=安居客，fang=房天下，lj=链家，lyj=乐有家。
+    -- 行舟深房为接口平台，不使用网页入口。
     source_platform TEXT NOT NULL
         CHECK (source_platform IN ('ke', 'ajk', 'fang', 'lj', 'lyj')),
 
-    -- 小区级挂牌列表页面地址；不是单套房源详情地址。
-    -- 后续 RPA 可从该入口继续按面积筛选和更新挂牌记录。
-    listing_page_url TEXT NOT NULL,
+    -- 来源平台页面展示的小区名称，用于直达页面后的归属校验与追溯。
+    -- 旧挂牌入口迁移时可能缺失，下次真实采集后补齐。
+    source_community_name TEXT,
 
-    -- 同一小区在同一平台只保留一个可供下次批量更新的挂牌入口。
-    UNIQUE (community_id, source_platform)
+    -- 小区级挂牌列表入口，用于下次直达并更新挂牌；不是单套房源详情地址。
+    listing_page_url TEXT,
+
+    -- 小区级成交列表入口，用于下次直达并更新成交；不是单条成交记录地址。
+    deal_page_url TEXT,
+
+    -- 同一小区在同一平台只保留一组入口，且至少有一个可用入口。
+    UNIQUE (community_id, source_platform),
+    CHECK (listing_page_url IS NOT NULL OR deal_page_url IS NOT NULL)
 );
 
-CREATE INDEX IF NOT EXISTS idx_community_listing_pages_community
-    ON community_listing_pages (community_id);
+CREATE INDEX IF NOT EXISTS idx_community_platform_pages_community
+    ON community_platform_pages (community_id);
 
 -- 挂牌记录（当前状态）
 -- ============================================================================

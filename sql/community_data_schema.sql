@@ -69,6 +69,10 @@ CREATE TABLE IF NOT EXISTS communities (
     -- 建成年份。
     build_year INTEGER,
 
+    -- 住宅类型标识：住宅/公寓/城中村/非住宅/不可用；NULL 表示未核实。
+    -- 对外两个小区查询接口默认只返回“住宅”。
+    estate_type TEXT,
+
     -- 用于腾讯地图地理编码的地址。
     address TEXT NOT NULL,
 

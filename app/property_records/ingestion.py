@@ -10,8 +10,7 @@ from typing import Any
 
 from app.property_records.database import PropertyRecordsDatabase
 from app.property_records.models import (
-    CommunityDealPage,
-    CommunityListingPage,
+    CommunityPlatformPage,
     DealRecord,
     ListingRecord,
 )
@@ -39,8 +38,7 @@ class IngestionReport:
 
     deals: tuple[DealRecord, ...] = ()
     listings: tuple[ListingRecord, ...] = ()
-    deal_page: CommunityDealPage | None = None
-    listing_page: CommunityListingPage | None = None
+    platform_page: CommunityPlatformPage | None = None
     skipped_deals: tuple[str, ...] = ()
     skipped_listings: tuple[str, ...] = ()
 
@@ -147,23 +145,14 @@ class PropertyRecordsIngestion:
                 continue
             deals.append(deal)
 
-        page = None
-        if deal_page_url is not None:
-            page = self.database.upsert_deal_page(
+        platform_page = None
+        if listing_page_url is not None or deal_page_url is not None:
+            platform_page = self.database.upsert_community_platform_page(
                 community_id=community_id,
-                city=city,
-                administrative_district=administrative_district,
                 source_platform=platform,
                 source_community_name=source_community_name,
-                deal_page_url=deal_page_url,
-            )
-
-        listing_page = None
-        if listing_page_url is not None:
-            listing_page = self.database.upsert_listing_page(
-                community_id=community_id,
-                source_platform=platform,
                 listing_page_url=listing_page_url,
+                deal_page_url=deal_page_url,
             )
 
         listings: list[ListingRecord] = []
@@ -199,8 +188,7 @@ class PropertyRecordsIngestion:
         return IngestionReport(
             deals=tuple(deals),
             listings=tuple(listings),
-            deal_page=page,
-            listing_page=listing_page,
+            platform_page=platform_page,
             skipped_deals=tuple(skipped_deals),
             skipped_listings=tuple(skipped_listings),
         )

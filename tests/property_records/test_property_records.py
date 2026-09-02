@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -105,6 +106,127 @@ def test_listing_batch_never_deletes_when_the_effective_list_is_empty(tmp_path):
     assert len(database.list_listings(community.community_id)) == 2
 
 
+def test_community_platform_page_combines_listing_and_deal_entries(tmp_path):
+    database, community = _databases(tmp_path)
+
+    first = database.upsert_community_platform_page(
+        community_id=community.community_id,
+        source_platform="lj",
+        source_community_name=None,
+        listing_page_url="HTTPS://Lj.Example/estate/listing/?area=80#top",
+    )
+    merged = database.upsert_community_platform_page(
+        community_id=community.community_id,
+        source_platform="lj",
+        source_community_name="城市天地",
+        deal_page_url="https://lj.example/estate/deal/?page=1",
+    )
+
+    assert first.id == merged.id
+    assert merged.source_community_name == "城市天地"
+    assert merged.listing_page_url == "https://lj.example/estate/listing?area=80"
+    assert merged.deal_page_url == "https://lj.example/estate/deal?page=1"
+    assert database.get_community_platform_page(
+        community.community_id, "lj"
+    ) == merged
+    assert database.list_community_platform_pages(community.community_id) == [merged]
+
+
+def test_legacy_community_page_tables_migrate_without_overwriting_entries(tmp_path):
+    community_db = CommunityDatabase(tmp_path / "community.sqlite3")
+    community = community_db.insert_or_get(
+        CommunitySeed(city="深圳", administrative_district="罗湖区", name="城市天地广场")
+    )
+    records_path = tmp_path / "property_records.sqlite3"
+    with sqlite3.connect(records_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE community_platform_pages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                community_id INTEGER NOT NULL,
+                source_platform TEXT NOT NULL,
+                source_community_name TEXT,
+                listing_page_url TEXT,
+                deal_page_url TEXT,
+                UNIQUE (community_id, source_platform)
+            );
+            CREATE TABLE community_listing_pages (
+                community_id INTEGER NOT NULL,
+                source_platform TEXT NOT NULL,
+                listing_page_url TEXT NOT NULL
+            );
+            CREATE TABLE community_deal_pages (
+                community_id INTEGER NOT NULL,
+                city TEXT NOT NULL,
+                administrative_district TEXT NOT NULL,
+                source_platform TEXT NOT NULL,
+                source_community_name TEXT NOT NULL,
+                deal_page_url TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO community_listing_pages
+                (community_id, source_platform, listing_page_url)
+            VALUES (?, ?, ?)
+            """,
+            (community.community_id, "ke", "https://ke.example/estate/listing"),
+        )
+        connection.execute(
+            """
+            INSERT INTO community_listing_pages
+                (community_id, source_platform, listing_page_url)
+            VALUES (?, ?, ?)
+            """,
+            (community.community_id, "lj", "https://lj.example/estate/listing"),
+        )
+        connection.execute(
+            """
+            INSERT INTO community_deal_pages (
+                community_id, city, administrative_district, source_platform,
+                source_community_name, deal_page_url
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                community.community_id,
+                "深圳",
+                "罗湖区",
+                "lj",
+                "城市天地",
+                "https://lj.example/estate/deal",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO community_platform_pages (
+                community_id, source_platform, source_community_name,
+                listing_page_url, deal_page_url
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                community.community_id,
+                "lj",
+                "当前页面小区名",
+                "https://lj.example/estate/current-listing",
+                None,
+            ),
+        )
+
+    database = PropertyRecordsDatabase(records_path, community_database=community_db)
+
+    listing_only = database.get_community_platform_page(community.community_id, "ke")
+    merged = database.get_community_platform_page(community.community_id, "lj")
+    assert listing_only is not None
+    assert listing_only.source_community_name is None
+    assert listing_only.listing_page_url == "https://ke.example/estate/listing"
+    assert listing_only.deal_page_url is None
+    assert merged is not None
+    assert merged.source_community_name == "当前页面小区名"
+    assert merged.listing_page_url == "https://lj.example/estate/current-listing"
+    assert merged.deal_page_url == "https://lj.example/estate/deal"
+
+
 def test_rpa_ingestion_stores_real_deals_but_not_compatibility_averages(tmp_path):
     database, community = _databases(tmp_path)
     ingestion = PropertyRecordsIngestion(database)
@@ -139,6 +261,8 @@ def test_rpa_ingestion_stores_real_deals_but_not_compatibility_averages(tmp_path
     )
     assert len(report.deals) == 1
     assert report.deals[0].total_price_yuan == 3_700_000.0
+    assert report.platform_page is not None
+    assert report.platform_page.deal_page_url == "https://lj.example/estate/deal"
     assert compatibility_report.deals == ()
     assert len(database.list_deals(community.community_id)) == 1
 

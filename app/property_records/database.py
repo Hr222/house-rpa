@@ -11,8 +11,7 @@ from typing import ContextManager, Iterable
 from app.community_data.database import CommunityDatabase
 from app.persistence.sqlite import sqlite_connection
 from app.property_records.models import (
-    CommunityDealPage,
-    CommunityListingPage,
+    CommunityPlatformPage,
     DealRecord,
     ListingRecord,
     ListingRecordLog,
@@ -56,6 +55,51 @@ class PropertyRecordsDatabase:
         schema = SCHEMA_PATH.read_text(encoding="utf-8")
         with self._connect() as connection:
             connection.executescript(schema)
+            self._migrate_legacy_community_page_tables(connection)
+
+    @staticmethod
+    def _migrate_legacy_community_page_tables(connection: sqlite3.Connection) -> None:
+        """将旧的挂牌、成交入口表补入合并后的统一入口表。"""
+        if _table_exists(connection, "community_listing_pages"):
+            connection.execute(
+                """
+                INSERT INTO community_platform_pages (
+                    community_id, source_platform, source_community_name,
+                    listing_page_url
+                )
+                SELECT community_id, source_platform, NULL, listing_page_url
+                FROM community_listing_pages
+                WHERE listing_page_url IS NOT NULL
+                ON CONFLICT (community_id, source_platform) DO UPDATE SET
+                    listing_page_url = COALESCE(
+                        community_platform_pages.listing_page_url,
+                        excluded.listing_page_url
+                    )
+                """
+            )
+        if _table_exists(connection, "community_deal_pages"):
+            connection.execute(
+                """
+                INSERT INTO community_platform_pages (
+                    community_id, source_platform, source_community_name,
+                    deal_page_url
+                )
+                SELECT
+                    community_id, source_platform, source_community_name,
+                    deal_page_url
+                FROM community_deal_pages
+                WHERE deal_page_url IS NOT NULL
+                ON CONFLICT (community_id, source_platform) DO UPDATE SET
+                    source_community_name = COALESCE(
+                        community_platform_pages.source_community_name,
+                        excluded.source_community_name
+                    ),
+                    deal_page_url = COALESCE(
+                        community_platform_pages.deal_page_url,
+                        excluded.deal_page_url
+                    )
+                """
+            )
 
     def upsert_deal(
         self,
@@ -124,55 +168,66 @@ class PropertyRecordsDatabase:
             raise RuntimeError("写入成交记录后无法读取记录")
         return _deal_from_row(row)
 
-    def upsert_deal_page(
+    def upsert_community_platform_page(
         self,
         *,
         community_id: int,
-        city: str,
-        administrative_district: str,
         source_platform: str,
-        source_community_name: str,
-        deal_page_url: str,
-    ) -> CommunityDealPage:
-        """保存小区级成交页面入口。"""
-        city, administrative_district = self._validate_community(
-            community_id, city, administrative_district
-        )
-        if source_platform not in DEAL_PLATFORMS:
-            raise ValueError(f"成交来源平台不支持: {source_platform}")
+        source_community_name: str | None,
+        listing_page_url: str | None = None,
+        deal_page_url: str | None = None,
+    ) -> CommunityPlatformPage:
+        """保存小区在一个平台的已确认挂牌和成交入口。"""
+        try:
+            normalized_community_id = int(community_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"community_id 不存在: {community_id}") from exc
+        if self.community_database.get_by_id(normalized_community_id) is None:
+            raise ValueError(f"community_id 不存在: {community_id}")
+        if source_platform not in LISTING_PLATFORMS:
+            raise ValueError(f"平台页面来源不支持: {source_platform}")
         values = (
-            community_id,
-            city,
-            administrative_district,
+            normalized_community_id,
             source_platform,
-            _required_text(source_community_name, "source_community_name"),
-            normalize_page_url(deal_page_url),
+            _optional_text(source_community_name),
+            normalize_page_url(listing_page_url) if listing_page_url is not None else None,
+            normalize_page_url(deal_page_url) if deal_page_url is not None else None,
         )
+        if values[3] is None and values[4] is None:
+            raise ValueError("listing_page_url 和 deal_page_url 不能同时为空")
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO community_deal_pages (
-                    community_id, city, administrative_district,
-                    source_platform, source_community_name, deal_page_url
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO community_platform_pages (
+                    community_id, source_platform, source_community_name,
+                    listing_page_url, deal_page_url
+                ) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (community_id, source_platform) DO UPDATE SET
-                    city = excluded.city,
-                    administrative_district = excluded.administrative_district,
-                    source_community_name = excluded.source_community_name,
-                    deal_page_url = excluded.deal_page_url
+                    source_community_name = COALESCE(
+                        excluded.source_community_name,
+                        community_platform_pages.source_community_name
+                    ),
+                    listing_page_url = COALESCE(
+                        excluded.listing_page_url,
+                        community_platform_pages.listing_page_url
+                    ),
+                    deal_page_url = COALESCE(
+                        excluded.deal_page_url,
+                        community_platform_pages.deal_page_url
+                    )
                 """,
                 values,
             )
             row = connection.execute(
                 """
-                SELECT * FROM community_deal_pages
+                SELECT * FROM community_platform_pages
                 WHERE community_id = ? AND source_platform = ?
                 """,
-                (community_id, source_platform),
+                (normalized_community_id, source_platform),
             ).fetchone()
         if row is None:
-            raise RuntimeError("写入成交页面后无法读取记录")
-        return _deal_page_from_row(row)
+            raise RuntimeError("写入小区平台页面后无法读取记录")
+        return _platform_page_from_row(row)
 
     def upsert_listing(
         self,
@@ -293,49 +348,6 @@ class PropertyRecordsDatabase:
             raise RuntimeError("写入挂牌记录后无法读取记录")
         return _listing_from_row(row)
 
-    def upsert_listing_page(
-        self,
-        *,
-        community_id: int,
-        source_platform: str,
-        listing_page_url: str,
-    ) -> CommunityListingPage:
-        """保存小区级挂牌列表入口；同小区同平台只保留一个入口。"""
-        try:
-            normalized_community_id = int(community_id)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"community_id 不存在: {community_id}") from exc
-        if self.community_database.get_by_id(normalized_community_id) is None:
-            raise ValueError(f"community_id 不存在: {community_id}")
-        if source_platform not in LISTING_PLATFORMS:
-            raise ValueError(f"挂牌来源平台不支持: {source_platform}")
-        values = (
-            normalized_community_id,
-            source_platform,
-            normalize_page_url(listing_page_url),
-        )
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO community_listing_pages (
-                    community_id, source_platform, listing_page_url
-                ) VALUES (?, ?, ?)
-                ON CONFLICT (community_id, source_platform) DO UPDATE SET
-                    listing_page_url = excluded.listing_page_url
-                """,
-                values,
-            )
-            row = connection.execute(
-                """
-                SELECT * FROM community_listing_pages
-                WHERE community_id = ? AND source_platform = ?
-                """,
-                (community_id, source_platform),
-            ).fetchone()
-        if row is None:
-            raise RuntimeError("写入挂牌页面后无法读取记录")
-        return _listing_page_from_row(row)
-
     def mark_listing_deleted(
         self,
         source_platform: str,
@@ -440,28 +452,38 @@ class PropertyRecordsDatabase:
             return records
         return _deduplicate_deals(records)
 
-    def list_deal_pages(self, community_id: int) -> list[CommunityDealPage]:
+    def get_community_platform_page(
+        self,
+        community_id: int,
+        source_platform: str,
+    ) -> CommunityPlatformPage | None:
+        """读取一个小区在指定平台的抓取入口。"""
+        if source_platform not in LISTING_PLATFORMS:
+            raise ValueError(f"平台页面来源不支持: {source_platform}")
         with self._connect() as connection:
-            rows = connection.execute(
+            row = connection.execute(
                 """
-                SELECT * FROM community_deal_pages
-                WHERE community_id = ? ORDER BY source_platform
+                SELECT * FROM community_platform_pages
+                WHERE community_id = ? AND source_platform = ?
                 """,
-                (community_id,),
-            ).fetchall()
-        return [_deal_page_from_row(row) for row in rows]
+                (community_id, source_platform),
+            ).fetchone()
+        return _platform_page_from_row(row) if row is not None else None
 
-    def list_listing_pages(self, community_id: int) -> list[CommunityListingPage]:
-        """读取各平台的小区挂牌列表入口。"""
+    def list_community_platform_pages(
+        self,
+        community_id: int,
+    ) -> list[CommunityPlatformPage]:
+        """读取一个小区在各网页平台的抓取入口。"""
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM community_listing_pages
+                SELECT * FROM community_platform_pages
                 WHERE community_id = ? ORDER BY source_platform
                 """,
                 (community_id,),
             ).fetchall()
-        return [_listing_page_from_row(row) for row in rows]
+        return [_platform_page_from_row(row) for row in rows]
 
     def list_listings(
         self,
@@ -597,24 +619,22 @@ def _deal_from_row(row: sqlite3.Row) -> DealRecord:
     )
 
 
-def _deal_page_from_row(row: sqlite3.Row) -> CommunityDealPage:
-    return CommunityDealPage(
+def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _platform_page_from_row(row: sqlite3.Row) -> CommunityPlatformPage:
+    return CommunityPlatformPage(
         id=int(row["id"]),
         community_id=int(row["community_id"]),
-        city=row["city"],
-        administrative_district=row["administrative_district"],
         source_platform=row["source_platform"],
         source_community_name=row["source_community_name"],
-        deal_page_url=row["deal_page_url"],
-    )
-
-
-def _listing_page_from_row(row: sqlite3.Row) -> CommunityListingPage:
-    return CommunityListingPage(
-        id=int(row["id"]),
-        community_id=int(row["community_id"]),
-        source_platform=row["source_platform"],
         listing_page_url=row["listing_page_url"],
+        deal_page_url=row["deal_page_url"],
     )
 
 
