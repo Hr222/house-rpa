@@ -11,7 +11,7 @@
    合并页的已有入口双写到新记录（沿用锦绣江南等已验证的双写模式）。
 
 幂等：已改名的父记录、已存在的目标记录和已入库的页面会跳过，
-可重复执行。改动同步记录在 sql/split_phase_records_20260902.sql。
+可重复执行。改动台账见 git 历史中的 sql/split_phase_records_20260902.sql。
 """
 
 from __future__ import annotations

@@ -1,14 +1,9 @@
--- 房源记录模块 SQLite schema。
+-- 房源记录模块（deal_records / community_platform_pages / listing_records / listing_record_logs）结构基线（不含数据）。
 --
--- 本文件只保存外部平台展示的成交事实和挂牌当前状态，不保存本系统的
--- 估价结果、最终取值、挂牌均价顶替值或其它询价过程数据。
---
--- community_id 由 community 模块先解析和校验。本模块使用独立 SQLite
--- 数据库，因此不建立跨数据库外键；写入层必须拒绝不存在或不匹配的 ID。
-
--- ============================================================================
--- 成交记录
--- ============================================================================
+-- 来源：由 persist/property_records.sqlite3 于 2026-09-02 从 sqlite_master 导出，为当前生产库结构基线。
+-- 本文件被 app/property_records/database.py 在每次初始化时 executescript 执行，
+-- 因此全部语句带 IF NOT EXISTS 保持幂等；请勿手工编辑，
+-- 结构变更后从生产库重新导出覆盖本文件。
 
 CREATE TABLE IF NOT EXISTS deal_records (
     -- 成交记录在本模块内的唯一编号。
@@ -55,16 +50,6 @@ CREATE TABLE IF NOT EXISTS deal_records (
     )
 );
 
-CREATE INDEX IF NOT EXISTS idx_deal_records_community
-    ON deal_records (community_id, deal_date);
-
-CREATE INDEX IF NOT EXISTS idx_deal_records_source_community
-    ON deal_records (source_platform, community_id, deal_date);
-
--- ============================================================================
--- 小区平台页面入口
--- ============================================================================
-
 CREATE TABLE IF NOT EXISTS community_platform_pages (
     -- 小区平台页面入口在本模块内的唯一编号。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,12 +76,6 @@ CREATE TABLE IF NOT EXISTS community_platform_pages (
     UNIQUE (community_id, source_platform),
     CHECK (listing_page_url IS NOT NULL OR deal_page_url IS NOT NULL)
 );
-
-CREATE INDEX IF NOT EXISTS idx_community_platform_pages_community
-    ON community_platform_pages (community_id);
-
--- 挂牌记录（当前状态）
--- ============================================================================
 
 CREATE TABLE IF NOT EXISTS listing_records (
     -- 挂牌记录在本模块内的唯一编号。
@@ -155,15 +134,6 @@ CREATE TABLE IF NOT EXISTS listing_records (
     UNIQUE (source_platform, listing_url)
 );
 
-CREATE INDEX IF NOT EXISTS idx_listing_records_community_active
-    ON listing_records (community_id, is_deleted);
-
-CREATE INDEX IF NOT EXISTS idx_listing_records_source_community
-    ON listing_records (source_platform, community_id, is_deleted);
-
--- 挂牌价格日志（每次成功写入当前记录后的价格快照）
--- ============================================================================
-
 CREATE TABLE IF NOT EXISTS listing_record_logs (
     -- 日志在本模块内的唯一编号。
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -187,6 +157,20 @@ CREATE TABLE IF NOT EXISTS listing_record_logs (
         REFERENCES listing_records(id)
 );
 
--- 按房源和采集时间读取价格变化。
+CREATE INDEX IF NOT EXISTS idx_community_platform_pages_community
+    ON community_platform_pages (community_id);
+
+CREATE INDEX IF NOT EXISTS idx_deal_records_community
+    ON deal_records (community_id, deal_date);
+
+CREATE INDEX IF NOT EXISTS idx_deal_records_source_community
+    ON deal_records (source_platform, community_id, deal_date);
+
 CREATE INDEX IF NOT EXISTS idx_listing_record_logs_record_time
     ON listing_record_logs (listing_record_id, observed_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_listing_records_community_active
+    ON listing_records (community_id, is_deleted);
+
+CREATE INDEX IF NOT EXISTS idx_listing_records_source_community
+    ON listing_records (source_platform, community_id, is_deleted);

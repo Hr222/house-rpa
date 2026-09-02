@@ -1,7 +1,13 @@
--- 小区基础数据模块 SQLite schema。
+-- 小区基础数据模块 SQLite 结构基线（不含数据）。
 --
 -- community_groups 表表示不区分期数的小区组；communities 表表示具体的小区
 -- 或期数记录。小区别名保存在 aliases_json 中，由 community 模块负责解析。
+--
+-- 来源：由 persist/community_data.sqlite3 于 2026-09-02 从 sqlite_master 导出，
+-- 为当前生产库结构基线。本文件被 app/community_data/database.py 在每次初始化时
+-- executescript 执行，全部语句带 IF NOT EXISTS 保持幂等。
+-- 生产库内 DDL 不含注释（SQLite 的注释只存在于建表语句文本中），中文注释
+-- 在本文件维护：结构变更后从生产库重新导出时，请合并保留这些注释。
 
 -- ============================================================================
 -- 小区组：同一正式小区及其各期记录的归属容器
@@ -69,10 +75,6 @@ CREATE TABLE IF NOT EXISTS communities (
     -- 建成年份。
     build_year INTEGER,
 
-    -- 住宅类型标识：住宅/公寓/城中村/非住宅/不可用；NULL 表示未核实。
-    -- 对外两个小区查询接口默认只返回“住宅”。
-    estate_type TEXT,
-
     -- 用于腾讯地图地理编码的地址。
     address TEXT NOT NULL,
 
@@ -105,6 +107,10 @@ CREATE TABLE IF NOT EXISTS communities (
 
     -- 记录最近更新时间，使用 ISO-8601 文本保存。
     updated_at TEXT NOT NULL,
+
+    -- 住宅类型标识：住宅/公寓/城中村/非住宅/不可用；NULL 表示未核实。
+    -- 对外两个小区查询接口默认只返回“住宅”。
+    estate_type TEXT,
 
     -- 小区组删除时保护关联记录，并确保 community_group_id 有效。
     FOREIGN KEY (community_group_id)
