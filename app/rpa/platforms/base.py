@@ -481,6 +481,42 @@ _TRAILING_PHASE_PATTERN = re.compile(
 )
 _COMMUNITY_NAME_NOISE_PATTERN = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff]+")
 
+# 期数令牌：数字或中文数字直接跟“期”，用于请求名与抓取名的期数比较。
+_PHASE_TOKEN_PATTERN = re.compile(r"第?(\d+|[零〇一二三四五六七八九十百两]+)期")
+_PHASE_CN_DIGIT_VALUES = {
+    "零": "0",
+    "〇": "0",
+    "一": "1",
+    "二": "2",
+    "两": "2",
+    "三": "3",
+    "四": "4",
+    "五": "5",
+    "六": "6",
+    "七": "7",
+    "八": "8",
+    "九": "9",
+}
+
+
+def _phase_number_text(name: str) -> str:
+    """提取可比期数：“3期”“三期”“第3期”统一成数字串，无期数返回空串。"""
+    match = _PHASE_TOKEN_PATTERN.search(name or "")
+    if not match:
+        return ""
+    text = match.group(1)
+    if text.isdigit():
+        return text
+    if "十" in text:
+        left, _, right = text.partition("十")
+        tens = int(_PHASE_CN_DIGIT_VALUES[left]) if left else 1
+        ones = int(_PHASE_CN_DIGIT_VALUES[right]) if right else 0
+        return str(tens * 10 + ones)
+    digits = [_PHASE_CN_DIGIT_VALUES.get(char) for char in text]
+    if any(digit is None for digit in digits):
+        return text
+    return str(int("".join(digits)))
+
 
 def _normalize_community_name(name: str) -> str:
     """规范化抓取到的小区名，忽略标点、空白和末尾分期标识。"""
@@ -496,7 +532,14 @@ def community_name_match(request_name: str, captured_name: str) -> bool:
 
     允许空白、标点、分期和明确的前缀/简称差异；不读取页面 DOM、房源标题
     或搜索关键词，也不使用公共片段相似度猜测，避免同品牌或同产品系小区误匹配。
+
+    双方都带期数且期数不同时不匹配，避免合并页或相邻期页面把其他期的房源
+    归入当前询价；任一方未带期数时维持原有宽松匹配，兼容平台合并页双写。
     """
+    request_phase = _phase_number_text(request_name)
+    captured_phase = _phase_number_text(captured_name)
+    if request_phase and captured_phase and request_phase != captured_phase:
+        return False
     nr = _normalize_community_name(request_name)
     np_ = _normalize_community_name(captured_name)
     if not nr or not np_:
