@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import sqlite3
 from datetime import datetime, timezone
@@ -20,17 +21,23 @@ from app.community_data.models import (
     GEOCODE_SUCCESS,
 )
 from app.community_data.normalization import (
+    canonical_name_parts,
     group_name,
     normalize_name,
+    paren_name_variants,
     phase_key,
     split_phase,
 )
 from app.persistence.sqlite import sqlite_connection
 
 
+log = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = PROJECT_ROOT / "persist" / "community_data.sqlite3"
 SCHEMA_PATH = PROJECT_ROOT / "sql" / "community_data_schema.sql"
+
+# 简称兜底要求较短一方至少拥有的字符数，防止“花园”这类通名误配。
+MIN_ABBREVIATED_NAME_CHARS = 3
 
 
 class CommunityDatabase:
@@ -106,8 +113,8 @@ class CommunityDatabase:
                     community_group_id, city, administrative_district, district,
                     name, normalized_name, phase, phase_key, aliases_json,
                     build_year, address, geocode_status, remark,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    estate_type, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     group_row["community_group_id"],
@@ -123,6 +130,7 @@ class CommunityDatabase:
                     address,
                     GEOCODE_PENDING,
                     seed.remark,
+                    seed.estate_type,
                     now,
                     now,
                 ),
@@ -140,13 +148,20 @@ class CommunityDatabase:
             return _row_to_record(row)
 
     def find(self, city: str, administrative_district: str, community_name: str) -> list[CommunityRecord]:
-        """按城市、行政区和小区名查询，支持未带期数的组名查询。"""
+        """按城市、行政区和小区名查询。
+
+        匹配分三段，命中即返回：
+        1. 精确匹配：正式名或别名的规范化字符串相等。
+        2. 归一兜底：期数归一（“3期”等同“三期”）、尾部括号期数和括号主副名。
+        3. 简称兜底：正式名包含简称，如“泰瑞府”对“深业泰瑞府”。
+
+        期数约束：带期数的查询只返回该期记录；不带期数的查询不允许展开
+        整组期数——命中多条记录时视为粗粒度查询，拒绝并返回空列表，
+        调用方需指定期数后重查。
+        """
         city = city.strip()
         administrative_district = administrative_district.strip()
-        query_name = normalize_name(community_name)
-        query_group_name, query_phase = split_phase(community_name)
-        normalized_group = normalize_name(query_group_name)
-        normalized_query_phase = phase_key(query_phase)
+        query_phase = split_phase(community_name)[1]
 
         with self._connect() as connection:
             rows = connection.execute(
@@ -159,29 +174,148 @@ class CommunityDatabase:
             ).fetchall()
 
         records = [_row_to_record(row) for row in rows]
+        matchers = (
+            ("exact", self._match_by_exact_name),
+            ("normalized_phase", self._match_by_normalized_phase),
+            ("abbreviated_name", self._match_by_abbreviated_name),
+        )
+        for tier, matcher in matchers:
+            matched = matcher(records, community_name)
+            if not matched:
+                continue
+            if tier != "exact":
+                log.info(
+                    "小区查询命中%s兜底: city=%s district=%s name=%s matched=%s",
+                    tier,
+                    city,
+                    administrative_district,
+                    community_name,
+                    [record.community_id for record in matched],
+                )
+            if query_phase is None and len(matched) > 1:
+                log.warning(
+                    "小区查询未指定期数且命中多条记录，已拒绝（需指定期数）: "
+                    "city=%s district=%s name=%s matched=%s",
+                    city,
+                    administrative_district,
+                    community_name,
+                    [record.name for record in matched],
+                )
+                return []
+            return matched
+        return []
+
+    def _match_by_exact_name(
+        self,
+        records: list[CommunityRecord],
+        community_name: str,
+    ) -> list[CommunityRecord]:
+        """精确匹配：规范化字符串相等，不展开组内其他期数。
+
+        带期数查询按“主名+期数”匹配正式名或带期数别名；不带期数查询只认
+        正式名或别名的完整相等，正式名相等优先于别名相等。
+        """
+        query_name = normalize_name(community_name)
+        query_group_name, query_phase = split_phase(community_name)
+
         if query_phase:
+            normalized_group = normalize_name(query_group_name)
             return [
                 record
                 for record in records
                 if _matches_name_and_phase(
                     record,
                     normalized_group,
-                    normalized_query_phase,
+                    phase_key(query_phase),
                 )
             ]
 
-        matching_group_ids = {
-            record.community_group_id
+        by_name = [
+            record
             for record in records
-            if normalize_name(split_phase(record.name)[0]) == normalized_group
-            or any(normalize_name(alias) == query_name for alias in record.aliases)
-            or normalize_name(record.name) == query_name
-        }
+            if normalize_name(record.name) == query_name
+        ]
+        if by_name:
+            return by_name
         return [
             record
             for record in records
-            if record.community_group_id in matching_group_ids
+            if any(normalize_name(alias) == query_name for alias in record.aliases)
         ]
+
+    def _match_by_normalized_phase(
+        self,
+        records: list[CommunityRecord],
+        community_name: str,
+    ) -> list[CommunityRecord]:
+        """期数归一兜底：“3期”与“三期”视为同一期，括号期数与主副名参与匹配。"""
+        query_parts = [
+            canonical_name_parts(value)
+            for value in (community_name, *paren_name_variants(community_name))
+        ]
+        matched_ids: set[int] = set()
+        for record in records:
+            if any(
+                record_base == query_base
+                and (query_phase is None or record_phase == query_phase)
+                for record_base, record_phase in (
+                    canonical_name_parts(value)
+                    for value in self._record_name_variants(record)
+                )
+                for query_base, query_phase in query_parts
+            ):
+                matched_ids.add(record.community_id)
+        return self._records_by_ids(records, matched_ids)
+
+    def _match_by_abbreviated_name(
+        self,
+        records: list[CommunityRecord],
+        community_name: str,
+    ) -> list[CommunityRecord]:
+        """简称兜底：正式名或别名以后缀包含简称，如“泰瑞府”对“深业泰瑞府”。"""
+        query_parts = [
+            canonical_name_parts(value)
+            for value in (community_name, *paren_name_variants(community_name))
+        ]
+        matched_ids: set[int] = set()
+        for record in records:
+            for record_base, record_phase in (
+                canonical_name_parts(value)
+                for value in self._record_name_variants(record)
+            ):
+                for query_base, query_phase in query_parts:
+                    if not record_base or not query_base:
+                        continue
+                    if (
+                        min(len(record_base), len(query_base))
+                        < MIN_ABBREVIATED_NAME_CHARS
+                    ):
+                        continue
+                    if not (
+                        record_base.endswith(query_base)
+                        or query_base.endswith(record_base)
+                    ):
+                        continue
+                    if query_phase is not None and record_phase != query_phase:
+                        continue
+                    matched_ids.add(record.community_id)
+        return self._records_by_ids(records, matched_ids)
+
+    def _record_name_variants(self, record: CommunityRecord) -> tuple[str, ...]:
+        """参与匹配的记录侧名称：正式名、别名和正式名的括号主副名。"""
+        return (
+            record.name,
+            *record.aliases,
+            *paren_name_variants(record.name),
+        )
+
+    def _records_by_ids(
+        self,
+        records: list[CommunityRecord],
+        community_ids: set[int],
+    ) -> list[CommunityRecord]:
+        """返回命中的具体记录，保持查询顺序。"""
+        return [record for record in records if record.community_id in community_ids]
 
     def get_by_id(self, community_id: int) -> Optional[CommunityRecord]:
         """按正式 community_id 读取一条记录，供其它模块做归属校验。"""
@@ -311,6 +445,35 @@ class CommunityDatabase:
                 (year, _now(), community_id),
             )
 
+    def add_alias(self, community_id: int, alias: str) -> bool:
+        """为记录追加人工确认的别名；别名已存在时不修改，返回是否新增。"""
+        text = str(alias or "").strip()
+        if not text:
+            raise ValueError("alias 不能为空")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT aliases_json FROM communities WHERE community_id = ?",
+                (int(community_id),),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"community_id 不存在: {community_id}")
+            try:
+                aliases = list(json.loads(row["aliases_json"]))
+            except (TypeError, json.JSONDecodeError):
+                aliases = []
+            if any(normalize_name(existing) == normalize_name(text) for existing in aliases):
+                return False
+            aliases.append(text)
+            connection.execute(
+                """
+                UPDATE communities
+                SET aliases_json = ?, updated_at = ?
+                WHERE community_id = ?
+                """,
+                (json.dumps(aliases, ensure_ascii=False), _now(), int(community_id)),
+            )
+            return True
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -357,6 +520,7 @@ def _row_to_record(row: sqlite3.Row) -> CommunityRecord:
         aliases = tuple(json.loads(row["aliases_json"]))
     except (TypeError, json.JSONDecodeError):
         aliases = ()
+    keys = row.keys()
     return CommunityRecord(
         community_id=int(row["community_id"]),
         community_group_id=int(row["community_group_id"]),
@@ -375,6 +539,7 @@ def _row_to_record(row: sqlite3.Row) -> CommunityRecord:
         geocode_level=row["geocode_level"],
         geocode_reliability=row["geocode_reliability"],
         remark=row["remark"],
+        estate_type=row["estate_type"] if "estate_type" in keys else None,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
