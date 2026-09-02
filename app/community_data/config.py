@@ -55,3 +55,6 @@ NEARBY_RADIUS_METERS = _positive_float_from_env(
     NEARBY_RADIUS_ENV,
     DEFAULT_NEARBY_RADIUS_METERS,
 )
+# 附近排序的距离分带上界（米）：[0, 2000) 第一带、[2000, 5000) 第二带、
+# 其余到半径为止第三带；更近的带整体优先，带内按建成年份差距排序。
+NEARBY_DISTANCE_BAND_METERS: tuple[float, ...] = (2_000.0, 5_000.0)

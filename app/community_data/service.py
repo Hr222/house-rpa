@@ -11,7 +11,7 @@ from typing import Protocol
 from app.community_data import config
 from app.community_data.database import CommunityDatabase
 from app.community_data.geocoder import GeocodeResult, TencentGeocoder
-from app.community_data.models import COORDINATE_SYSTEM, CommunityRecord, CommunitySeed
+from app.community_data.models import COORDINATE_SYSTEM, CommunityRecord, CommunitySeed, EstateType
 
 
 log = logging.getLogger(__name__)
@@ -42,9 +42,17 @@ class CommunityDataService:
         city: str,
         administrative_district: str,
         community_name: str,
+        estate_type: str = EstateType.RESIDENTIAL.value,
     ) -> list[CommunityRecord]:
-        """只查询人工维护的小区记录，不在请求链路自动新增或地理编码。"""
-        return self.database.find(city, administrative_district, community_name)
+        """只查询人工维护的小区记录，不在请求链路自动新增或地理编码。
+
+        默认只返回住宅；estate_type 传 None 时返回全部类型，
+        由调用方自行按 EstateType 分类处理。
+        """
+        records = self.database.find(city, administrative_district, community_name)
+        if estate_type is None:
+            return records
+        return [record for record in records if record.estate_type == estate_type]
 
     def add_seed(self, seed: CommunitySeed) -> CommunityRecord:
         """导入一次性基础数据，不自动调用腾讯地图。"""
@@ -76,9 +84,10 @@ class CommunityDataService:
     ) -> list[CommunityRecord]:
         """查询附近小区。
 
-        默认只返回建成年份与中心小区相差不超过五年的记录，始终优先按
-        地理距离排序；距离相同时再参考建成年份差距。关闭年份筛选时，
-        按距离返回小区组及其全部期数。
+        默认只返回建成年份与中心小区相差不超过五年的候选；每条期数
+        记录算一条独立数据，按距离分带排序：更近的距离带整体优先，
+        同一条带内建成年份差距小的优先，仍相同时按距离，最多返回
+        limit 条。关闭年份筛选时，按距离返回前 limit 条记录。
         """
         if limit <= 0:
             raise ValueError("limit 必须是正整数")
@@ -114,11 +123,11 @@ class CommunityDataService:
             return []
 
         candidates = self.database.list_city_with_coordinates(city)
-        group_distances: dict[int, float] = {}
         candidate_distances: dict[int, float] = {}
         eligible_candidate_ids: set[int] = set()
-        group_year_differences: dict[int, int] = {}
         for candidate in candidates:
+            if candidate.estate_type != EstateType.RESIDENTIAL.value:
+                continue
             if candidate.community_group_id in origin_group_ids:
                 continue
             distance = min(
@@ -128,68 +137,49 @@ class CommunityDataService:
             if distance > config.NEARBY_RADIUS_METERS:
                 continue
             candidate_distances[candidate.community_id] = distance
-            if filter_by_build_year:
-                if candidate.build_year is None:
-                    continue
-                year_difference = min(
-                    abs(candidate.build_year - origin_build_year)
-                    for origin_build_year in origin_build_years
-                )
-                if year_difference > BUILD_YEAR_MATCH_RANGE:
-                    continue
-                eligible_candidate_ids.add(candidate.community_id)
-                current_year_difference = group_year_differences.get(candidate.community_group_id)
-                if current_year_difference is None or year_difference < current_year_difference:
-                    group_year_differences[candidate.community_group_id] = year_difference
-            current = group_distances.get(candidate.community_group_id)
-            if current is None or distance < current:
-                group_distances[candidate.community_group_id] = distance
+            if not filter_by_build_year:
+                continue
+            if candidate.build_year is None:
+                continue
+            year_difference = min(
+                abs(candidate.build_year - origin_build_year)
+                for origin_build_year in origin_build_years
+            )
+            if year_difference > BUILD_YEAR_MATCH_RANGE:
+                continue
+            eligible_candidate_ids.add(candidate.community_id)
 
-        if filter_by_build_year:
-            group_distances = {
-                group_id: distance
-                for group_id, distance in group_distances.items()
-                if group_id in group_year_differences
-            }
-
-        selected_groups = [
-            group_id
-            for group_id, _distance in sorted(
-                group_distances.items(),
-                key=lambda item: (
-                    item[1],
-                    group_year_differences[item[0]],
-                    item[0],
-                )
-                if filter_by_build_year
-                else (item[1], item[0]),
-            )[:limit]
+        eligible_ids = eligible_candidate_ids if filter_by_build_year else set(candidate_distances)
+        eligible_records = [
+            candidate
+            for candidate in candidates
+            if candidate.community_id in eligible_ids
         ]
-        if not selected_groups:
-            return []
-
-        expanded = self.database.list_by_group_ids(selected_groups)
-        eligible_ids = eligible_candidate_ids if filter_by_build_year else candidate_distances
-        expanded = [record for record in expanded if record.community_id in eligible_ids]
-        group_order = {group_id: index for index, group_id in enumerate(selected_groups)}
-        expanded.sort(
-            key=lambda record: (
-                group_order[record.community_group_id],
-                (
-                    min(abs(record.build_year - origin_build_year) for origin_build_year in origin_build_years)
-                    if filter_by_build_year and record.build_year is not None
-                    else 0
-                ),
-                record.phase or "",
-                record.community_id,
+        if filter_by_build_year:
+            eligible_records.sort(
+                key=lambda record: (
+                    _distance_band_index(candidate_distances[record.community_id]),
+                    min(
+                        abs(record.build_year - origin_build_year)
+                        for origin_build_year in origin_build_years
+                    ),
+                    candidate_distances[record.community_id],
+                    record.community_group_id,
+                    record.phase or "",
+                    record.community_id,
+                )
             )
-        )
+        else:
+            eligible_records.sort(
+                key=lambda record: (
+                    candidate_distances[record.community_id],
+                    record.community_group_id,
+                    record.community_id,
+                )
+            )
         return [
-            replace(
-                record,
-                distance_meters=candidate_distances.get(record.community_id),
-            )
-            for record in expanded
+            replace(record, distance_meters=candidate_distances[record.community_id])
+            for record in eligible_records[:limit]
         ]
 
 
@@ -212,6 +202,14 @@ def _haversine_meters(
     return 2 * EARTH_RADIUS_METERS * math.asin(math.sqrt(value))
 
 
+def _distance_band_index(distance_meters: float) -> int:
+    """距离分带序号：数值越小表示越近的距离带，组排序时整体优先。"""
+    for index, boundary in enumerate(config.NEARBY_DISTANCE_BAND_METERS):
+        if distance_meters < boundary:
+            return index
+    return len(config.NEARBY_DISTANCE_BAND_METERS)
+
+
 _default_service: CommunityDataService | None = None
 
 
@@ -226,12 +224,14 @@ def resolve_communities(
     city: str,
     administrative_district: str,
     community_name: str,
+    estate_type: str = EstateType.RESIDENTIAL.value,
 ) -> list[CommunityRecord]:
-    """RPA 对外查询插口。"""
+    """RPA 对外查询插口，默认只返回住宅。"""
     return _get_default_service().resolve_communities(
         city,
         administrative_district,
         community_name,
+        estate_type,
     )
 
 

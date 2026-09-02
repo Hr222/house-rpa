@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 
 
@@ -11,6 +12,16 @@ GEOCODE_PENDING = "PENDING"
 GEOCODE_SUCCESS = "SUCCESS"
 GEOCODE_FAILED = "FAILED"
 COORDINATE_SYSTEM = "GCJ-02"
+
+
+class EstateType(str, Enum):
+    """住宅类型标识，成员值直接存入 communities.estate_type。"""
+
+    RESIDENTIAL = "住宅"
+    APARTMENT = "公寓"
+    URBAN_VILLAGE = "城中村"
+    NON_RESIDENTIAL = "非住宅"
+    UNUSABLE = "不可用"
 
 
 @dataclass(frozen=True)
@@ -24,6 +35,7 @@ class CommunitySeed:
     aliases: tuple[str, ...] = ()
     build_year: Optional[int] = None
     remark: Optional[str] = None
+    estate_type: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -50,3 +62,4 @@ class CommunityRecord:
     created_at: str
     updated_at: str
     distance_meters: Optional[float] = None
+    estate_type: Optional[str] = None
