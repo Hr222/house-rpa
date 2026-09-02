@@ -402,35 +402,36 @@ def extract_community_card(html: str, expected_district: str) -> Optional[Commun
     卡片文本形如「和健云谷(宿舍) 配套齐全 龙岗 坪地 新旺路8号 公寓住宅」，
     行政区不匹配时抛 RuntimeError（由调用方按别名兜底继续）。
     """
-    m = re.search(r'href="(?:https?://shenzhen\.anjuke\.com)?/community/view/(\d+)"', html or "")
-    if not m:
-        return None
-    chunk = html[max(0, m.start() - 3500): m.end() + 800]
-    sec = chunk.rfind("<section")
-    text = re.sub(r"<[^>]+>", " ", chunk[sec:] if sec >= 0 else chunk)
-    text = re.sub(r"\s+", " ", text).strip()
-    title_m = re.match(r"([^\s]{2,40})", text)
-    title = title_m.group(1) if title_m else ""
-    # 行政区安全核对：在卡片正文（跳过标题）里找与期望行政区一致的独立 token，
-    # 命中即通过，片区取其后的一个 token（地址可能不带号，不能用地址格式反推）。
-    stem = normalize_district(expected_district)
-    body = text[len(title):]
-    dist_m = re.search(rf"(?:^|\s)({re.escape(stem)}区?)(?=\s|$)", body)
-    if not dist_m:
-        raise RuntimeError(
-            f"小区卡片行政区不匹配：卡片[{text[:80]}]，期望 {expected_district}，拒绝自动选择"
+    sec_re = re.compile(r'<section[^>]*community-info[^>]*>.*?</section>', re.I | re.S)
+    for sec_m in sec_re.finditer(html or ""):
+        block = sec_m.group(0)
+        vm = re.search(r'/community/view/(\d+)', block)
+        if not vm:
+            continue
+        text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", block)).strip()
+        title_m = re.match(r"([^\s]{2,40})", text)
+        title = title_m.group(1) if title_m else ""
+        # 行政区安全核对：在卡片正文（跳过标题）里找与期望行政区一致的独立 token，
+        # 命中即通过，片区取其后的一个 token（地址可能不带号，不能用地址格式反推）。
+        stem = normalize_district(expected_district)
+        body = text[len(title):]
+        dist_m = re.search(rf"(?:^|\s)({re.escape(stem)}区?)(?=\s|$)", body)
+        if not dist_m:
+            raise RuntimeError(
+                f"小区卡片行政区不匹配：卡片[{text[:80]}]，期望 {expected_district}，拒绝自动选择"
+            )
+        platform_district = dist_m.group(1)
+        rest = body[dist_m.end():].strip()
+        platform_area = rest.split(" ")[0] if rest else ""
+        return CommunityLinkCandidate(
+            community_name=title,
+            href=f"/community/view/{vm.group(1)}",
+            comm_id=vm.group(1),
+            platform_administrative_district=platform_district,
+            platform_area=platform_area,
+            context=text[:500],
         )
-    platform_district = dist_m.group(1)
-    rest = body[dist_m.end():].strip()
-    platform_area = rest.split(" ")[0] if rest else ""
-    return CommunityLinkCandidate(
-        community_name=title,
-        href=f"/community/view/{m.group(1)}",
-        comm_id=m.group(1),
-        platform_administrative_district=platform_district,
-        platform_area=platform_area,
-        context=text[:500],
-    )
+    return None
 
 
 async def search_and_extract_candidate(
