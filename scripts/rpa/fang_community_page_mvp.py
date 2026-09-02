@@ -1,11 +1,24 @@
 # -*- coding: utf-8 -*-
-"""房天下小区挂牌页 URL 初始化 MVP。
+"""房天下小区挂牌页 URL 初始化 MVP（批量，支持主数据别名兜底与软风控自愈）。
 
-只验证单个小区的挂牌页入口：搜索结果经结构化房源小区名确认后，读取小区名链接
-`/house-xm{id}/`，实打开后再次校验并输出可记录的挂牌页 URL。
+流程：人工登录/验证（可选）→ 逐个小区搜索 → 结构化房源确认小区后读取
+小区名链接 `/house-xm{id}/` → 实际打开挂牌页再次校验并输出可记录的挂牌页 URL。
+
+给定名未匹配到目标小区时，查询小区主数据（只读）换正式名与其余别名重试；
+全部候选名失败才判定该小区失败。单个小区失败只记录并继续，不关闭浏览器；
+浏览器仅在全部小区处理完并经人工确认后才退出。
+
+软风控自愈：单次搜索超过 ``SOFT_BLOCK_SECONDS``（45s）判定触发风控，
+自动关闭浏览器并重开新会话重试当前小区；连续 ``MAX_CONSECUTIVE_RESTARTS``
+（2）次新会话仍触发则判定 IP 级限流，停止批次交人工。
+
+本脚本只用于独立验证，不写入数据库，也不接入正式采集链路；运行结果通过
+``--result-file`` 输出 JSON，由编排层负责落库。
 
 用法：
-  python -m scripts.rpa.fang_community_page_mvp --manual-login --community "翰熙典居"
+  python -m scripts.rpa.fang_community_page_mvp --manual-login \
+      --city "深圳" --administrative-district "龙岗区" \
+      --community "翰熙典居" "远洋新干线"
 """
 
 from __future__ import annotations
@@ -13,14 +26,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 from html import unescape
+import json
 import logging
 from pathlib import Path
 import re
+import time
 from typing import Optional
 from urllib.parse import urljoin, urlparse
 
 import nodriver as uc
 
+from app.community_data import resolve_communities
 from app.rpa.core import config
 from app.rpa.parsers import fang as fang_parsers
 from app.rpa.platforms.base import community_name_match, has_matching_community_snapshots
@@ -33,10 +49,24 @@ from app.rpa.utils.logging_utils import setup_logging
 setup_logging()
 log = logging.getLogger(__name__)
 
+# 软风控参数：单次“搜索+取结果”超过该秒数判定触发风控（正常 15~18s、风控停滞 60~116s）；
+# 连续 N 次换新浏览器仍触发则判定 IP 级限流，停止批次交人工。
+SOFT_BLOCK_SECONDS = 45.0
+MAX_CONSECUTIVE_RESTARTS = 2
+
+
+class SoftBlockError(RuntimeError):
+    """搜索响应超过阈值，判定触发软风控。"""
+
 
 async def dump_html(page, name: str) -> Optional[Path]:
     """在开启 --debug 时导出当前 HTML。"""
     return await shared_dump_html(page, name, logger=log)
+
+
+def _safe_file_token(value: str) -> str:
+    """把小区名转成可用于导出文件名的安全片段。"""
+    return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", value or "").strip("_") or "unnamed"
 
 
 def _blocked_reason(url: str, html: str, expected_host: str) -> Optional[str]:
@@ -228,13 +258,139 @@ def find_matching_listing_url(
     return None
 
 
+def build_candidate_names(city: str, administrative_district: str, community_name: str) -> list[str]:
+    """查询小区主数据构造搜索候选名：给定名优先，正式名与其余别名兜底。"""
+    names = [community_name]
+    try:
+        records = resolve_communities(city, administrative_district, community_name)
+    except Exception as exc:
+        log.warning("查询小区主数据失败，仅使用给定名搜索：%s（%s）", community_name, exc)
+        return names
+    if len(records) != 1:
+        log.info("主数据未唯一命中（%d 条），仅使用给定名搜索：%s", len(records), community_name)
+        return names
+    for candidate in [records[0].name, *(records[0].aliases or ())]:
+        normalized = re.sub(r"\s+", "", str(candidate or ""))
+        if normalized and normalized not in names:
+            names.append(normalized)
+    log.info("小区[%s]候选搜索名：%s", community_name, names)
+    return names
+
+
+async def search_and_extract_listing(
+    page,
+    *,
+    start_url: str,
+    expected_host: str,
+    candidate_name: str,
+) -> Optional[str]:
+    """按单个候选名搜索并提取目标小区挂牌页链接；未命中返回 None。"""
+    await page.get(start_url)
+    await page
+    await asyncio.sleep(2)
+    await ensure_accessible(page, label=f"首页[{candidate_name}]", expected_host=expected_host)
+
+    search_started = time.perf_counter()
+    await search_community(page, candidate_name)
+    result_html = await ensure_accessible(
+        page,
+        label=f"搜索结果页[{candidate_name}]",
+        expected_host=expected_host,
+    )
+    elapsed = time.perf_counter() - search_started
+    if elapsed >= SOFT_BLOCK_SECONDS:
+        raise SoftBlockError(
+            f"搜索名[{candidate_name}]耗时 {elapsed:.0f}s ≥ {SOFT_BLOCK_SECONDS:.0f}s，判定触发软风控"
+        )
+    await dump_html(page, f"fang_community_page_search_{_safe_file_token(candidate_name)}")
+
+    snapshots = fang_parsers.parse_listing_snapshots(result_html)
+    if not has_matching_community_snapshots(snapshots, candidate_name):
+        examples = sorted({item.community_name for item in snapshots if item.community_name})[:5]
+        log.info(
+            "搜索名[%s]结构化房源未匹配目标小区，页面小区示例：%s",
+            candidate_name,
+            examples,
+        )
+        return None
+
+    result_url = page.target.url or start_url
+    listing_page_url = find_matching_listing_url(result_html, candidate_name, result_url)
+    if listing_page_url is None:
+        log.info("搜索名[%s]未找到目标小区的 /house-xm 挂牌页链接", candidate_name)
+        return None
+    return listing_page_url
+
+
+async def collect_community(
+    page,
+    *,
+    start_url: str,
+    expected_host: str,
+    city: str,
+    administrative_district: str,
+    community_name: str,
+) -> dict:
+    """处理单个小区：候选名兜底搜索 → 打开挂牌页复核 → 返回结果摘要。"""
+    names = build_candidate_names(city, administrative_district, community_name)
+    listing_page_url: Optional[str] = None
+    matched_name = ""
+    for name in names:
+        listing_page_url = await search_and_extract_listing(
+            page,
+            start_url=start_url,
+            expected_host=expected_host,
+            candidate_name=name,
+        )
+        if listing_page_url is not None:
+            matched_name = name
+            break
+    if listing_page_url is None:
+        raise RuntimeError(f"候选名 {names} 均未匹配到目标小区挂牌页链接，拒绝自动选择")
+
+    await page.get(listing_page_url)
+    await page
+    await asyncio.sleep(2)
+    listing_html = await ensure_accessible(
+        page,
+        label="小区挂牌页",
+        expected_host=expected_host,
+    )
+    await dump_html(page, f"fang_community_page_listing_{_safe_file_token(community_name)}")
+    listing_snapshots = fang_parsers.parse_listing_snapshots(listing_html)
+    if not has_matching_community_snapshots(listing_snapshots, matched_name):
+        raise RuntimeError(f"挂牌页未匹配目标小区：{matched_name}")
+
+    actual_listing_url = page.target.url or listing_page_url
+    if "/house-xm" not in urlparse(actual_listing_url).path:
+        raise RuntimeError(f"挂牌页跳转到非小区 URL：{actual_listing_url}")
+
+    return {
+        "city": city,
+        "administrative_district": administrative_district,
+        "community_name": community_name,
+        "matched_search_name": matched_name,
+        "listing_page_url": actual_listing_url,
+        "structured_listing_count": len(listing_snapshots),
+    }
+
+
 async def wait_for_manual_close() -> None:
     """在结束前保留浏览器，方便核验实际页面。"""
-    await asyncio.to_thread(input, "\n浏览器保持打开。核对完成后按回车结束脚本...\n")
+    await asyncio.to_thread(
+        input, "\n全部小区已处理完成。你确认无误后按回车结束脚本（浏览器将关闭）...\n"
+    )
 
 
-async def main(city: str, community_name: str, manual_login: bool, debug: bool) -> None:
-    """执行一次房天下小区挂牌页 URL 初始化。"""
+async def main(
+    city: str,
+    administrative_district: str,
+    community_names: list[str],
+    manual_login: bool,
+    debug: bool,
+    result_file: Optional[str] = None,
+) -> None:
+    """批量执行房天下小区挂牌页 URL 初始化，单小区失败不中断。"""
     if debug:
         set_debug_mode(True)
 
@@ -263,70 +419,112 @@ async def main(city: str, community_name: str, manual_login: bool, debug: bool) 
         )
         await dump_html(page, "fang_community_page_home")
 
-        await search_community(page, community_name)
-        result_html = await ensure_accessible(
-            page,
-            label="搜索结果页",
-            expected_host=expected_host,
-        )
-        await dump_html(page, "fang_community_page_search")
+        summaries: list[dict] = []
+        consecutive_restarts = 0
+        index = 0
+        while index < len(community_names):
+            community_name = community_names[index]
+            try:
+                summary = await collect_community(
+                    page,
+                    start_url=start_url,
+                    expected_host=expected_host,
+                    city=city,
+                    administrative_district=administrative_district,
+                    community_name=community_name,
+                )
+                consecutive_restarts = 0
+                index += 1
+                summary["success"] = True
+                summaries.append(summary)
+                print(f"\n[成功] {community_name}")
+                print(f"城市：{summary['city']}")
+                print(f"行政区：{summary['administrative_district']}")
+                print(f"命中搜索名：{summary['matched_search_name']}")
+                print(f"listing_page_url：{summary['listing_page_url']}")
+                print(f"挂牌页结构化房源：{summary['structured_listing_count']} 条")
+            except SoftBlockError as exc:
+                consecutive_restarts += 1
+                if consecutive_restarts > MAX_CONSECUTIVE_RESTARTS:
+                    log.error(
+                        "连续 %d 次新会话仍触发软风控，疑似 IP 级限流，停止批次（已保留 %d 条结果）",
+                        consecutive_restarts - 1,
+                        len(summaries),
+                    )
+                    print(f"\n[停止] 连续新会话仍触发风控，请人工介入后重跑剩余小区")
+                    break
+                log.warning(
+                    "判定触发软风控（%s），关闭浏览器重开新会话，重试小区[%s]（第 %d 次重开）",
+                    exc,
+                    community_name,
+                    consecutive_restarts,
+                )
+                browser.stop()
+                browser = await uc.start(
+                    headless=False,
+                    browser_executable_path=config.BROWSER_PATH,
+                    lang="zh-CN",
+                )
+                page = await browser.get(start_url)
+                await page
+                await asyncio.sleep(3)
+                await ensure_accessible(
+                    page,
+                    label="重开首页",
+                    expected_host=expected_host,
+                )
+            except Exception as exc:
+                consecutive_restarts = 0
+                index += 1
+                log.error("小区[%s]处理失败，继续下一个：%s", community_name, exc)
+                summaries.append(
+                    {"community_name": community_name, "success": False, "error": str(exc)}
+                )
+                print(f"\n[失败] {community_name} → {exc}")
 
-        snapshots = fang_parsers.parse_listing_snapshots(result_html)
-        if not has_matching_community_snapshots(snapshots, community_name):
-            examples = sorted({item.community_name for item in snapshots if item.community_name})[:5]
-            raise RuntimeError(
-                f"搜索结果未在结构化房源中匹配目标小区：{community_name}；"
-                f"页面小区示例：{examples}"
-            )
-
-        result_url = page.target.url or start_url
-        listing_page_url = find_matching_listing_url(
-            result_html,
-            community_name,
-            result_url,
-        )
-        if listing_page_url is None:
-            raise RuntimeError(f"未找到目标小区的 /house-xm 挂牌页链接：{community_name}")
-
-        await page.get(listing_page_url)
-        await page
-        await asyncio.sleep(2)
-        listing_html = await ensure_accessible(
-            page,
-            label="小区挂牌页",
-            expected_host=expected_host,
-        )
-        await dump_html(page, "fang_community_page_listing")
-        listing_snapshots = fang_parsers.parse_listing_snapshots(listing_html)
-        if not has_matching_community_snapshots(listing_snapshots, community_name):
-            raise RuntimeError(f"挂牌页未匹配目标小区：{community_name}")
-
-        actual_listing_url = page.target.url or listing_page_url
-        if "/house-xm" not in urlparse(actual_listing_url).path:
-            raise RuntimeError(f"挂牌页跳转到非小区 URL：{actual_listing_url}")
-        print(f"挂牌页 URL: {actual_listing_url}")
+        print("\n===== 批量结果汇总 =====")
+        for item in summaries:
+            if item["success"]:
+                print(
+                    f"[成功] {item['community_name']}：命中搜索名={item['matched_search_name']}，"
+                    f"listing={item['listing_page_url']}"
+                )
+            else:
+                print(f"[失败] {item['community_name']}：{item['error']}")
         log.info(
-            "目标小区挂牌页已确认：%s（结构化房源 %d 条）",
-            community_name,
-            len(listing_snapshots),
+            "批量处理完成：共 %d 个，成功 %d 个",
+            len(summaries),
+            sum(1 for item in summaries if item["success"]),
         )
 
+        result_path = Path(result_file) if result_file else (
+            Path("results") / "community_page" / f"fang_{time.strftime('%Y%m%d_%H%M%S')}.json"
+        )
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(
+            json.dumps(summaries, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"结果已写 {result_path}")
+
         await wait_for_manual_close()
-    except Exception:
-        if page is not None:
-            await dump_html(page, "fang_community_page_error")
-        log.exception("房天下小区页面 URL 发现失败")
-        await wait_for_manual_close()
-        raise
     finally:
         browser.stop()
 
 
 def cli() -> None:
     """解析命令行参数并启动 nodriver 协程。"""
-    parser = argparse.ArgumentParser(description="房天下小区挂牌页 URL 初始化 MVP")
+    parser = argparse.ArgumentParser(
+        description="房天下小区挂牌页 URL 初始化 MVP（批量，支持别名兜底）"
+    )
     parser.add_argument("--city", default="深圳", help="城市名称，默认：深圳")
-    parser.add_argument("--community", default="翰熙典居", help="目标小区名称")
+    parser.add_argument("--administrative-district", required=True, help="主数据行政区")
+    parser.add_argument(
+        "--community",
+        required=True,
+        nargs="+",
+        help="目标小区名称（可多个），支持主数据别名，未命中时自动按正式名/别名兜底重试",
+    )
     parser.add_argument(
         "--manual-login",
         action="store_true",
@@ -337,13 +535,20 @@ def cli() -> None:
         action="store_true",
         help="导出首页、搜索结果和挂牌页 HTML 到 debug 目录。",
     )
+    parser.add_argument(
+        "--result-file",
+        default=None,
+        help="结果 JSON 输出路径；缺省写 results/community_page/fang_<时间戳>.json",
+    )
     args = parser.parse_args()
     uc.loop().run_until_complete(
         main(
             city=args.city,
-            community_name=args.community,
+            administrative_district=args.administrative_district,
+            community_names=args.community,
             manual_login=args.manual_login,
             debug=args.debug,
+            result_file=args.result_file,
         )
     )
 
