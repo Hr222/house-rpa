@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""RPA platform collection service."""
+"""RPA 平台采集服务。"""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 
 
 class RPAInquiryService:
-    """Manage resident platform sessions and return raw collection results only."""
+    """管理平台常驻会话，只返回原始采集结果。"""
 
     def __init__(self, browsers: dict, adapters: Iterable[PlatformAdapter]):
         self.browsers = browsers
@@ -51,7 +51,7 @@ class RPAInquiryService:
         platform_codes: Optional[list[str]] = None,
         before_collection_complete: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> RPACollectionResult:
-        """Collect platforms without price aggregation or final decisions."""
+        """只做平台采集，不做价格聚合与最终决策。"""
         reset_manual_verify_events()
         log.info(
             "查询城市: %s, 小区: %s, 面积: %.1f㎡",

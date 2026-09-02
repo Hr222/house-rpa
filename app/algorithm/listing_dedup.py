@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Conservative listing deduplication used by price estimation."""
+"""估价使用的保守房源去重。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class ListingDuplicateGroup(Generic[T]):
-    """A high-confidence cross-platform duplicate group."""
+    """高置信度的跨平台重复组。"""
 
     members: tuple[T, ...]
     reason: str
@@ -26,7 +26,7 @@ class ListingDuplicateGroup(Generic[T]):
 
 @dataclass(frozen=True)
 class ListingDeduplicationResult(Generic[T]):
-    """The result of same-platform and cross-platform deduplication."""
+    """同平台与跨平台去重的结果。"""
 
     same_platform_items: tuple[T, ...]
     items: tuple[T, ...]
@@ -105,7 +105,7 @@ def _layout_signature(value: Any) -> tuple[int, int] | None:
 
 
 def listing_dedup_key(item: T) -> tuple[Any, ...] | None:
-    """Build a stable same-platform deduplication key."""
+    """构建稳定的同平台去重键。"""
     platform = _text(getattr(item, "platform", ""))
     platform_prefix: tuple[Any, ...] = ("platform", platform) if platform else ()
     house_id = _text(getattr(item, "house_id", ""))
@@ -176,7 +176,7 @@ def _listing_information_score(item: T) -> tuple[int, int, int]:
 
 
 def deduplicate_same_platform(items: Iterable[T]) -> list[T]:
-    """Deduplicate stable identifiers and strong field matches."""
+    """按稳定标识与强字段匹配去重。"""
     result: list[T] = []
     seen: set[tuple[Any, ...]] = set()
     for item in items:
@@ -239,7 +239,7 @@ def _cross_platform_match_score(left: T, right: T) -> tuple[int, float, float, f
 
 
 def deduplicate_cross_platform(items: Iterable[T]) -> tuple[list[T], list[ListingDuplicateGroup[T]]]:
-    """Merge only unambiguous records from different platforms."""
+    """仅合并跨平台无歧义的记录。"""
     rows = list(items)
     matched_indexes: set[int] = set()
     representative_indexes: set[int] = set()
@@ -305,7 +305,7 @@ def deduplicate_cross_platform(items: Iterable[T]) -> tuple[list[T], list[Listin
 
 
 def deduplicate_listings(items: Iterable[T]) -> ListingDeduplicationResult[T]:
-    """Apply same-platform then cross-platform deduplication."""
+    """先同平台去重，再跨平台去重。"""
     raw_items = list(items)
     same_platform_items = deduplicate_same_platform(raw_items)
     cross_platform_items, groups = deduplicate_cross_platform(same_platform_items)

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Completion orchestration between raw RPA collection and the HTTP result."""
+"""原始 RPA 采集与 HTTP 结果之间的完成编排。"""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ def _task_result_payload(result: InquiryResult) -> dict:
 
 
 class InquiryCompletionOrchestrator:
-    """Own final aggregation and leave RPA with only collection concerns."""
+    """持有最终聚合，让 RPA 只负责采集。"""
 
     def handler_for(
         self,

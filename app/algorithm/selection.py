@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Listing selection and weak-reference rules for price estimation."""
+"""估价用的房源筛选与弱引用规则。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class ListingSelection(Generic[T]):
-    """Algorithm-selected listing snapshots for one platform."""
+    """单个平台经算法选中的房源快照。"""
 
     snapshots: tuple[T, ...]
     strict_snapshots: tuple[T, ...]
@@ -57,7 +57,7 @@ def select_listings_for_estimation(
     strict_tolerance: float = 1.0,
     max_tolerance: float | None = None,
 ) -> ListingSelection[T]:
-    """Select strict-area listings, expanding only for an algorithm weak reference."""
+    """选中严格面积匹配的房源，仅为算法弱引用放宽。"""
     source = list(snapshots)
     strict = deduplicate_same_platform(
         _filter_by_area(source, area, strict_tolerance)

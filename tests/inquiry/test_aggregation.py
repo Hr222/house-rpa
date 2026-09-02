@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Inquiry aggregation stays above the RPA collection boundary."""
+"""询价聚合保持在 RPA 采集边界之上。"""
 
 from __future__ import annotations
 

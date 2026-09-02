@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Turn raw RPA collection data into a final inquiry result."""
+"""把原始 RPA 采集数据转成最终询价结果。"""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ WEAK_AREA_REFERENCE = "WEAK_AREA_REFERENCE"
 
 @dataclass(frozen=True)
 class _AlgorithmListing:
-    """Listing fields needed by the shared cross-platform deduplication rule."""
+    """跨平台去重共用规则所需的房源字段。"""
 
     platform: str
     house_id: str
@@ -94,8 +94,8 @@ def _algorithm_quote_price_lists(
             if snapshot.unit_price is not None and snapshot.unit_price > 0
         ]
         if not snapshots:
-            # Only legacy callers without snapshots can use the price-list mirror.
-            # A real raw result with unmatched area data must not bypass selection.
+            # 只有未带快照的历史调用方才能使用价格列表镜像。
+            # 真实原始结果中面积不匹配的数据不得绕过筛选。
             if not selected.result.listing_snapshots:
                 fallback_price_lists.append(selected.result.quote_prices)
             continue
@@ -213,7 +213,7 @@ def build_inquiry_result(
     platform_results: list[PlatformResult],
     request_area: Optional[float] = None,
 ) -> InquiryResult:
-    """Evaluate raw successful platform results in the inquiry application layer."""
+    """在询价应用层评估原始的成功平台结果。"""
     successful_results = [
         result
         for result in platform_results
@@ -309,7 +309,7 @@ def build_inquiry_result(
 
 
 def log_inquiry_result(result: InquiryResult) -> None:
-    """Log the final algorithm decision without putting it back in RPA."""
+    """记录最终算法决策，不回写进 RPA。"""
     if result.reference_code:
         log.info(
             "finalWeakReference: referenceCode=%s referenceAreaTolerance=%.2f "

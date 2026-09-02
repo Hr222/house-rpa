@@ -18,7 +18,7 @@ BASE_DIR = Path(__file__).resolve().parents[3]  # 项目根目录
 
 
 def _load_local_env(path: Path) -> None:
-    """Load simple project ``.env`` entries without overriding process env."""
+    """加载项目 ``.env`` 中的简单条目，不覆盖进程环境变量。"""
     if not path.is_file():
         return
     try:

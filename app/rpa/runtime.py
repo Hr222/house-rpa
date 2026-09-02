@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 
 
 class CollectionCompletion(Protocol):
-    """Opaque completion data assembled by the top-level inquiry layer."""
+    """由顶层询价层组装的不透明完成数据。"""
 
     task_result: dict
     callback_payload: dict
@@ -272,7 +272,7 @@ class RPARuntime:
         self,
         completion_handler: CollectionCompletionHandler,
     ) -> None:
-        """Set the top-level completion hook used by restored RPA tasks."""
+        """设置恢复的 RPA 任务使用的顶层完成钩子。"""
         self.completion_handler = completion_handler
 
     async def enqueue_inquiry(

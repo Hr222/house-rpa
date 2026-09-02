@@ -64,10 +64,10 @@ SENSITIVE_DEBUG_KEYS = ("authorization", "token", "cookie", "password")
 
 
 def get_aes_key() -> bytes:
-    """Read and validate the xzsfbj regionId encryption key from the environment.
+    """从环境读取并校验行舟深房 regionId 加密密钥。
 
-    The key is intentionally not kept in source code. ``app.rpa.core.config`` loads
-    the project ``.env`` before platform constants are imported.
+    密钥有意不放在源码中。``app.rpa.core.config`` 会在导入平台常量前
+    加载项目 ``.env``。
     """
     import os
 

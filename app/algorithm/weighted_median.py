@@ -395,7 +395,7 @@ def decide_weighted_median(
 
 
 def _luxury_transition_weight(area: Optional[float]) -> float:
-    """Return the gradual luxury weight for the 120-125㎡ transition zone."""
+    """返回 120-125㎡ 过渡区的渐进豪宅权重。"""
     if area is None or area < LUXURY_TRANSITION_START_AREA:
         return 0.0
     if area >= LUXURY_AREA_START:
@@ -409,7 +409,7 @@ def _luxury_discount_rate(
     area: Optional[float],
     bands: tuple[tuple[float, float], ...],
 ) -> float:
-    """Return an area-band discount, blended at the 120-125㎡ boundary."""
+    """返回面积段折扣，在 120-125㎡ 边界处混合过渡。"""
     weight = _luxury_transition_weight(area)
     if weight <= 0.0:
         return 0.0
@@ -438,7 +438,7 @@ def _select_deal_candidate(
     deal_price_lists: Iterable[Iterable[float]],
     max_relative_deviation: float = WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION,
 ) -> Optional[PriceCandidate]:
-    """Select the deal peak and preserve its support count."""
+    """选出成交峰值并保留其支撑数。"""
     valid_prices = [
         float(price)
         for price_list in deal_price_lists
@@ -472,7 +472,7 @@ def _combine_luxury_listing_and_deal(
     listing_peak: float,
     deal_candidate: PriceCandidate,
 ) -> float:
-    """Combine luxury listing and deal peaks using support and gap."""
+    """按支撑数与价差合并豪宅挂牌峰值和成交峰值。"""
     deal_peak = deal_candidate.quote_price
     gap = abs(listing_peak - deal_peak) / min(listing_peak, deal_peak)
     if (
@@ -516,8 +516,8 @@ class WeightedMedianAlgorithm:
                 for candidate in candidates
             ]
             decision = Decision(
-                # A multi-peak decision already selects the lowest valid peak.
-                # Do not apply a second luxury discount to that conservative value.
+                # 多峰值决策已选中最低有效峰值。
+                # 不再对该保守取值叠加第二次豪宅折扣。
                 final_price=selected.quote_price,
                 branch="WEIGHTED_MEDIAN_MULTI",
             )

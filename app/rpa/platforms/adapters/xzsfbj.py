@@ -636,11 +636,10 @@ class XzsfbjApiAdapter:
         request_id: Optional[str],
         started_at: float,
     ) -> PlatformResult:
-        """Merge residential phases into one standard platform result.
+        """把住宅各期合并成一个标准平台结果。
 
-        xzsfbj stores each phase under a separate regionId. This platform
-        detail remains inside the adapter; the inquiry layer receives one
-        normal raw PlatformResult.
+        行舟深房把每期存放在独立 regionId 下。该平台细节留在适配器内，
+        询价层只会收到一个正常的原始 PlatformResult。
         """
         snapshots = [
             snapshot

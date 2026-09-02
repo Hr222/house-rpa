@@ -822,7 +822,7 @@ def infer_branch(quote_avg: Optional[float], deal_avg: Optional[float]) -> tuple
 
 
 def _rebuild_real_deal_average(record: InquiryRecord) -> Optional[float]:
-    """Rebuild the real deal peak from transaction rows within request area ±5㎡."""
+    """从请求面积 ±5㎡ 内的成交行重建真实成交峰值。"""
     if record.area is None:
         return None
 
@@ -850,8 +850,8 @@ def _rebuild_real_deal_average(record: InquiryRecord) -> Optional[float]:
 
 def finalize_record(record: InquiryRecord) -> None:
     if record.algorithm_mode == "DEFAULT":
-        # Logged dealAvg can reflect an old area scope or a listing-price substitute.
-        # Analysis only uses individual real deals meeting the current ±5㎡ rule.
+        # 日志中的 dealAvg 可能是旧面积口径或挂牌价顶替值。
+        # 分析只使用符合当前 ±5㎡ 规则的单套真实成交。
         record.deal_avg = _rebuild_real_deal_average(record)
 
     if record.algorithm_mode == "DEFAULT" and record.listings:

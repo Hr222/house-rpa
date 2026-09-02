@@ -176,7 +176,7 @@ def _parse_segment_text(text: str):
     if m:
         return (0.0, float(m.group(1)))
 
-    # XX-YY㎡
+    # 面积区间形如 XX-YY㎡
     m = re.match(r'(\d+)\s*[-~]\s*(\d+)\s*㎡?', text)
     if m:
         return (float(m.group(1)), float(m.group(2)))

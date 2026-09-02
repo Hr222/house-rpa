@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Shared area ranges used by price-estimation rules."""
+"""估价规则共用的面积区间。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ def listing_area_bounds(
     area: float,
     tolerance: float = LISTING_AREA_TOLERANCE,
 ) -> tuple[float, float]:
-    """Return the comparable listing area range, defaulting to request area ±1㎡."""
+    """返回可比挂牌面积区间，默认请求面积 ±1㎡。"""
     return area - tolerance, area + tolerance
 
 
@@ -20,5 +20,5 @@ def deal_area_bounds(
     area: float,
     tolerance: float = DEAL_AREA_TOLERANCE,
 ) -> tuple[float, float]:
-    """Return the comparable real-deal area range, defaulting to request area ±5㎡."""
+    """返回可比成交面积区间，默认请求面积 ±5㎡。"""
     return listing_area_bounds(area, tolerance)

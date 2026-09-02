@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Offline inquiry-analysis exporter boundary tests."""
+"""离线询价分析导出器的边界测试。"""
 
 from __future__ import annotations
 

@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""Offline analysis of inquiry logs and evaluation workbooks."""
+"""询价日志与评估工作簿的离线分析。"""

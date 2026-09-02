@@ -97,7 +97,7 @@ WEIGHTED_MEDIAN_DISCOUNT = _WEIGHTED_MEDIAN_DISCOUNT_DEFAULT
 
 
 def get_weak_area_max_tolerance() -> float:
-    """Return the maximum area tolerance permitted for weak references."""
+    """返回弱引用允许的最大面积容差。"""
     raw_value = os.getenv("RPA_WEAK_AREA_MAX_TOLERANCE", "20")
     try:
         value = float(raw_value)

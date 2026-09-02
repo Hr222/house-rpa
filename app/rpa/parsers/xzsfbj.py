@@ -76,7 +76,7 @@ _PHASE_SUFFIX_PATTERN = re.compile(
 
 
 def _phase_family(value: str) -> str:
-    """Remove a trailing phase marker while keeping the community identity."""
+    """去掉尾部期数标识，保留小区本体身份。"""
     return _PHASE_SUFFIX_PATTERN.sub("", value)
 
 
@@ -118,9 +118,8 @@ def find_community_candidates(
     if not matches:
         return []
 
-    # A base-name request should include all phase entries when the index
-    # splits one residential community across multiple regionIds. Keep the
-    # historical exact-alias preference for unrelated similarly named items.
+    # 索引把一个住宅小区拆到多个 regionId 时，主名请求应包含全部期数条目。
+    # 对无关的同名近似小区仍保留历史精确别名优先的判定。
     if not _has_phase_marker(target):
         phase_families = {
             _phase_family(alias)

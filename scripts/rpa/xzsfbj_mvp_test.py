@@ -78,7 +78,7 @@ def select_listing_data_for_mvp(
     community_name: str,
     area: float | None,
 ) -> tuple[list[ListingSnapshot], list[float], dict[str, object]]:
-    """Keep the MVP output format while delegating weak references to algorithm."""
+    """保持 MVP 输出格式，弱引用交给算法层处理。"""
     community_snapshots, raw_prices = prepare_listing_data(snapshots, community_name)
     if area is None:
         return community_snapshots, raw_prices, {}
@@ -536,7 +536,7 @@ def _request_url_from_headers(headers: dict) -> str:
 
 
 def _url_path(url: str) -> str:
-    """Return only the URL path; query values are intentionally discarded."""
+    """只返回 URL 路径，查询参数有意丢弃。"""
     try:
         return urlsplit(url).path or "/"
     except ValueError:
@@ -840,7 +840,7 @@ class _NetworkMonitor:
 
 
 async def _probe_page_context(client: _CdpClient) -> dict[str, object]:
-    """Probe Runtime/DOM without printing page text or DOM contents."""
+    """探测 Runtime/DOM，但不输出页面文本或 DOM 内容。"""
     result: dict[str, object] = {
         "runtime_enabled": False,
         "dom_available": False,
@@ -1445,7 +1445,7 @@ async def _ui_has_terms(
     client: _CdpClient,
     terms: tuple[str, ...],
 ) -> bool | None:
-    """Check visible text and focused input value without returning page contents."""
+    """检查可见文本与聚焦输入值，不返回页面内容。"""
     encoded_terms = json.dumps(terms, ensure_ascii=False)
     response = await client.command(
         "Runtime.evaluate",

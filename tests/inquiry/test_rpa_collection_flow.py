@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""RPA collection boundary tests."""
+"""RPA 采集边界测试。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from app.rpa.service import RPAInquiryService
 
 
 class CapturingPlatformAdapter:
-    """Minimal shell that records the pure collection input."""
+    """只记录纯采集输入的最小外壳。"""
 
     code = "test"
     name = "测试平台"

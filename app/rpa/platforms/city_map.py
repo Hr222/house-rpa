@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Optional
 
 
-# CITY_MAP[platform_code][city_name] = url_prefix
+# CITY_MAP[平台代码][城市名] = URL 前缀
 CITY_MAP: dict[str, dict[str, str]] = {
     # 行舟深房是小程序接口平台，仅支持深圳；该映射只用于统一城市能力检查，
     # 采集时不调用 ensure_city_navigated，也不把 prefix 当作网页导航地址。

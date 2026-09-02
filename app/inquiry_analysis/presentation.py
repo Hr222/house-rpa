@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Display mappings owned by offline inquiry-analysis workbooks."""
+"""离线询价分析工作簿使用的展示映射。"""
 
 from __future__ import annotations
 

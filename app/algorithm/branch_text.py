@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Display text for algorithm decision branches."""
+"""算法决策分支的展示文本。"""
 
 from __future__ import annotations
 
