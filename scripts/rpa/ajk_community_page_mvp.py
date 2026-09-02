@@ -30,7 +30,7 @@ import logging
 from pathlib import Path
 import re
 from typing import Optional
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import nodriver as uc
 
@@ -396,6 +396,38 @@ async def wait_for_manual_close() -> None:
     )
 
 
+def extract_community_card(html: str, expected_district: str) -> Optional[CommunityLinkCandidate]:
+    """新版搜索结果页：页顶小区卡片含 /community/view/<id> 链接（id 与 sale 的 comm_id 同源）。
+
+    卡片文本形如「和健云谷(宿舍) 配套齐全 龙岗 坪地 新旺路8号 公寓住宅」，
+    行政区不匹配时抛 RuntimeError（由调用方按别名兜底继续）。
+    """
+    m = re.search(r'href="(?:https?://shenzhen\.anjuke\.com)?/community/view/(\d+)"', html or "")
+    if not m:
+        return None
+    chunk = html[max(0, m.start() - 3500): m.end() + 800]
+    sec = chunk.rfind("<section")
+    text = re.sub(r"<[^>]+>", " ", chunk[sec:] if sec >= 0 else chunk)
+    text = re.sub(r"\s+", " ", text).strip()
+    title_m = re.match(r"([^\s]{2,40})", text)
+    platform_name = title_m.group(1) if title_m else ""
+    loc_m = re.search(r"([\u4e00-\u9fff]{2,7}区?)\s+([\u4e00-\u9fff]{1,10})\s+[\u4e00-\u9fff]{2,20}\d+号", text)
+    platform_district = loc_m.group(1) if loc_m else ""
+    platform_area = loc_m.group(2) if loc_m else ""
+    if normalize_district(platform_district) != normalize_district(expected_district):
+        raise RuntimeError(
+            f"小区卡片行政区不匹配：卡片[{platform_district}-{platform_area}]，期望 {expected_district}，拒绝自动选择"
+        )
+    return CommunityLinkCandidate(
+        community_name=platform_name,
+        href=f"/community/view/{m.group(1)}",
+        comm_id=m.group(1),
+        platform_administrative_district=platform_district,
+        platform_area=platform_area,
+        context=text[:500],
+    )
+
+
 async def search_and_extract_candidate(
     page,
     *,
@@ -408,16 +440,13 @@ async def search_and_extract_candidate(
     """按单个候选名搜索并提取唯一小区候选；未命中返回 None。"""
     await page.get(start_url)
     await page
+    origin = f"{urlparse(start_url).scheme}://{expected_host}"
+    # 直接导航关键词结果页：UI 回车提交会间歇性丢失关键词（落回全市通用列表页）。
+    kw_url = f"{origin}/sale/?kw={quote(candidate_name)}"
+    await page.get(kw_url)
+    await page
     await asyncio.sleep(3)
-    await ensure_accessible(
-        page,
-        label=f"首页[{candidate_name}]",
-        expected_host=expected_host,
-        manual=manual_login,
-    )
-
-    await search_community(page, candidate_name)
-    result_url = page.target.url or start_url
+    result_url = page.target.url or kw_url
     result_html = await ensure_accessible(
         page,
         label=f"搜索结果页[{candidate_name}]",
@@ -427,6 +456,9 @@ async def search_and_extract_candidate(
     await dump_html(page, f"ajk_community_page_search_{_safe_file_token(candidate_name)}")
 
     try:
+        card = extract_community_card(result_html, administrative_district)
+        if card is not None:
+            return card
         snapshots = ajk_parsers.parse_listing_snapshots(result_html)
         if not has_matching_community_snapshots(snapshots, candidate_name):
             log.info("搜索名[%s]结构化房源未匹配目标小区", candidate_name)
@@ -496,8 +528,9 @@ async def collect_community(
     )
     await dump_html(page, f"ajk_community_page_listing_{_safe_file_token(community_name)}")
     listing_snapshots = ajk_parsers.parse_listing_snapshots(listing_html)
-    if not has_matching_community_snapshots(listing_snapshots, matched_name):
+    if listing_snapshots and not has_matching_community_snapshots(listing_snapshots, matched_name):
         raise RuntimeError(f"拼接后的挂牌页未匹配目标小区：{matched_name}")
+    # 零房源小区（如和健云谷(宿舍)）挂牌页无房源卡片，comm_id 一致即视为有效
 
     actual_url = page.target.url or listing_page_url
     actual_comm_id = parse_qs(urlparse(actual_url).query).get("comm_id", [""])[0]
