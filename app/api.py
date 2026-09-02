@@ -150,6 +150,28 @@ def create_app(
                     "data": {},
                 },
             )
+        if submission.status == InquirySubmissionStatus.COMMUNITY_TYPE_NOT_SUPPORTED:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "code": "COMMUNITY_TYPE_NOT_SUPPORTED",
+                    "message": "小区类型不支持询价",
+                    "data": {
+                        "candidates": [
+                            {
+                                "communityGroupId": candidate.community_group_id,
+                                "communityId": candidate.community_id,
+                                "canonicalName": candidate.canonical_name,
+                                "phase": candidate.phase,
+                                "aliases": list(candidate.aliases),
+                                "city": candidate.city,
+                                "administrativeDistrict": candidate.administrative_district,
+                            }
+                            for candidate in submission.candidates
+                        ]
+                    },
+                },
+            )
         if submission.status == InquirySubmissionStatus.COMMUNITY_PHASE_REQUIRED:
             return JSONResponse(
                 status_code=200,
