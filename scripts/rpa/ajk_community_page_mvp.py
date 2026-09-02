@@ -410,16 +410,21 @@ def extract_community_card(html: str, expected_district: str) -> Optional[Commun
     text = re.sub(r"<[^>]+>", " ", chunk[sec:] if sec >= 0 else chunk)
     text = re.sub(r"\s+", " ", text).strip()
     title_m = re.match(r"([^\s]{2,40})", text)
-    platform_name = title_m.group(1) if title_m else ""
-    loc_m = re.search(r"([\u4e00-\u9fff]{2,7}区?)\s+([\u4e00-\u9fff]{1,10})\s+[\u4e00-\u9fff]{2,20}\d+号", text)
-    platform_district = loc_m.group(1) if loc_m else ""
-    platform_area = loc_m.group(2) if loc_m else ""
-    if normalize_district(platform_district) != normalize_district(expected_district):
+    title = title_m.group(1) if title_m else ""
+    # 行政区安全核对：在卡片正文（跳过标题）里找与期望行政区一致的独立 token，
+    # 命中即通过，片区取其后的一个 token（地址可能不带号，不能用地址格式反推）。
+    stem = normalize_district(expected_district)
+    body = text[len(title):]
+    dist_m = re.search(rf"(?:^|\s)({re.escape(stem)}区?)(?=\s|$)", body)
+    if not dist_m:
         raise RuntimeError(
-            f"小区卡片行政区不匹配：卡片[{platform_district}-{platform_area}]，期望 {expected_district}，拒绝自动选择"
+            f"小区卡片行政区不匹配：卡片[{text[:80]}]，期望 {expected_district}，拒绝自动选择"
         )
+    platform_district = dist_m.group(1)
+    rest = body[dist_m.end():].strip()
+    platform_area = rest.split(" ")[0] if rest else ""
     return CommunityLinkCandidate(
-        community_name=platform_name,
+        community_name=title,
         href=f"/community/view/{m.group(1)}",
         comm_id=m.group(1),
         platform_administrative_district=platform_district,
