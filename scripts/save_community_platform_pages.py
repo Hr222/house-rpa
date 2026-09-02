@@ -75,10 +75,15 @@ def main() -> int:
             if not item.get("success"):
                 failed_results.append(name)
                 continue
-            # 条目自带 community_ids/city/district 时优先（人工核对补充等场景），
-            # 否则回退到清单映射。
+            # 条目自带 community_ids/mapped_community_ids/city/district 时优先
+            # （人工核对补充等场景），否则回退到清单映射。
             info = name_to_info.get(name) or {}
-            ids = item.get("community_ids") or info.get("community_ids") or []
+            ids = (
+                item.get("community_ids")
+                or item.get("mapped_community_ids")
+                or info.get("community_ids")
+                or []
+            )
             city = item.get("city") or info.get("city")
             district = item.get("administrative_district") or info.get("district")
             if not ids or not city or not district:
