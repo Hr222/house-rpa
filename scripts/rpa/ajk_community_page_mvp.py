@@ -10,6 +10,10 @@
 
 本脚本只用于独立验证，不写入数据库，也不接入正式采集链路。
 
+风控协议（对齐 app/rpa/runtime.py）：命中拦截时浏览器窗口自动置前，脚本阻塞等待
+一次回车确认（人工处理完浏览器后由终端/编排注入），不做任何自动轮询重试；
+浏览器使用固定 profile（persist/ajk_profile）留存验证状态。
+
 用法：
   python -m scripts.rpa.ajk_community_page_mvp --manual-login \
       --city "深圳" --administrative-district "罗湖区" \
@@ -38,6 +42,7 @@ from app.rpa.platforms.city_map import get_start_url
 from app.rpa.utils.debug_utils import dump_html as shared_dump_html
 from app.rpa.utils.debug_utils import set_debug_mode
 from app.rpa.utils.logging_utils import setup_logging
+from app.rpa.utils.window_control import ensure_browser_foreground, enumerate_browser_windows, focus_window
 
 
 setup_logging()
@@ -220,7 +225,13 @@ def blocked_reason(url: str, html: str, expected_host: str) -> Optional[str]:
     if any(marker in url_lower for marker in ("captcha", "verifycode", "antibot", "antispam")):
         return "命中验证码拦截 URL"
 
-    if any(marker in (html or "") for marker in ("请输入验证码", "验证后继续访问", "请完成验证", "滑动验证")):
+    if any(
+        marker in (html or "")
+        for marker in (
+            "请输入验证码", "验证后继续访问", "请完成验证", "滑动验证",
+            'id="ISDCaptcha"', 'class="code_img"',
+        )
+    ):
         return "命中验证码拦截页面"
 
     if any(marker in (html or "") for marker in ("请输入手机号", "请输入密码", "手机快捷登录", "扫码登录")):
@@ -232,8 +243,27 @@ def blocked_reason(url: str, html: str, expected_host: str) -> Optional[str]:
     return None
 
 
+def _focus_browser_window(page) -> None:
+    """把浏览器窗口顶到前台，避免验证码/拦截窗口被压在底下没人发现。"""
+    try:
+        browser = getattr(page, "browser", None)
+        proc = getattr(browser, "process", None) if browser else None
+        pid = getattr(proc, "pid", None) or (proc if isinstance(proc, int) else None)
+        if pid and ensure_browser_foreground(int(pid)):
+            return
+        windows = enumerate_browser_windows()
+        if windows:
+            focus_window(windows[-1].hwnd)
+    except Exception as exc:
+        log.debug("聚焦浏览器窗口失败: %s", exc)
+
+
 async def ensure_accessible(page, *, label: str, expected_host: str, manual: bool) -> str:
-    """页面被拦截时等待人工处理，恢复后再返回 HTML。"""
+    """页面被拦截时置前浏览器并阻塞等待一次回车确认，恢复后返回 HTML。
+
+    协议：命中拦截 → 浏览器置前 → 人工在浏览器处理完 → 终端注入一次回车 →
+    重查一次；仍拦截则再等下一轮回车。本函数自身绝不轮询，避免高频重试加重风控。
+    """
     attempt = 1
     while True:
         await page
@@ -243,7 +273,8 @@ async def ensure_accessible(page, *, label: str, expected_host: str, manual: boo
             return html
         if not manual:
             raise RuntimeError(f"{label}{reason}，请使用 --manual-login 后重试")
-        log.warning("%s不可用（第 %d 次）：%s", label, attempt, reason)
+        log.warning("%s不可用（第 %d 次）：%s，已置前浏览器，等待人工处理后回车继续", label, attempt, reason)
+        _focus_browser_window(page)
         await asyncio.to_thread(
             input,
             f"\n{label}{reason}。请在浏览器处理完成后按回车继续...\n",
@@ -503,10 +534,14 @@ async def main(
         set_debug_mode(True)
     start_url = get_start_url("ajk", city)
     expected_host = (urlparse(start_url).hostname or "").lower()
+    # 固定浏览器 profile：首次人工验证后 cookie 留存，后续运行不再"首次必风控"。
+    profile_dir = Path(__file__).resolve().parents[2] / "persist" / "ajk_profile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
     browser = await uc.start(
         headless=False,
         browser_executable_path=config.BROWSER_PATH,
         lang="zh-CN",
+        user_data_dir=str(profile_dir),
     )
     page = None
     try:
