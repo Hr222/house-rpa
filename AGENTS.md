@@ -47,11 +47,13 @@ jeethink-rpa 是房产实时询价工程。它使用 FastAPI 和 nodriver，面�
 
 ## 4. 测试与验证
 
-测试保持精简，只覆盖当前业务重点。当前保留 8 个测试模块、13 个测试。
+测试保持精简，只覆盖当前业务重点。当前保留 14 个测试模块、45 个测试。
 
 | 改动范围 | 运行目标 |
 |---|---|
 | `app/community_data/*` | `tests/community_data/test_community_data.py` |
+| `app/inquiry/*` | `tests/inquiry/` |
+| `app/inquiry_analysis/*` | `tests/inquiry_analysis/` |
 | `app/rpa/parsers/ajk.py` | `tests/parsers/test_ajk.py` |
 | `app/rpa/parsers/fang.py` | `tests/parsers/test_fang.py` |
 | `app/rpa/parsers/ke.py` | `tests/parsers/test_ke.py` |

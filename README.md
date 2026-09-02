@@ -348,7 +348,7 @@ FastAPI 入口。接口清单：
 | `click_area_segment(page, area, parse_func, code)` | 动态读取面积档位并点击匹配项 |
 | `is_generic_captcha_page(html)` | 通用验证码页兜底检测（跨平台共性） |
 | `short_circuit_result(name, status, reason, ...)` | 统一构造短路返回（NO_DATA 等），消除各平台重复模板 |
-| `community_name_match(request_name, captured_name)` | 比较请求小区名与抓取快照的结构化小区名；不使用整页 HTML、标题或搜索词 |
+| `community_name_match(request_name, captured_name)` | 比较请求小区名与抓取快照的结构化小区名；双方都带期数且期数不同时不匹配，任一方无期数则宽松匹配；不使用整页 HTML、标题或搜索词 |
 | `has_matching_community_snapshots(snapshots, community_name)` | 判断搜索结果里是否至少命中一条目标小区快照，用于首轮校验 |
 | `filter_snapshots_by_community(snapshots, community_name)` | 只按 `ListingSnapshot.community_name` 过滤抓取数据，供逐页过滤和返回前防御校验共用 |
 | `prepare_listing_data(snapshots, community_name)` | 过滤目标小区快照，并从同一批快照生成 `quote_prices`，保证明细与价格同源 |
@@ -448,7 +448,7 @@ pip install -r requirements.txt
 ### 启动服务
 
 ```bash
-python -m scripts.rpa.api_server
+python -m scripts.api_server
 ```
 
 常用参数（所有脚本统一）：
@@ -458,7 +458,7 @@ python -m scripts.rpa.api_server
 
 ```bash
 # 调试 + 人工登录确认
-python -m scripts.rpa.api_server --debug --manual-login
+python -m scripts.api_server --debug --manual-login
 ```
 
 ### 单平台 MVP 测试
