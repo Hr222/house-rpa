@@ -5,7 +5,7 @@
 
 ## 1. 项目定位
 
-jeethink-rpa 是房产实时询价工程。它使用 FastAPI 和 nodriver，面向多平台采集房产数据，并与小区主数据、房源记录模块协作完成询价和数据沉淀。
+jeethink-rpa 是二手房找房比价工程。它使用 FastAPI 和 nodriver，面向多平台采集房产数据，并与小区主数据、房源记录模块协作完成比价和数据沉淀。
 
 当前接入贝壳、安居客、链家、房天下、乐有家。入口服务是 `scripts/api_server.py`。
 
@@ -16,7 +16,7 @@ jeethink-rpa 是房产实时询价工程。它使用 FastAPI 和 nodriver，面�
 | 任务 | 必读文档 |
 |---|---|
 | 了解项目和运行方式 | `README.md` |
-| RPA 分层、状态、并发、风控 | `docs/系统架构与运行时状态.md` |
+| RPA 分层、状态、并发、风控 | `README.md`（§5 系统架构、§6 运行时状态机、§7 并发与风控协议） |
 | 新平台或平台 HTML 改造 | `docs/平台扩展对接文档.md` |
 | 小区主数据 | `docs/小区基础数据模块.md` |
 | 房源记录和入库 | `docs/房源记录模块.md` |
@@ -47,18 +47,18 @@ jeethink-rpa 是房产实时询价工程。它使用 FastAPI 和 nodriver，面�
 
 ## 4. 测试与验证
 
-测试保持精简，只覆盖当前业务重点。当前保留 14 个测试模块、45 个测试。
+测试保持精简，只覆盖当前业务重点。当前保留 15 个测试模块、52 个测试。
 
 | 改动范围 | 运行目标 |
 |---|---|
 | `app/community_data/*` | `tests/community_data/test_community_data.py` |
 | `app/inquiry/*` | `tests/inquiry/` |
 | `app/inquiry_analysis/*` | `tests/inquiry_analysis/` |
-| `app/rpa/parsers/ajk.py` | `tests/parsers/test_ajk.py` |
-| `app/rpa/parsers/fang.py` | `tests/parsers/test_fang.py` |
-| `app/rpa/parsers/ke.py` | `tests/parsers/test_ke.py` |
-| `app/rpa/parsers/lj.py` | `tests/parsers/test_lj.py` |
-| `app/rpa/parsers/lyj.py` | `tests/parsers/test_lyj.py` |
+| `app/rpa/platforms/ajk/parser.py` | `tests/parsers/test_ajk.py` |
+| `app/rpa/platforms/fang/parser.py` | `tests/parsers/test_fang.py` |
+| `app/rpa/platforms/ke/parser.py` | `tests/parsers/test_ke.py` |
+| `app/rpa/platforms/lj/parser.py` | `tests/parsers/test_lj.py` |
+| `app/rpa/platforms/lyj/parser.py` | `tests/parsers/test_lyj.py` |
 | `app/rpa/platforms/base.py` 小区归属 | `tests/platforms/test_base_community.py` |
 | `app/property_records/*` | `tests/property_records/test_property_records.py` |
 

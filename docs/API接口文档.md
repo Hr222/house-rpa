@@ -12,8 +12,8 @@
 - [管理接口](#管理接口)
   - [`GET /admin/status`](#get-adminstatus)
   - [`POST /admin/platforms/{code}/confirm-ready`](#post-adminplatformscodeconfirm-ready)
-- [询价接口](#询价接口)
-  - [`POST /inquiries` — 创建询价任务](#post-inquiries--创建询价任务)
+- [比价接口](#比价接口)
+  - [`POST /inquiries` — 创建比价任务](#post-inquiries--创建比价任务)
   - [`GET /inquiries/{taskId}` — 查询任务结果](#get-inquiriestaskid--查询任务结果兜底)
 - [结果回调](#结果回调)
 - [算法参数](#算法参数)
@@ -32,7 +32,7 @@
 | GET | `/health/ready` | 就绪检查 |
 | GET | `/admin/status` | 服务状态 |
 | POST | `/admin/platforms/{code}/confirm-ready` | 确认平台就绪 |
-| POST | `/inquiries` | 创建询价任务 |
+| POST | `/inquiries` | 创建比价任务 |
 | GET | `/inquiries/{taskId}` | 查询任务结果（兜底，受限流） |
 | GET | `/admin/algorithm/weighted-median-discount` | 查询加权落点中位数折扣 |
 | PUT | `/admin/algorithm/weighted-median-discount` | 更新加权落点中位数折扣 |
@@ -164,12 +164,12 @@ find_nearby_communities(
 
 ---
 
-## 询价接口
+## 比价接口
 
-### `POST /inquiries` — 创建询价任务
+### `POST /inquiries` — 创建比价任务
 
-发起一次房产询价。服务先查询人工维护的小区主数据：只有唯一小区才会创建
-完整询价快照并创建 RPA 采集任务；调用方不提交 `communityId`。快照由编排层持有
+发起一次比价。服务先查询人工维护的小区主数据：只有唯一小区才会创建
+完整比价快照并创建 RPA 采集任务；调用方不提交 `communityId`。快照由编排层持有
 `community_id`，RPA 不接收该字段。
 
 **请求体：**
@@ -177,7 +177,7 @@ find_nearby_communities(
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `communityName` | string | ✅ | 小区名称 |
-| `administrativeDistrict` | string | ✅ | 行政区（如 `南山区`）；用于行舟深房同名小区消歧 |
+| `administrativeDistrict` | string | ✅ | 行政区（如 `南山区`） |
 | `area` | float | ✅ | 精确面积（㎡），如 `89.5`。系统自动匹配各平台面积档位 |
 | `city` | string | ✅ | 城市名（如 `深圳`、`广州`、`东莞`） |
 | `requestId` | string | | 请求标识，用于幂等；不填则由服务生成 `taskId` |
@@ -258,7 +258,7 @@ find_nearby_communities(
 
 ### `GET /inquiries/{taskId}` — 查询任务结果（兜底）
 
-查询指定询价任务的执行结果。**建议优先使用回调推送**（见下方 [结果回调](#结果回调)），此接口仅作兜底。
+查询指定比价任务的执行结果。**建议优先使用回调推送**（见下方 [结果回调](#结果回调)），此接口仅作兜底。
 
 | 参数 | 位置 | 说明 |
 |------|------|------|
@@ -287,9 +287,9 @@ find_nearby_communities(
 | 字段 | 说明 |
 |------|------|
 | `quoteAvg` | 主要价格落点中位数（元/㎡） |
-| `dealAvg` | 兼容字段，当前算法不参与决策 |
+| `dealAvg` | 成交均价（元/㎡）；存在真实目标面积成交价时参与决策（`WEIGHTED_MEDIAN_COMBINED` 与挂牌峰值等权平均），无成交时为空 |
 | `finalPrice` | 最终建议单价（元/㎡） |
-| `success` | 本次询价是否得到可用结果；`NO_DATA` 时为 `false` |
+| `success` | 本次比价是否得到可用结果；`NO_DATA` 时为 `false` |
 | `statusCode` | 任务状态码；完成态固定为 `COMPLETED` |
 | `branchCode` | 决策分支：`WEIGHTED_MEDIAN` / `WEIGHTED_MEDIAN_MULTI` / `NO_DATA` / `NO_MATCHING_AREA` / `FAILED` |
 | `branch` | 分支说明中文文案；未登记的分支才回退为分支码 |
@@ -299,7 +299,7 @@ find_nearby_communities(
 | `referenceAreaMin` / `referenceAreaMax` | 可选；弱参考实际使用的面积范围，单位㎡ |
 | `referenceListingCount` | 可选；进入弱参考的房源数量，单条严格命中时也会计为 1 |
 
-弱参考不是新的状态码或决策分支。公开询价响应不会返回 `platformResults`；平台原始结果不携带弱参考字段，弱参考只存在于编排层算法结果、操作日志和 Excel 分析数据中。最终公开结果只有在选中的价格峰确实包含补充数据时才输出顶层弱参考字段。最大面积容差默认 `20㎡`，可通过环境配置 `RPA_WEAK_AREA_MAX_TOLERANCE` 调整，当前暂不提供 API 修改入口。
+弱参考不是新的状态码或决策分支。公开比价响应不会返回 `platformResults`；平台原始结果不携带弱参考字段，弱参考只存在于编排层算法结果、操作日志和 Excel 分析数据中。最终公开结果只有在选中的价格峰确实包含补充数据时才输出顶层弱参考字段。最大面积容差默认 `20㎡`，可通过环境配置 `RPA_WEAK_AREA_MAX_TOLERANCE` 调整，当前暂不提供 API 修改入口。
 
 **响应 200（已完成但无数据）：**
 
@@ -475,6 +475,7 @@ find_nearby_communities(
 |------------|------|------|
 | `WEIGHTED_MEDIAN` | 存在明确主要价格落点 | 主要价格峰中位数 × `weightedMedianDiscount` |
 | `WEIGHTED_MEDIAN_MULTI` | 存在多个频率接近的价格峰 | 取最低价格峰中位数直接返回，不打折；同时保留 `candidates` |
+| `WEIGHTED_MEDIAN_COMBINED` | 存在真实目标面积成交价 | 挂牌峰值不打折，与成交价等权平均（豪宅段按支撑数/价差规则合并） |
 | `NO_DATA` | 全平台无可用在售数据，或该城市所有平台都不支持 | 任务已完成，但无可用报价 |
 | `NO_MATCHING_AREA` | 全平台均未命中请求面积 | 任务已完成，但无匹配面积房源 |
 | `FAILED` | 无在售也无成交 | 无法计算 |

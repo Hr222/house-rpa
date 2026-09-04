@@ -22,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--excel",
         dest="debug",
         action="store_true",
-        help="开启 RPA 调试模式，导出关键页面 HTML 到 excel 目录（兼容旧参数 --excel）。",
+        help="开启 RPA 调试模式，导出关键页面 HTML 到 debug 目录（兼容旧参数 --excel）。",
     )
     parser.add_argument(
         "--manual-login",
