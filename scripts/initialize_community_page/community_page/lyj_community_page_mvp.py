@@ -32,8 +32,10 @@ import nodriver as uc
 
 from app.community_data import resolve_communities
 from app.rpa.core import config
+from app.rpa.platforms.lyj import collector as lyj_adapter
 from app.rpa.platforms.lyj import parser as lyj_parsers
 from app.rpa.platforms.base import community_name_match, has_matching_community_snapshots
+from app.rpa.platforms.base import wait_and_reload_after_block
 from app.rpa.platforms.city_map import get_start_url
 from app.rpa.utils.debug_utils import dump_html as shared_dump_html
 from app.rpa.utils.debug_utils import set_debug_mode
@@ -69,37 +71,20 @@ def _safe_file_token(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", value or "").strip("_") or "unnamed"
 
 
-def blocked_reason(url: str, html: str, expected_host: str) -> Optional[str]:
-    """识别乐有家验证码、登录页和城市漂移。"""
-    url_lower = (url or "").lower()
-    if any(marker in url_lower for marker in ("captcha", "verifycode", "antibot", "antispam")):
-        return "命中验证码拦截 URL"
-    if any(marker in (html or "") for marker in ("请输入验证码", "验证后继续访问", "请完成验证", "滑动验证")):
-        return "命中验证码拦截页面"
-    if any(marker in (html or "") for marker in ("请输入手机号", "请输入密码", "手机快捷登录", "扫码登录")):
-        return "命中登录页面"
-    actual_host = (urlparse(url or "").hostname or "").lower()
+async def ensure_accessible(page, *, label: str, expected_host: str) -> str:
+    """风控恢复走工程协议（检测→等人工回车→重取，直到恢复），恢复后校验城市域名。
+
+    风控判定=lyj 工程 detect_block + base 公共兜底（wait_and_reload_after_block
+    内部统一叠加 detect_block_with_common）。城市漂移（期望域名不符）是 MVP
+    导航层职责，不属于风控 marker，恢复后在此单独校验。
+    """
+    html = await wait_and_reload_after_block(page, lyj_adapter.detect_block, label)
+    actual_host = (urlparse(page.target.url or "").hostname or "").lower()
     if actual_host != expected_host:
-        return f"城市漂移：期望 {expected_host}，实际 {actual_host or '空'}"
-    return None
-
-
-async def ensure_accessible(page, *, label: str, expected_host: str, manual: bool) -> str:
-    """被拦截时等待人工处理，恢复后返回页面 HTML。"""
-    attempt = 1
-    while True:
-        await page
-        html = await page.get_content()
-        reason = blocked_reason(page.target.url or "", html, expected_host)
-        if reason is None:
-            return html
-        if not manual:
-            raise RuntimeError(f"{label}{reason}，请使用 --manual-login 后重试")
-        log.warning("%s不可用（第 %d 次）：%s", label, attempt, reason)
-        await asyncio.to_thread(input, f"\n{label}{reason}。请在浏览器处理完成后按回车继续...\n")
-        await page
-        await asyncio.sleep(2)
-        attempt += 1
+        raise RuntimeError(
+            f"{label}城市漂移：期望 {expected_host}，实际 {actual_host or '空'}"
+        )
+    return html
 
 
 async def dump_html(page, name: str) -> Optional[Path]:
@@ -187,7 +172,6 @@ async def search_and_extract_candidate(
     start_url: str,
     expected_host: str,
     candidate_name: str,
-    manual_login: bool,
 ) -> Optional[CommunityCandidate]:
     """按单个候选名搜索并提取唯一小区候选；未命中返回 None。"""
     search_url = f"{start_url}?c={quote(candidate_name)}"
@@ -199,7 +183,6 @@ async def search_and_extract_candidate(
         page,
         label=f"小区挂牌搜索页[{candidate_name}]",
         expected_host=expected_host,
-        manual=manual_login,
     )
     await dump_html(page, f"lyj_community_page_search_{_safe_file_token(candidate_name)}")
 
@@ -232,7 +215,6 @@ async def collect_community(
     administrative_district: str,
     community_district: str,
     community_name: str,
-    manual_login: bool,
 ) -> dict:
     """处理单个小区：候选名兜底搜索 → 拼接挂牌列表入口并复核 → 返回结果摘要。"""
     names = build_candidate_names(city, administrative_district, community_name)
@@ -244,7 +226,6 @@ async def collect_community(
             start_url=start_url,
             expected_host=expected_host,
             candidate_name=name,
-            manual_login=manual_login,
         )
         if candidate is not None:
             matched_name = name
@@ -261,7 +242,6 @@ async def collect_community(
         page,
         label="小区挂牌页",
         expected_host=expected_host,
-        manual=manual_login,
     )
     await dump_html(page, f"lyj_community_page_listing_{_safe_file_token(community_name)}")
     listing_snapshots = lyj_parsers.parse_listing_snapshots(listing_html)
@@ -315,7 +295,7 @@ async def main(
         page = await browser.get(start_url)
         await page
         await asyncio.sleep(3)
-        await ensure_accessible(page, label="首页", expected_host=expected_host, manual=manual_login)
+        await ensure_accessible(page, label="首页", expected_host=expected_host)
         await dump_html(page, "lyj_community_page_home")
 
         # 乐有家搜索需要已登录会话；人工登录确认必须发生在搜索之前。
@@ -324,7 +304,7 @@ async def main(
             await page.get(start_url)
             await page
             await asyncio.sleep(3)
-            await ensure_accessible(page, label="登录后首页", expected_host=expected_host, manual=True)
+            await ensure_accessible(page, label="登录后首页", expected_host=expected_host)
 
         summaries: list[dict] = []
         for community_name in community_names:
@@ -337,7 +317,6 @@ async def main(
                     administrative_district=administrative_district,
                     community_district=community_district,
                     community_name=community_name,
-                    manual_login=manual_login,
                 )
                 summary["success"] = True
                 summaries.append(summary)

@@ -1,25 +1,21 @@
 # -*- coding: utf-8 -*-
 """链家 MVP 测试脚本（URL 直达抓取形式）。
 
-抓取形式（2026-09-03 整改，对齐 ajk/ke/lyj 模板）：小区挂牌与成交入口已由
+抓取形式（2026-09-04 整改，对齐 ke 模板）：小区挂牌与成交入口已由
 统一初始化工具（scripts/initialize_community_page/）存入
 community_platform_pages（listing_page_url=/ershoufang/c{ID}、
-deal_page_url=/chengjiao/c{ID}），本脚本按 community_id 直达两个入口，
-不再走"首页 → 搜索 → 面积筛选 → 点详情 → 点成交"的模拟点击链路；
-直接读取 HTML 解析在售快照与真实成交记录。
+deal_page_url=/chengjiao/c{ID}），本脚本按 community_id 直达两个入口。
 
 流程：读取库内 lj 入口（挂牌+成交）→ 首页先行建立会话（--manual-login 时
-人工过验证码/登录）→ page.get(listing_page_url) 直达在售 →
-风控协议（工程件 wait_and_reload_after_block + _platform.detect_block）
-→ 空态短路（_platform.is_no_result，m-noresult）→ 归属校验 →
-URL 直达翻页（pg{N}c{ID} 原生链接收集）→ page.get(deal_page_url) 直达
-成交页 → 风控协议 → 解析真实成交明细（工程 parsers.lj.parse_deal_records）
-→ 成交翻页（优先 URL 直达，无分页链接时回退点击）。
+人工过验证码/登录）→ 采集主流程委托工程 collector.collect_listing_by_url
+（与工程 shell 同一函数：风控协议、空态识别、归属校验、在售/成交 URL
+直达翻页全部单源；成交为真实明细全量）；MVP 只做 PlatformResult →
+CommunityCollection 映射与结果打印。--area 面积过滤改用工程 selection
+（面积口径已剥离出 RPA，见 base.py 说明）。
 
 链家成交是本平台特有采集（ajk/ke/lyj 均无）：成交记录全部真实明细入库
-（不做面积/近半年裁剪，原始数据语义，筛选在编排层）。面积筛选链路保留
-为可选（--area，默认不筛选，整页直捞）。浏览器全程存活，抓完不主动
-关闭；回车确认 / Ctrl+C 结束时关闭浏览器窗口。
+（不做面积/近半年裁剪，原始数据语义，筛选在编排层）。浏览器全程存活，
+抓完不主动关闭；回车确认 / Ctrl+C 结束时关闭浏览器窗口。
 
 用法：
   python -m scripts.collect_community_data.rpa.lj_mvp_test --community-id 5650
@@ -31,26 +27,20 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import re
 import sqlite3
 import threading
-from html import unescape
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urljoin, urlparse
 
 import nodriver as uc
 from nodriver.core import util as nodriver_util
 
+from app.algorithm.selection import select_listings_for_estimation
 from app.rpa.core import config
-from app.rpa.core.models import ListingSnapshot
 from app.rpa.core.status import PlatformResultStatus
-from app.rpa.platforms.lj import parser as parsers
 from app.rpa.platforms import LjPlatformAdapter
-from app.rpa.platforms.base import (
-    wait_and_reload_after_block,
-    has_matching_community_snapshots,
-)
+from app.rpa.platforms.base import wait_and_reload_after_block
+from app.rpa.platforms.lj import collector as lj_adapter
 from app.rpa.utils.debug_utils import dump_html as shared_dump_html
 from app.rpa.utils.debug_utils import set_debug_mode
 from app.rpa.utils.logging_utils import setup_logging
@@ -117,168 +107,7 @@ def terminate_browser() -> None:
 
 
 # ============================================================
-# 交互工具：真人点击（仅供可选的面积筛选与成交翻页回退使用）
-# ============================================================
-
-async def is_interactable(element) -> bool:
-    try:
-        pos = await element.get_position()
-        return bool(pos and pos.width > 0 and pos.height > 0)
-    except Exception:
-        return False
-
-
-async def human_click(page, element, label: str) -> bool:
-    if not element:
-        return False
-    try:
-        await element.scroll_into_view()
-    except Exception:
-        pass
-    try:
-        await element.mouse_move()
-    except Exception:
-        pass
-    await asyncio.sleep(0.3)
-    last_error = None
-    for clicker in ("mouse", "js"):
-        try:
-            if clicker == "mouse":
-                await element.mouse_click()
-            else:
-                await element.click()
-            await page
-            await asyncio.sleep(1.0)
-            return True
-        except Exception as exc:
-            last_error = exc
-    log.warning("%s click failed: %s", label, last_error)
-    return False
-
-
-# ============================================================
-# 可选面积筛选（--area 时才使用，默认不筛选）
-# ============================================================
-
-async def apply_area_filter(page, area_min, area_max) -> bool:
-    """链家面积筛选：更多选项 → 面积区 → 更多及自定义 → 填 min-max → 确定。
-
-    与老 MVP / 工程 adapter 同款（链家 DOM 需自定义输入，非预设档位）。
-    """
-    # 1. 检查是否有"更多选项"，有则点击展开
-    try:
-        more_btn = await page.select("div.more.btn-more", timeout=3)
-    except Exception:
-        more_btn = None
-    if more_btn:
-        try:
-            btn_text = await more_btn.apply("(el) => el.textContent.trim()")
-        except Exception:
-            btn_text = ""
-        if "更多选项" in (btn_text or ""):
-            log.info("[3] 点击'更多选项'展开筛选区")
-            await human_click(page, more_btn, "更多选项")
-            await page
-            await asyncio.sleep(1.5)
-
-    # 2. 找面积区：dl 内 dt[title*="面积"]
-    try:
-        containers = await page.select_all("dl.hide.hasmore", timeout=3)
-    except Exception:
-        containers = []
-    area_container = None
-    for c in containers:
-        try:
-            tit = await c.apply(
-                "(el) => { const t = el.querySelector('dt'); return t ? t.title || t.textContent.trim() : ''; }"
-            )
-        except Exception:
-            tit = ""
-        if "面积" in tit:
-            area_container = c
-            break
-    if area_container is None:
-        log.warning("[3] 未找到面积筛选区，本次为全量在售")
-        return False
-
-    # 3. 点击面积区的"更多及自定义"展开
-    try:
-        btns = await area_container.query_selector_all("span.btn-showmore")
-    except Exception:
-        btns = []
-    if btns:
-        await human_click(page, btns[0], "更多及自定义")
-        await page
-        await asyncio.sleep(1.5)
-
-    # 4. 定位 customFilter 下的 min/max input
-    try:
-        custom = await area_container.query_selector_all("span.customFilter[data-role='area']")
-    except Exception:
-        custom = []
-    if not custom:
-        try:
-            custom = await area_container.query_selector_all("span.customFilter")
-        except Exception:
-            custom = []
-    if not custom:
-        log.warning("[3] 面积区未找到 customFilter，本次为全量在售")
-        return False
-    custom = custom[0]
-
-    try:
-        min_inputs = await custom.query_selector_all("input[role='minValue']")
-        max_inputs = await custom.query_selector_all("input[role='maxValue']")
-    except Exception:
-        min_inputs, max_inputs = [], []
-    if not min_inputs or not max_inputs:
-        log.warning("[3] 面积区未找到 minValue/maxValue input，本次为全量在售")
-        return False
-    min_el, max_el = min_inputs[0], max_inputs[0]
-
-    # 5. 填值
-    await human_click(page, min_el, "area min input")
-    try:
-        await min_el.clear_input()
-    except Exception:
-        pass
-    await asyncio.sleep(0.3)
-    await min_el.send_keys(str(int(area_min)))
-    await page
-    await asyncio.sleep(0.5)
-    await human_click(page, max_el, "area max input")
-    try:
-        await max_el.clear_input()
-    except Exception:
-        pass
-    await asyncio.sleep(0.3)
-    await max_el.send_keys(str(int(area_max)))
-    await page
-    await asyncio.sleep(0.8)
-
-    # 6. 点"确定"提交
-    confirm_clicked = False
-    try:
-        confirm_btns = await custom.query_selector_all("button.btn-range")
-    except Exception:
-        confirm_btns = []
-    if confirm_btns:
-        confirm_clicked = await human_click(page, confirm_btns[0], "area confirm")
-    if not confirm_clicked:
-        try:
-            await max_el.send_keys("\r")
-            await page
-            confirm_clicked = True
-            log.info("[3] 用回车兜底提交")
-        except Exception:
-            pass
-    await page
-    await asyncio.sleep(3)
-    return confirm_clicked
-
-
-# ============================================================
-# 库内入口查找与翻页 URL 推导
+# 库内入口查找
 # ============================================================
 
 def resolve_listing_urls(community_ids: list[int]) -> list[dict]:
@@ -312,43 +141,6 @@ def resolve_listing_urls(community_ids: list[int]) -> list[dict]:
     return targets
 
 
-def _token_from_url(page_url: str) -> Optional[str]:
-    """从链家挂牌/成交入口 URL 提取 c{ID} 小区 token。"""
-    m = re.search(r"/(?:ershoufang|chengjiao)/(c\d+)", page_url or "")
-    return m.group(1) if m else None
-
-
-def build_page_urls(page_url: str, first_page_html: str) -> list[str]:
-    """由第 1 页原生分页链接收集后续页 URL（pg{N}c{ID}，URL 直达无点击）。
-
-    挂牌页与成交页通用：链家分页链接携带小区 token
-    （在售 /ershoufang/pg{N}c{ID}、成交 /chengjiao/pg{N}c{ID} 或等价形式），
-    只收录包含同一 token 的 pg{N} 链接并 urljoin 还原绝对地址，
-    避免误采全市/商圈翻页；无分页链接则返回空列表（单页小区）。
-    """
-    token = _token_from_url(page_url)
-    if token is None:
-        return []
-    page_urls: list[str] = []
-    seen_pages: set[int] = set()
-    for match in re.finditer(r'href="([^"]*pg(\d+)[^"]*)"', first_page_html or ""):
-        href = urljoin(page_url, unescape(match.group(1)))
-        path = urlparse(href).path
-        num_m = re.search(r"pg(\d+)", path)
-        if num_m is None or token not in path:
-            continue
-        page_no = int(num_m.group(1))
-        if page_no in seen_pages or page_no < 2 or page_no > MAX_PAGES:
-            continue
-        seen_pages.add(page_no)
-        page_urls.append(href)
-    return page_urls
-
-
-# ============================================================
-# 在售采集（URL 直达挂牌页）
-# ============================================================
-
 def print_listing_snapshots(snapshots: list):
     if not snapshots:
         print("链家: 未抓到在售房源摘要")
@@ -364,92 +156,6 @@ def print_listing_snapshots(snapshots: list):
         print("  房源链接:", _url if len(_url) <= 72 else _url[:69] + "...")
 
 
-async def collect_listing(
-    tab,
-    *,
-    target: dict,
-    area: Optional[float],
-    debug: bool,
-) -> tuple[list[ListingSnapshot], str]:
-    """直达挂牌页采集在售快照（含 URL 直达翻页），返回（快照, 落地页 HTML）。
-
-    走工程风控协议（命中拦截暂停等人工，干净后才解析）；空态短路；
-    页面归属校验：快照与目标小区不匹配则整页弃用（防入口串页）。
-    """
-    listing_url = target["listing_page_url"]
-    await tab.get(listing_url)
-    await tab
-    await asyncio.sleep(3)
-
-    html = await wait_and_reload_after_block(
-        tab, _platform.detect_block, f"小区挂牌页[{target['community_name']}]"
-    )
-    if debug:
-        await dump_html(tab, f"lj_listing_{target['community_id'] or 'direct'}_p1")
-
-    # 空态识别：m-noresult（与贝壳共用组件，_platform.is_no_result 已核对）。
-    # 命中即在售 0 条，跳过在售解析与翻页（下方可能是别的小区推荐位）
-    if _platform.is_no_result(html):
-        log.info("[空态] %s 在链家在售 0 条（跳过推荐位）", target["community_name"])
-        return [], html
-
-    area_confirmed = True
-    if area is not None:
-        area_confirmed = await apply_area_filter(tab, area, area)
-        if not area_confirmed:
-            log.warning("[筛选] 面积筛选未成功提交，本次为全量在售")
-        html = await tab.get_content()
-
-    snapshots = _platform.parse_listing_snapshots(html, base_url=tab.target.url)
-
-    # 页面归属校验（工程件，与 ajk/ke/lyj 模板同款）：快照须与目标小区名
-    # 匹配，否则判定入口落地页错误，整页弃用且不翻页（防串页/推荐位混入）
-    if snapshots and not has_matching_community_snapshots(snapshots, target["community_name"]):
-        log.warning(
-            "[归属不符] %s：%s 页面快照与目标小区不匹配（%d 条全部弃用）",
-            target["community_name"],
-            listing_url,
-            len(snapshots),
-        )
-        snapshots = []
-
-    for snapshot in snapshots:
-        log.info(
-            "[在售] %s | %s | %s㎡ | 总价 %s万 | 单价 %s元/㎡",
-            snapshot.community_name or "-",
-            snapshot.layout or "-",
-            snapshot.area or "-",
-            snapshot.total_price or "-",
-            snapshot.unit_price or "-",
-        )
-
-    # URL 直达翻页：仅归属校验通过才翻页；空页 = 已翻过真实末页，停止
-    page_urls = build_page_urls(listing_url, html) if snapshots else []
-    if page_urls:
-        log.info("[翻页] 在售第 1 页 %d 条；另有 %d 页待采", len(snapshots), len(page_urls))
-    for page_no, page_url in enumerate(page_urls, start=2):
-        await tab.get(page_url)
-        await tab
-        await asyncio.sleep(2)
-        page_html = await wait_and_reload_after_block(
-            tab, _platform.detect_block, f"在售翻页第 {page_no} 页"
-        )
-        if debug:
-            await dump_html(tab, f"lj_listing_{target['community_id'] or 'direct'}_p{page_no}")
-        page_snapshots = _platform.parse_listing_snapshots(page_html, base_url=tab.target.url)
-        snapshots.extend(page_snapshots)
-        if not page_snapshots:
-            log.info("[翻页] 在售第 %d 页无房源，停止翻页", page_no)
-            break
-        log.info("[翻页] 在售第 %d 页解析 %d 条，累计 %d 条", page_no, len(page_snapshots), len(snapshots))
-
-    return snapshots, html
-
-
-# ============================================================
-# 成交采集（URL 直达成交页，真实成交全量）
-# ============================================================
-
 def print_deal_records(deals: list[dict]):
     if not deals:
         print("链家: 未抓到成交记录")
@@ -462,113 +168,6 @@ def print_deal_records(deals: list[dict]):
         )
 
 
-async def click_deal_page_number(page, page_no: int) -> Optional[str]:
-    """回退方案：点击成交页页码，返回加载完成后的 HTML；无法翻页返回 None。"""
-    selector = f"a[data-page='{page_no}']"
-    try:
-        element = await page.select(selector, timeout=3)
-    except Exception:
-        element = None
-    if element is None:
-        return None
-    if not await human_click(page, element, f"deal page {page_no}"):
-        return None
-    await page
-    await asyncio.sleep(3)
-    return await page.get_content()
-
-
-async def collect_deals(
-    tab,
-    *,
-    target: dict,
-    debug: bool,
-) -> list[dict]:
-    """直达成交页采集真实成交明细（全量，不做面积/近半年裁剪）。
-
-    成交记录入库键名与工程入库层对齐：{area, date, total_price(万), price(元/㎡)}。
-    成交分页优先 URL 直达（原生 pg{N} 链接收集）；页面无分页链接但
-    page-data 显示多页时回退点击 a[data-page]（老 MVP 验证过的写法）。
-    """
-    deal_url = target.get("deal_page_url")
-    if not deal_url:
-        log.info("[成交] %s 无链家成交入口（deal_page_url 缺失），跳过成交", target["community_name"])
-        return []
-
-    await tab.get(deal_url)
-    await tab
-    await asyncio.sleep(3)
-    first_html = await wait_and_reload_after_block(
-        tab, _platform.detect_block, f"小区成交页[{target['community_name']}]"
-    )
-    if debug:
-        await dump_html(tab, f"lj_deal_{target['community_id'] or 'direct'}_p1")
-
-    # 解析第 1 页成交记录（工程 parser，与挂牌同源 DOM）
-    raw_records = _platform.parse_deal_records(first_html)
-    deals = [
-        {"area": r[0], "date": r[1], "total_price": r[2], "price": r[3]}
-        for r in raw_records
-        # 缺面积或单价视为脏行，不进入成交事实
-        if r[0] is not None and r[3] is not None
-    ]
-    log.info("[成交] %s 第 1 页真实成交 %d 条", target["community_name"], len(deals))
-
-    # 成交分页：优先 URL 直达
-    page_urls = build_page_urls(deal_url, first_html)
-    total_pages = parsers.parse_deal_total_pages(first_html)
-
-    if page_urls:
-        log.info("[成交] 另有 %d 页待采（URL 直达）", len(page_urls))
-        for page_no, page_url in enumerate(page_urls, start=2):
-            await tab.get(page_url)
-            await tab
-            await asyncio.sleep(2)
-            page_html = await wait_and_reload_after_block(
-                tab, _platform.detect_block, f"成交翻页第 {page_no} 页"
-            )
-            if debug:
-                await dump_html(tab, f"lj_deal_{target['community_id'] or 'direct'}_p{page_no}")
-            page_raw = _platform.parse_deal_records(page_html)
-            page_deals = [
-                {"area": r[0], "date": r[1], "total_price": r[2], "price": r[3]}
-                for r in page_raw if r[0] is not None and r[3] is not None
-            ]
-            deals.extend(page_deals)
-            if not page_deals:
-                log.info("[成交] 第 %d 页无成交记录，停止翻页", page_no)
-                break
-            log.info("[成交] 第 %d 页解析 %d 条，累计 %d 条", page_no, len(page_deals), len(deals))
-    elif total_pages > 1:
-        # 页面无原生分页链接但声明多页：回退点击（老 MVP 写法兜底）
-        log.info("[成交] 页面无 URL 分页链接（totalPage=%d），回退点击翻页", total_pages)
-        for page_no in range(2, total_pages + 1):
-            page_html = await click_deal_page_number(tab, page_no)
-            if page_html is None:
-                log.warning("[成交] 第 %d 页无法翻页，停止", page_no)
-                break
-            page_html = await wait_and_reload_after_block(
-                tab, _platform.detect_block, f"成交点击第 {page_no} 页"
-            )
-            if debug:
-                await dump_html(tab, f"lj_deal_{target['community_id'] or 'direct'}_p{page_no}")
-            page_raw = _platform.parse_deal_records(page_html)
-            page_deals = [
-                {"area": r[0], "date": r[1], "total_price": r[2], "price": r[3]}
-                for r in page_raw if r[0] is not None and r[3] is not None
-            ]
-            deals.extend(page_deals)
-            if not page_deals:
-                break
-
-    log.info(
-        "[成交汇总] %s：真实成交 %d 条",
-        target["community_name"],
-        len(deals),
-    )
-    return deals
-
-
 # ============================================================
 # 单小区直达采集（在售 + 成交）
 # ============================================================
@@ -578,57 +177,75 @@ async def collect_community(
     *,
     target: dict,
     area: Optional[float],
-    debug: bool,
 ) -> CommunityCollection:
-    """单小区直达采集：在售（挂牌页）+ 真实成交（成交页）。
+    """单小区直达采集：委托工程 collector.collect_listing_by_url（与工程
+    shell 同一函数），风控协议、空态识别、归属校验、在售/成交 URL 直达
+    翻页全部单源；MVP 只做 PlatformResult → CommunityCollection 映射与
+    日志打印。
 
-    链家成交是真实成交事实，无论挂牌是否空态都独立采集（成交页与挂牌页
-    是不同 URL 的独立入口，空态小区仍可能有历史成交）。返回原始
-    CommunityCollection；筛选/算法在编排层。
+    链家成交是真实成交事实，deal_page_url 存在即由工程采集器独立采集
+    （挂牌空态不影响成交事实采集）。--area 时用工程 selection 做展示
+    过滤（面积口径已剥离出 RPA）。
     """
-    listing_url = target["listing_page_url"]
-    deal_url = target.get("deal_page_url")
-
-    listing_snapshots, listing_html = await collect_listing(
-        tab, target=target, area=area, debug=debug
+    result = await lj_adapter.collect_listing_by_url(
+        page=tab,
+        community_name=target["community_name"],
+        listing_page_url=target["listing_page_url"],
+        deal_page_url=target.get("deal_page_url"),
+        max_pages=MAX_PAGES,
     )
-    listing_empty = _platform.is_no_result(listing_html)
 
-    # 成交采集：入口存在即独立执行（挂牌空态不影响成交事实采集）
-    deals: list[dict] = []
-    if deal_url:
-        deals = await collect_deals(tab, target=target, debug=debug)
+    listings = list(result.listing_snapshots)
+    if area is not None and listings:
+        selection = select_listings_for_estimation(listings, area)
+        listings = list(selection.snapshots)
+        log.info(
+            "[面积筛选] 请求 %s㎡：工程 selection 保留 %d/%d 条（弱参考=%s）",
+            area,
+            len(listings),
+            len(result.listing_snapshots),
+            selection.uses_weak_reference,
+        )
+
+    for snapshot in listings:
+        log.info(
+            "[在售] %s | %s | %s㎡ | 总价 %s万 | 单价 %s元/㎡",
+            snapshot.community_name or "-",
+            snapshot.layout or "-",
+            snapshot.area or "-",
+            snapshot.total_price or "-",
+            snapshot.unit_price or "-",
+        )
+
+    deals = list(result.deal_records)
+    if deals:
         print_deal_records(deals)
 
-    print_listing_snapshots(listing_snapshots)
+    log.info(
+        "[采集汇总] %s：在售 %d 条，真实成交 %d 条",
+        target["community_name"],
+        len(listings),
+        len(deals),
+    )
 
-    has_listing = bool(listing_snapshots)
-    has_deals = bool(deals)
-    if not has_listing and not has_deals:
-        status = PlatformResultStatus.NO_DATA
-        log.info(
-            "[采集汇总] %s：在售 0 条、成交 0 条（%s）",
-            target["community_name"],
-            "挂牌空态" if listing_empty else "无数据",
+    blocked_reason = (
+        result.reason
+        if result.status in (
+            PlatformResultStatus.WAIT_MANUAL_VERIFY,
+            PlatformResultStatus.LOGIN_EXPIRED,
+            PlatformResultStatus.ERROR,
         )
-    else:
-        status = PlatformResultStatus.SUCCESS
-        log.info(
-            "[采集汇总] %s：在售 %d 条，真实成交 %d 条",
-            target["community_name"],
-            len(listing_snapshots),
-            len(deals),
-        )
-
+        else None
+    )
     return CommunityCollection(
         platform="lj",
         community_id=target["community_id"],
         community_name=target["community_name"],
-        listing_page_url=listing_url,
-        deal_page_url=deal_url,
-        status=status,
-        blocked_reason=None,  # 风控协议：拦截在页内暂停等人工，返回即干净
-        listings=listing_snapshots,
+        listing_page_url=target["listing_page_url"],
+        deal_page_url=target.get("deal_page_url"),  # 白名单行带入（缺失则 None）
+        status=result.status,
+        blocked_reason=blocked_reason,
+        listings=listings,
         deals=deals,  # 真实成交明细（仅 lj/fang 有）
         community_avg_price=None,  # 链家不采小区均价
     )
@@ -699,7 +316,6 @@ async def main(
                 tab,
                 target=target,
                 area=area,
-                debug=debug,
             )
             summaries.append(item)
 

@@ -10,8 +10,10 @@
 
 本脚本只用于独立验证，不写入数据库，也不接入正式采集链路。
 
-风控协议（对齐 app/rpa/runtime.py）：命中拦截时浏览器窗口自动置前，脚本阻塞等待
-一次回车确认（人工处理完浏览器后由终端/编排注入），不做任何自动轮询重试；
+风控协议：风控判定与恢复统一走工程件——判定=ajk 工程 detect_block + base
+公共兜底（detect_block_with_common），恢复=wait_and_reload_after_block
+（命中拦截自动置前被拦截标签页，阻塞等待人工回车后重取，循环直到页面恢复）。
+城市漂移（期望域名不符）是导航层职责，恢复后单独校验。
 浏览器使用固定 profile（persist/ajk_profile）留存验证状态。
 
 用法：
@@ -36,13 +38,14 @@ import nodriver as uc
 
 from app.community_data import resolve_communities
 from app.rpa.core import config
+from app.rpa.platforms.ajk import collector as ajk_adapter
 from app.rpa.platforms.ajk import parser as ajk_parsers
 from app.rpa.platforms.base import community_name_match, has_matching_community_snapshots
+from app.rpa.platforms.base import wait_and_reload_after_block
 from app.rpa.platforms.city_map import get_start_url
 from app.rpa.utils.debug_utils import dump_html as shared_dump_html
 from app.rpa.utils.debug_utils import set_debug_mode
 from app.rpa.utils.logging_utils import setup_logging
-from app.rpa.utils.window_control import ensure_browser_foreground, enumerate_browser_windows, focus_window
 
 
 setup_logging()
@@ -219,69 +222,21 @@ def select_unique_candidate(
     return matched[0]
 
 
-def blocked_reason(url: str, html: str, expected_host: str) -> Optional[str]:
-    """识别 MVP 阶段已知的登录、验证码和城市漂移现场。"""
-    url_lower = (url or "").lower()
-    if any(marker in url_lower for marker in ("captcha", "verifycode", "antibot", "antispam")):
-        return "命中验证码拦截 URL"
+async def ensure_accessible(page, *, label: str, expected_host: str) -> str:
+    """风控恢复走工程协议（检测→置前标签页→等人工回车→重取，直到恢复）。
 
-    if any(
-        marker in (html or "")
-        for marker in (
-            "请输入验证码", "验证后继续访问", "请完成验证", "滑动验证",
-            'id="ISDCaptcha"', 'class="code_img"',
-        )
-    ):
-        return "命中验证码拦截页面"
-
-    if any(marker in (html or "") for marker in ("请输入手机号", "请输入密码", "手机快捷登录", "扫码登录")):
-        return "命中登录页面"
-
-    actual_host = (urlparse(url or "").hostname or "").lower()
-    if actual_host != expected_host:
-        return f"城市漂移：期望 {expected_host}，实际 {actual_host or '空'}"
-    return None
-
-
-def _focus_browser_window(page) -> None:
-    """把浏览器窗口顶到前台，避免验证码/拦截窗口被压在底下没人发现。"""
-    try:
-        browser = getattr(page, "browser", None)
-        proc = getattr(browser, "process", None) if browser else None
-        pid = getattr(proc, "pid", None) or (proc if isinstance(proc, int) else None)
-        if pid and ensure_browser_foreground(int(pid)):
-            return
-        windows = enumerate_browser_windows()
-        if windows:
-            focus_window(windows[-1].hwnd)
-    except Exception as exc:
-        log.debug("聚焦浏览器窗口失败: %s", exc)
-
-
-async def ensure_accessible(page, *, label: str, expected_host: str, manual: bool) -> str:
-    """页面被拦截时置前浏览器并阻塞等待一次回车确认，恢复后返回 HTML。
-
-    协议：命中拦截 → 浏览器置前 → 人工在浏览器处理完 → 终端注入一次回车 →
-    重查一次；仍拦截则再等下一轮回车。本函数自身绝不轮询，避免高频重试加重风控。
+    风控判定=ajk 工程 detect_block（ISDCaptcha 等 58 系验证码标识已在工程
+    collector 内）+ base 公共兜底（wait_and_reload_after_block 内部统一叠加
+    detect_block_with_common）。城市漂移（期望域名不符）是 MVP 导航层职责，
+    不属于风控 marker，恢复后在此单独校验。
     """
-    attempt = 1
-    while True:
-        await page
-        html = await page.get_content()
-        reason = blocked_reason(page.target.url or "", html, expected_host)
-        if reason is None:
-            return html
-        if not manual:
-            raise RuntimeError(f"{label}{reason}，请使用 --manual-login 后重试")
-        log.warning("%s不可用（第 %d 次）：%s，已置前浏览器，等待人工处理后回车继续", label, attempt, reason)
-        _focus_browser_window(page)
-        await asyncio.to_thread(
-            input,
-            f"\n{label}{reason}。请在浏览器处理完成后按回车继续...\n",
+    html = await wait_and_reload_after_block(page, ajk_adapter.detect_block, label)
+    actual_host = (urlparse(page.target.url or "").hostname or "").lower()
+    if actual_host != expected_host:
+        raise RuntimeError(
+            f"{label}城市漂移：期望 {expected_host}，实际 {actual_host or '空'}"
         )
-        await page
-        await asyncio.sleep(2)
-        attempt += 1
+    return html
 
 
 async def is_interactable(element) -> bool:
@@ -441,7 +396,6 @@ async def search_and_extract_candidate(
     expected_host: str,
     administrative_district: str,
     candidate_name: str,
-    manual_login: bool,
 ) -> Optional[CommunityLinkCandidate]:
     """按单个候选名搜索并提取唯一小区候选；未命中返回 None。"""
     await page.get(start_url)
@@ -457,7 +411,6 @@ async def search_and_extract_candidate(
         page,
         label=f"搜索结果页[{candidate_name}]",
         expected_host=expected_host,
-        manual=manual_login,
     )
     await dump_html(page, f"ajk_community_page_search_{_safe_file_token(candidate_name)}")
 
@@ -491,7 +444,6 @@ async def collect_community(
     administrative_district: str,
     community_district: str,
     community_name: str,
-    manual_login: bool,
 ) -> dict:
     """处理单个小区：候选名兜底搜索 → 拼接并实打开挂牌页复核 → 返回结果摘要。"""
     names = build_candidate_names(city, administrative_district, community_name)
@@ -504,7 +456,6 @@ async def collect_community(
             expected_host=expected_host,
             administrative_district=administrative_district,
             candidate_name=name,
-            manual_login=manual_login,
         )
         if candidate is not None:
             matched_name = name
@@ -530,7 +481,6 @@ async def collect_community(
         page,
         label="小区挂牌页",
         expected_host=expected_host,
-        manual=manual_login,
     )
     await dump_html(page, f"ajk_community_page_listing_{_safe_file_token(community_name)}")
     listing_snapshots = ajk_parsers.parse_listing_snapshots(listing_html)
@@ -596,7 +546,6 @@ async def main(
             page,
             label="首页",
             expected_host=expected_host,
-            manual=manual_login,
         )
         await dump_html(page, "ajk_community_page_home")
 
@@ -611,7 +560,6 @@ async def main(
                     administrative_district=administrative_district,
                     community_district=community_district,
                     community_name=community_name,
-                    manual_login=manual_login,
                 )
                 summary["success"] = True
                 summaries.append(summary)

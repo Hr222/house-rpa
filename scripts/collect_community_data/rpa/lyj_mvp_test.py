@@ -1,20 +1,19 @@
 # -*- coding: utf-8 -*-
 """乐有家 MVP 测试脚本（URL 直达抓取形式）。
 
-抓取形式（2026-09-03 整改，对齐 ajk 模板）：小区挂牌入口已由统一初始化
+抓取形式（2026-09-04 整改，对齐 ke 模板）：小区挂牌入口已由统一初始化
 工具存入 community_platform_pages（/esf?b={小区ID}），本脚本按
-community_id 直达挂牌列表页，不走"首页 → 搜索 → 面积筛选"的模拟
-点击链路；读 HTML 解析在售快照与小区均价。
+community_id 直达挂牌列表页。
 
 流程：读取库内 lyj 入口 → 首页先行建立会话（--manual-login 时人工
-过验证码/登录）→ page.get(listing_page_url) 直达 → 风控协议（工程件：
-wait_and_reload_after_block + _platform.detect_block，命中拦截 →
-置前 + 暂停等人工 → 回车 → 复检）→ 读 HTML 解析 → /esf/n{page}/
-URL 直达翻页累加。
+过验证码/登录）→ 采集主流程委托工程 collector.collect_listing_by_url
+（与工程 shell 同一函数：风控协议、空态识别、小区均价解析、归属校验、
+URL 直达翻页全部单源）；MVP 只做 PlatformResult → CommunityCollection
+映射与结果打印。--area 面积过滤改用工程 selection（面积口径已剥离
+出 RPA，见 base.py 说明）。
 
-乐有家无成交记录（与 ajk 同口径，deals 恒空）；面积筛选链路保留为
-可选（--area，默认不筛选，整页直捞）。浏览器全程存活，抓完不主动
-关闭；回车确认 / Ctrl+C 结束时关闭浏览器窗口。
+乐有家无成交记录（与 ajk 同口径，deals 恒空）。浏览器全程存活，
+抓完不主动关闭；回车确认 / Ctrl+C 结束时关闭浏览器窗口。
 
 用法：
   python -m scripts.collect_community_data.rpa.lyj_mvp_test --community-id 5650
@@ -26,21 +25,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import re
 import sqlite3
-from html import unescape
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse, urljoin
 
 import nodriver as uc
 from nodriver.core import util as nodriver_util
 
+from app.algorithm.selection import select_listings_for_estimation
 from app.rpa.core import config
-from app.rpa.core.models import ListingSnapshot
 from app.rpa.core.status import PlatformResultStatus
 from app.rpa.platforms import LyjPlatformAdapter
-from app.rpa.platforms.base import wait_and_reload_after_block, has_matching_community_snapshots
+from app.rpa.platforms.base import wait_and_reload_after_block
+from app.rpa.platforms.lyj import collector as lyj_adapter
 from app.rpa.utils.debug_utils import dump_html as shared_dump_html
 from app.rpa.utils.debug_utils import set_debug_mode
 from app.rpa.utils.logging_utils import setup_logging
@@ -79,170 +76,27 @@ async def wait_for_manual_login():
     await asyncio.to_thread(input, prompt)
 
 
-# ============================================================
-# 交互工具：真人点击（仅供可选的面积筛选使用）
-# ============================================================
-
-
-async def is_interactable(element) -> bool:
-    try:
-        pos = await element.get_position()
-        return bool(pos and pos.width > 0 and pos.height > 0)
-    except Exception:
-        return False
-
-
-async def human_click(page, element, label: str) -> bool:
-    if not element:
-        return False
-    try:
-        await element.scroll_into_view()
-    except Exception:
-        pass
-    try:
-        await element.mouse_move()
-    except Exception:
-        pass
-    await asyncio.sleep(0.3)
-    last_error = None
-    for clicker in ("mouse", "js"):
-        try:
-            if clicker == "mouse":
-                await element.mouse_click()
-            else:
-                await element.click()
-            await page
-            await asyncio.sleep(1.0)
-            return True
-        except Exception as exc:
-            last_error = exc
-    log.warning("%s click failed: %s", label, last_error)
-    return False
-
-
-# ============================================================
-# 可选面积筛选（--area 时才使用，默认不筛选）
-# ============================================================
-
-
-async def fill_area_inputs(page, area_min, area_max):
-    """乐有家面积筛选：找到"面积"区 → 点"更多及自定义" → 填值 → 点确定。"""
-    try:
-        containers = await page.select_all("div.selected-index.hasmore", timeout=3)
-    except Exception:
-        containers = []
-
-    area_container = None
-    for c in containers:
-        try:
-            tit = await c.apply(
-                "(el) => { const t = el.querySelector('.c333.tit'); return t ? t.textContent.trim() : ''; }"
-            )
-        except Exception:
-            tit = ""
-        if tit == "面积":
-            area_container = c
-            break
-
-    if area_container is None:
-        raise RuntimeError("未找到面积筛选区（标题为'面积'的 hasmore 容器）")
-
-    try:
-        btns = await area_container.query_selector_all("span.btn-showmore")
-    except Exception:
-        btns = []
-    if btns:
-        log.info("[3] 点击面积区的'更多及自定义'展开")
-        await human_click(page, btns[0], "btn-showmore")
-        await page
-        await asyncio.sleep(2)
-
-    try:
-        min_el = await page.select("#a_start", timeout=3)
-    except Exception:
-        min_el = None
-    try:
-        max_el = await page.select("#a_end", timeout=3)
-    except Exception:
-        max_el = None
-
-    if min_el is None or max_el is None:
-        log.warning("[3] 展开后未找到 #a_start / #a_end")
-        return False
-
-    min_ok = await is_interactable(min_el)
-    max_ok = await is_interactable(max_el)
-    log.info("[3] 面积输入框: #a_start 可交互=%s, #a_end 可交互=%s", min_ok, max_ok)
-
-    if not min_ok and not max_ok:
-        log.warning("[3] 面积输入框不可交互，可能展开失败")
-        return False
-
-    if min_ok:
-        await human_click(page, min_el, "area min input")
-        try:
-            await min_el.clear_input()
-        except Exception:
-            pass
-        await asyncio.sleep(0.3)
-        await min_el.send_keys(str(int(area_min)))
-        await page
-        await asyncio.sleep(0.5)
-        log.info("[3] 填入下限: %s", area_min)
-
-    if max_ok:
-        await human_click(page, max_el, "area max input")
-        try:
-            await max_el.clear_input()
-        except Exception:
-            pass
-        await asyncio.sleep(0.3)
-        await max_el.send_keys(str(int(area_max)))
-        await page
-        await asyncio.sleep(0.8)
-        log.info("[3] 填入上限: %s", area_max)
-
-    try:
-        confirm_btn = await page.select("#areaUsedefinedBtn", timeout=3)
-    except Exception:
-        confirm_btn = None
-
-    confirm_clicked = False
-    if confirm_btn:
-        confirm_clicked = await human_click(page, confirm_btn, "area confirm")
-    if not confirm_clicked and max_el and max_ok:
-        try:
-            await max_el.send_keys("\r")
-            await page
-            confirm_clicked = True
-            log.info("[3] 用回车兜底提交")
-        except Exception:
-            pass
-
-    await page
-    await asyncio.sleep(3)
-    return confirm_clicked
-
-
-# ============================================================
-# 解析：在售快照（截断到"猜你喜欢"之前）与小区均价（社区信息卡）
-# ============================================================
-
-
-def print_listing_snapshots(snapshots: list[ListingSnapshot]):
-    if not snapshots:
-        print("乐有家: 未抓到房源摘要")
+def terminate_browser() -> None:
+    """同步关闭常驻浏览器进程（终端 Ctrl+C 终止时调用，不依赖事件循环）。"""
+    global _browser
+    browser, _browser = _browser, None
+    if browser is None:
         return
-    for item in snapshots:
-        print(
-            "乐有家: "
-            f"{{小区名称: {item.community_name or ''}, 面积: {item.area or ''}平米, "
-            f"几房几厅: {item.layout or ''}, 售价: {item.unit_price or ''}元/平, "
-            f"总价: {item.total_price or ''}万}}"
-        )
-        _url = item.listing_url or "-"
-        print("  房源链接:", _url if len(_url) <= 72 else _url[:69] + "...")
+    try:
+        process = getattr(browser, "process", None)
+        if process is not None:
+            process.terminate()
+    except Exception:
+        log.debug("浏览器进程终止失败（可能已退出）")
+    try:
+        browser.stop()
+    except Exception:
+        pass
 
+
+# ============================================================
+# 库内入口查找
+# ============================================================
 
 def resolve_listing_urls(community_ids: list[int]) -> list[dict]:
     """从房源记录库读取乐有家已初始化的挂牌入口。
@@ -272,118 +126,59 @@ def resolve_listing_urls(community_ids: list[int]) -> list[dict]:
     return targets
 
 
-def build_page_urls(listing_url: str, first_page_html: str) -> list[str]:
-    """由第 1 页分页链接收集后续页 URL（/esf/n{N}/…，取页面原生链接 urljoin，无点击）。
-
-    分页 href 自带站点当前的查询串（b= 或 c= 等），urljoin 还原绝对地址
-    即与当前入口上下文一致；无分页链接则返回空列表（单页小区）。
-    """
-    page_urls: list[str] = []
-    seen_pages: set[int] = set()
-    for match in re.finditer(r'href="([^"]*/esf/n(\d+)/[^"]*)"', first_page_html or ""):
-        href = urljoin(listing_url, unescape(match.group(1)))
-        page_no = int(match.group(2))
-        if page_no in seen_pages or page_no < 2 or page_no > MAX_PAGES:
-            continue
-        seen_pages.add(page_no)
-        page_urls.append(href)
-    return page_urls
-
-
-def terminate_browser() -> None:
-    """同步关闭常驻浏览器进程（终端 Ctrl+C 终止时调用，不依赖事件循环）。"""
-    global _browser
-    browser, _browser = _browser, None
-    if browser is None:
+def print_listing_snapshots(snapshots: list):
+    if not snapshots:
+        print("乐有家: 未抓到房源摘要")
         return
-    try:
-        process = getattr(browser, "process", None)
-        if process is not None:
-            process.terminate()
-    except Exception:
-        log.debug("浏览器进程终止失败（可能已退出）")
-    try:
-        browser.stop()
-    except Exception:
-        pass
+    for item in snapshots:
+        print(
+            "乐有家: "
+            f"{{小区名称: {item.community_name or ''}, 面积: {item.area or ''}平米, "
+            f"几房几厅: {item.layout or ''}, 售价: {item.unit_price or ''}元/平, "
+            f"总价: {item.total_price or ''}万}}"
+        )
+        _url = item.listing_url or "-"
+        print("  房源链接:", _url if len(_url) <= 72 else _url[:69] + "...")
 
 
 # ============================================================
 # 单小区直达采集
 # ============================================================
 
-
 async def collect_community(
     tab,
     *,
     target: dict,
     area: Optional[float],
-    debug: bool,
 ) -> CommunityCollection:
-    """单小区直达采集：导航挂牌页 → 风控协议 →（可选）面积筛选 →
-    读 HTML 解析原始快照与小区均价（含 URL 直达翻页）。
+    """单小区直达采集：委托工程 collector.collect_listing_by_url（与工程
+    shell 同一函数），风控协议、空态识别、小区均价解析、归属校验、URL
+    直达翻页全部单源；MVP 只做 PlatformResult → CommunityCollection 映射
+    与日志打印。
 
-    返回原始 CommunityCollection（一个对象，两个 list）；乐有家无成交
-    记录，deals 恒空；筛选计算在编排层。
+    乐有家无成交记录，小区均价仅作展示（空态时工程采集器仍回填均价）。
+    --area 时用工程 selection 做展示过滤（面积口径已剥离出 RPA）。
     """
-    listing_url = target["listing_page_url"]
-    await tab.get(listing_url)
-    await tab
-    await asyncio.sleep(3)
-
-    # 第 1 页：走工程风控协议，风控未解除前不会返回
-    html = await wait_and_reload_after_block(
-        tab, _platform.detect_block, f"小区挂牌页[{target['community_name']}]"
+    result = await lyj_adapter.collect_listing_by_url(
+        page=tab,
+        community_name=target["community_name"],
+        listing_page_url=target["listing_page_url"],
+        max_pages=MAX_PAGES,
     )
-    if debug:
-        await dump_html(tab, f"lyj_listing_{target['community_id'] or 'direct'}_p1")
 
-    # 空态识别：调用子平台 adapter 导出的判空能力（与 detect_block 同级）。
-    # 零在售小区页面为空态 + 其他小区推荐位，绝不能把推荐位当在售解析；
-    # marker 真实性待编排层实测核对（见 _platform.is_no_result docstring）
-    if _platform.is_no_result(html):
+    listings = list(result.listing_snapshots)
+    if area is not None and listings:
+        selection = select_listings_for_estimation(listings, area)
+        listings = list(selection.snapshots)
         log.info(
-            "[空态] %s 在乐有家在售 0 条（页面为无房源空态，跳过推荐位）",
-            target["community_name"],
-        )
-        return CommunityCollection(
-            platform="lyj",
-            community_id=target["community_id"],
-            community_name=target["community_name"],
-            listing_page_url=listing_url,
-            deal_page_url=None,
-            status=PlatformResultStatus.NO_DATA,
-            blocked_reason=None,
-            listings=[],
-            deals=[],  # 乐有家无成交记录
-            community_avg_price=None,
+            "[面积筛选] 请求 %s㎡：工程 selection 保留 %d/%d 条（弱参考=%s）",
+            area,
+            len(listings),
+            len(result.listing_snapshots),
+            selection.uses_weak_reference,
         )
 
-    area_confirmed = True
-    if area is not None:
-        area_confirmed = await fill_area_inputs(tab, area, area)
-        if not area_confirmed:
-            log.warning("[筛选] 面积筛选未成功提交，本次为全量在售")
-        # 面积筛选（如有）会刷新页面，重新读取当前 HTML
-        html = await tab.get_content()
-
-    snapshots = _platform.parse_listing_snapshots(html, base_url=tab.target.url)
-    community_avg_price = _platform.parse_community_avg_price(html)
-
-    # 页面归属校验（工程件，与 URL 初始化 MVP 同款）：解析出的快照必须
-    # 能与目标小区名匹配，否则判定入口落地页错误，整页弃用不入库
-    # （如泰福名苑的 lyj 入口 b=861860 落地非本小区页面，需人工核修）。
-    if snapshots and not has_matching_community_snapshots(snapshots, target["community_name"]):
-        log.warning(
-            "[归属不符] %s：%s 页面快照与目标小区不匹配（%d 条全部弃用）",
-            target["community_name"],
-            listing_url,
-            len(snapshots),
-        )
-        snapshots = []
-        community_avg_price = None
-
-    for snapshot in snapshots:
+    for snapshot in listings:
         log.info(
             "[在售] %s | %s | %s㎡ | 总价 %s万 | 单价 %s元/㎡",
             snapshot.community_name or "-",
@@ -392,47 +187,33 @@ async def collect_community(
             snapshot.total_price or "-",
             snapshot.unit_price or "-",
         )
-
-    # URL 直达翻页：仅归属校验通过才翻页
-    page_urls = build_page_urls(listing_url, html) if snapshots else []
-    if page_urls:
-        log.info("[翻页] 第 1 页 %d 条；另有 %d 页待采", len(snapshots), len(page_urls))
-    for page_no, page_url in enumerate(page_urls, start=2):
-        await tab.get(page_url)
-        await tab
-        await asyncio.sleep(2)
-        # 每页同样走工程风控协议：命中拦截暂停等人工，干净后才解析
-        page_html = await wait_and_reload_after_block(
-            tab, _platform.detect_block, f"翻页第 {page_no} 页"
-        )
-        if debug:
-            await dump_html(tab, f"lyj_listing_{target['community_id'] or 'direct'}_p{page_no}")
-        page_snapshots = _platform.parse_listing_snapshots(page_html, base_url=tab.target.url)
-        snapshots.extend(page_snapshots)
-        if not page_snapshots:
-            # 空页 = 已翻过真实在售末页，停止翻页
-            log.info("[翻页] 第 %d 页无在售，停止翻页", page_no)
-            break
-        log.info("[翻页] 第 %d 页解析 %d 条，累计 %d 条", page_no, len(page_snapshots), len(snapshots))
-
     log.info(
         "[采集汇总] %s：在售 %d 条，小区均价 %s 元/㎡",
         target["community_name"],
-        len(snapshots),
-        f"{community_avg_price:.0f}" if community_avg_price else "未识别",
+        len(listings),
+        f"{result.community_avg_price:.0f}" if result.community_avg_price else "未识别",
     )
 
+    blocked_reason = (
+        result.reason
+        if result.status in (
+            PlatformResultStatus.WAIT_MANUAL_VERIFY,
+            PlatformResultStatus.LOGIN_EXPIRED,
+            PlatformResultStatus.ERROR,
+        )
+        else None
+    )
     return CommunityCollection(
         platform="lyj",
         community_id=target["community_id"],
         community_name=target["community_name"],
-        listing_page_url=listing_url,
+        listing_page_url=target["listing_page_url"],
         deal_page_url=None,  # 乐有家无成交页
-        status=PlatformResultStatus.SUCCESS if snapshots else PlatformResultStatus.NO_DATA,
-        blocked_reason=None,  # 风控协议：拦截在页内暂停等人工，返回即干净
-        listings=snapshots,
+        status=result.status,
+        blocked_reason=blocked_reason,
+        listings=listings,
         deals=[],  # 乐有家无成交记录
-        community_avg_price=community_avg_price,
+        community_avg_price=result.community_avg_price,
     )
 
 
@@ -495,7 +276,6 @@ async def main(
                 tab,
                 target=target,
                 area=area,
-                debug=debug,
             )
             summaries.append(item)
             print_listing_snapshots(item.listings)

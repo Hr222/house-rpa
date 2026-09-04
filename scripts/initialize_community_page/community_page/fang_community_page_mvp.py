@@ -8,9 +8,11 @@
 全部候选名失败才判定该小区失败。单个小区失败只记录并继续，不关闭浏览器；
 浏览器仅在全部小区处理完并经人工确认后才退出。
 
-软风控自愈：单次搜索超过 ``SOFT_BLOCK_SECONDS``（45s）判定触发风控，
-自动关闭浏览器并重开新会话重试当前小区；连续 ``MAX_CONSECUTIVE_RESTARTS``
-（2）次新会话仍触发则判定 IP 级限流，停止批次交人工。
+软风控自愈：单次搜索超过工程阈值 ``FANG_SOFT_BLOCK_SECONDS``（见
+app/rpa/platforms/fang/constants.py）判定触发风控（异常/判定用工程件
+FangSoftBlockError/check_soft_block_elapsed），自动关闭浏览器并重开新会话
+重试当前小区；连续 ``MAX_CONSECUTIVE_RESTARTS``（2）次新会话仍触发则判定
+IP 级限流，停止批次交人工。
 
 本脚本只用于独立验证，不写入数据库，也不接入正式采集链路；运行结果通过
 ``--result-file`` 输出 JSON，由编排层负责落库。
@@ -38,8 +40,11 @@ import nodriver as uc
 
 from app.community_data import resolve_communities
 from app.rpa.core import config
+from app.rpa.platforms.fang import collector as fang_adapter
 from app.rpa.platforms.fang import parser as fang_parsers
+from app.rpa.platforms.fang.constants import FANG_SOFT_BLOCK_SECONDS
 from app.rpa.platforms.base import community_name_match, has_matching_community_snapshots
+from app.rpa.platforms.base import wait_and_reload_after_block
 from app.rpa.platforms.city_map import get_start_url
 from app.rpa.utils.debug_utils import dump_html as shared_dump_html
 from app.rpa.utils.debug_utils import set_debug_mode
@@ -49,14 +54,10 @@ from app.rpa.utils.logging_utils import setup_logging
 setup_logging()
 log = logging.getLogger(__name__)
 
-# 软风控参数：单次“搜索+取结果”超过该秒数判定触发风控（正常 15~18s、风控停滞 60~116s）；
-# 连续 N 次换新浏览器仍触发则判定 IP 级限流，停止批次交人工。
-SOFT_BLOCK_SECONDS = 45.0
+# 连续 N 次换新浏览器仍触发软风控则判定 IP 级限流，停止批次交人工。
+# 软风控秒数阈值与异常用工程件：FANG_SOFT_BLOCK_SECONDS / FangSoftBlockError
+# / check_soft_block_elapsed（自 app/rpa/platforms/fang 导入）。
 MAX_CONSECUTIVE_RESTARTS = 2
-
-
-class SoftBlockError(RuntimeError):
-    """搜索响应超过阈值，判定触发软风控。"""
 
 
 async def dump_html(page, name: str) -> Optional[Path]:
@@ -69,26 +70,12 @@ def _safe_file_token(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", value or "").strip("_") or "unnamed"
 
 
-def _blocked_reason(url: str, html: str, expected_host: str) -> Optional[str]:
-    """识别 MVP 阶段已知的登录、验证码和城市漂移现场。"""
-    url_lower = (url or "").lower()
-    if any(marker in url_lower for marker in ("captcha", "verifycode", "antibot", "antispam")):
-        return "命中验证码拦截 URL"
-
-    if any(marker in (html or "") for marker in ("请输入验证码", "验证后继续访问", "请完成验证", "滑动验证")):
-        return "命中验证码拦截页面"
-
-    if any(marker in (html or "") for marker in ("请输入手机号", "请输入密码", "手机快捷登录", "扫码登录")):
-        return "命中登录页面"
-
-    actual_host = (urlparse(url or "").hostname or "").lower()
-    if actual_host != expected_host:
-        return f"城市漂移：期望域名 {expected_host}，实际 {actual_host or '空'}"
-    return None
-
-
 async def wait_for_manual_resolution(label: str, reason: str) -> None:
-    """保留浏览器现场，等待人工完成登录或验证码。"""
+    """搜索前人工登录确认门：保留浏览器现场，等待人工确认登录状态。
+
+    仅用于 --manual-login 的搜索前暂停；页面被风控拦截后的恢复统一走
+    ensure_accessible → wait_and_reload_after_block 工程协议。
+    """
     prompt = (
         f"\n{label}{reason}。请在浏览器完成处理后，"
         "回到终端按回车继续...\n"
@@ -97,21 +84,20 @@ async def wait_for_manual_resolution(label: str, reason: str) -> None:
 
 
 async def ensure_accessible(page, *, label: str, expected_host: str) -> str:
-    """保留人工处理后的当前页，直到页面可继续解析。"""
-    attempt = 1
-    while True:
-        await page
-        html = await page.get_content()
-        url = page.target.url or ""
-        reason = _blocked_reason(url, html, expected_host)
-        if reason is None:
-            return html
+    """风控恢复走工程协议（检测→等人工回车→重取，直到恢复），恢复后校验城市域名。
 
-        log.warning("%s不可用（第 %d 次）：%s，URL=%s", label, attempt, reason, url)
-        await wait_for_manual_resolution(label, reason)
-        await page
-        await asyncio.sleep(2)
-        attempt += 1
+    风控判定=fang 工程 detect_block（含已提升的登录墙 HTML 标记）+ base
+    公共兜底（wait_and_reload_after_block 内部统一叠加 detect_block_with_common）。
+    城市漂移（期望域名不符）是 MVP 导航层职责，不属于风控 marker，
+    恢复后在此单独校验。
+    """
+    html = await wait_and_reload_after_block(page, fang_adapter.detect_block, label)
+    actual_host = (urlparse(page.target.url or "").hostname or "").lower()
+    if actual_host != expected_host:
+        raise RuntimeError(
+            f"{label}城市漂移：期望域名 {expected_host}，实际 {actual_host or '空'}"
+        )
+    return html
 
 
 async def is_interactable(element) -> bool:
@@ -290,18 +276,16 @@ async def search_and_extract_listing(
     await asyncio.sleep(2)
     await ensure_accessible(page, label=f"首页[{candidate_name}]", expected_host=expected_host)
 
-    search_started = time.perf_counter()
+    search_started = time.monotonic()
     await search_community(page, candidate_name)
     result_html = await ensure_accessible(
         page,
         label=f"搜索结果页[{candidate_name}]",
         expected_host=expected_host,
     )
-    elapsed = time.perf_counter() - search_started
-    if elapsed >= SOFT_BLOCK_SECONDS:
-        raise SoftBlockError(
-            f"搜索名[{candidate_name}]耗时 {elapsed:.0f}s ≥ {SOFT_BLOCK_SECONDS:.0f}s，判定触发软风控"
-        )
+    # 软风控判定用工程件（内部按 time.monotonic 差值对照 FANG_SOFT_BLOCK_SECONDS），
+    # 超时抛 FangSoftBlockError，由 main 统一走重开浏览器升级。
+    check_soft_block_elapsed(search_started, f"搜索名[{candidate_name}]")
     await dump_html(page, f"fang_community_page_search_{_safe_file_token(candidate_name)}")
 
     snapshots = fang_parsers.parse_listing_snapshots(result_html)
@@ -499,12 +483,14 @@ async def main(
                 print(f"命中搜索名：{summary['matched_search_name']}")
                 print(f"listing_page_url：{summary['listing_page_url']}")
                 print(f"挂牌页结构化房源：{summary['structured_listing_count']} 条")
-            except SoftBlockError as exc:
+            except FangSoftBlockError as exc:
                 consecutive_restarts += 1
                 if consecutive_restarts > MAX_CONSECUTIVE_RESTARTS:
                     log.error(
-                        "连续 %d 次新会话仍触发软风控，疑似 IP 级限流，停止批次（已保留 %d 条结果）",
+                        "连续 %d 次新会话仍触发软风控（单次阈值 %.0fs），疑似 IP 级限流，"
+                        "停止批次（已保留 %d 条结果）",
                         consecutive_restarts - 1,
+                        FANG_SOFT_BLOCK_SECONDS,
                         len(summaries),
                     )
                     print(f"\n[停止] 连续新会话仍触发风控，请人工介入后重跑剩余小区")

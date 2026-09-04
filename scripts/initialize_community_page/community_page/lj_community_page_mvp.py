@@ -38,7 +38,7 @@ import nodriver as uc
 from app.community_data import resolve_communities
 from app.rpa.core import config
 from app.rpa.platforms.lj import collector as lj_adapter
-from app.rpa.platforms.base import community_name_match
+from app.rpa.platforms.base import community_name_match, wait_and_reload_after_block
 from app.rpa.platforms.city_map import get_start_url
 from app.rpa.utils.debug_utils import dump_html as shared_dump_html
 from app.rpa.utils.debug_utils import set_debug_mode
@@ -80,17 +80,6 @@ def _expected_host(start_url: str) -> str:
     return (urlparse(start_url).hostname or "").lower()
 
 
-def blocked_reason(url: str, html: str, expected_host: str) -> Optional[str]:
-    """识别链家登录、验证码和城市漂移。"""
-    blocked, reason = lj_adapter.detect_block(url, html)
-    if blocked:
-        return reason
-    actual_host = (urlparse(url or "").hostname or "").lower()
-    if actual_host != expected_host:
-        return f"城市漂移：期望 {expected_host}，实际 {actual_host or '空'}"
-    return None
-
-
 async def wait_for_manual_login() -> None:
     """搜索前固定等待人工完成登录/验证。"""
     await asyncio.to_thread(
@@ -99,23 +88,19 @@ async def wait_for_manual_login() -> None:
     )
 
 
-async def ensure_accessible(page, *, label: str, expected_host: str, manual: bool) -> str:
-    """页面被拦截时等待一次人工处理，复检失败则直接停止。"""
-    await page
-    html = await page.get_content()
-    reason = blocked_reason(page.target.url or "", html, expected_host)
-    if reason is None:
-        return html
-    if not manual:
-        raise RuntimeError(f"{label}{reason}，请使用 --manual-login 后重试")
-    log.warning("%s不可用：%s", label, reason)
-    await asyncio.to_thread(input, f"\n{label}{reason}。请在浏览器处理完成后按回车继续...\n")
-    await page
-    await asyncio.sleep(2)
-    html = await page.get_content()
-    reason = blocked_reason(page.target.url or "", html, expected_host)
-    if reason is not None:
-        raise RuntimeError(f"{label}人工处理后仍不可用：{reason}")
+async def ensure_accessible(page, *, label: str, expected_host: str) -> str:
+    """风控恢复走工程协议（检测→等人工回车→重取，直到恢复），恢复后校验城市域名。
+
+    风控判定=lj 工程 detect_block + base 公共兜底（wait_and_reload_after_block
+    内部统一叠加 detect_block_with_common）。城市漂移（期望域名不符）是 MVP
+    导航层职责，不属于风控 marker，恢复后在此单独校验。
+    """
+    html = await wait_and_reload_after_block(page, lj_adapter.detect_block, label)
+    actual_host = (urlparse(page.target.url or "").hostname or "").lower()
+    if actual_host != expected_host:
+        raise RuntimeError(
+            f"{label}城市漂移：期望 {expected_host}，实际 {actual_host or '空'}"
+        )
     return html
 
 
@@ -306,7 +291,6 @@ async def search_and_extract(
     start_url: str,
     expected_host: str,
     candidate_name: str,
-    manual_login: bool,
 ) -> Optional[CommunityCandidate]:
     """按单个候选名搜索并提取唯一小区候选（含两条路径印证）；未命中返回 None。"""
     await _search_community(page, start_url, candidate_name)
@@ -314,7 +298,6 @@ async def search_and_extract(
         page,
         label=f"小区挂牌搜索页[{candidate_name}]",
         expected_host=expected_host,
-        manual=manual_login,
     )
     result_url = page.target.url or start_url
     result_path = urlparse(result_url).path
@@ -346,14 +329,13 @@ async def collect_community(
     administrative_district: str,
     community_district: str,
     community_name: str,
-    manual_login: bool,
 ) -> dict:
     """处理单个小区：候选名兜底搜索 → 打开挂牌页复核 → 返回结果摘要。"""
     names = build_candidate_names(city, administrative_district, community_name)
     candidate: Optional[CommunityCandidate] = None
     matched_name = ""
     for name in names:
-        candidate = await search_and_extract(page, start_url, expected_host, name, manual_login)
+        candidate = await search_and_extract(page, start_url, expected_host, name)
         if candidate is not None:
             matched_name = name
             break
@@ -369,7 +351,6 @@ async def collect_community(
         page,
         label="小区挂牌页",
         expected_host=expected_host,
-        manual=manual_login,
     )
     await dump_html(page, f"lj_community_page_listing_{_safe_file_token(community_name)}")
 
@@ -408,7 +389,6 @@ async def collect_deal_page_url(
     start_url: str,
     expected_host: str,
     xiaoqu_id: str,
-    manual_login: bool,
 ) -> str:
     """按链家同 ID 惯例拼接小区成交页并实打开复核，返回实际成交页 URL。
 
@@ -421,7 +401,7 @@ async def collect_deal_page_url(
     await page.get(deal_page_url)
     await page
     await asyncio.sleep(2)
-    await ensure_accessible(page, label="小区成交页", expected_host=expected_host, manual=manual_login)
+    await ensure_accessible(page, label="小区成交页", expected_host=expected_host)
     await dump_html(page, f"lj_community_page_deal_{_safe_file_token(xiaoqu_id)}")
 
     actual_url = page.target.url or deal_page_url
@@ -470,9 +450,9 @@ async def main(
             page = await browser.get(start_url)
             await page
             await asyncio.sleep(3)
-            await ensure_accessible(page, label="登录后首页", expected_host=expected_host, manual=False)
+            await ensure_accessible(page, label="登录后首页", expected_host=expected_host)
         else:
-            await ensure_accessible(page, label="首页", expected_host=expected_host, manual=False)
+            await ensure_accessible(page, label="首页", expected_host=expected_host)
 
         summaries: list[dict] = []
         for community_name in community_names:
@@ -485,7 +465,6 @@ async def main(
                     administrative_district=administrative_district,
                     community_district=community_district,
                     community_name=community_name,
-                    manual_login=manual_login,
                 )
                 summary["success"] = True
                 if include_deal:
@@ -495,7 +474,6 @@ async def main(
                             start_url=start_url,
                             expected_host=expected_host,
                             xiaoqu_id=summary["xiaoqu_id"],
-                            manual_login=manual_login,
                         )
                         print(f"deal_page_url：{summary['deal_page_url']}")
                     except Exception as deal_exc:
