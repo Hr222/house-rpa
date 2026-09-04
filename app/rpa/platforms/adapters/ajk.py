@@ -79,6 +79,17 @@ def detect_block(url: str, html: str) -> tuple[bool, str]:
     return False, ""
 
 
+def is_no_result(html: str) -> bool:
+    """空态判定：安居客"没有找到相关房源"空态 section。
+
+    真实 dump（2026-09-03 洪湖14号大院直达页 20260903_142248）：
+    <section class="empty"><span class="empty-text">没有找到相关房源，可
+    …</span></section>，其后为 60 张别的小区推荐卡。空态页解析前必须
+    短路；已核对 8 份正常结果页 dump 均不含该文案，无误伤。
+    """
+    return "没有找到相关房源" in (html or "")
+
+
 # ============================================================
 # 页面交互辅助
 # ============================================================
@@ -388,8 +399,9 @@ async def _do_collect(
             request_id, started_at,
         )
 
-    # 3.5 无数据短路 + 泛搜索校验
-    if 'property-content-info-comm-name' not in keyword_html:
+    # 3.5 无数据短路：走平台统一空态入口 is_no_result（不能用"无房源卡"判断，
+    # 空态页仍渲染其他小区推荐卡且同样带 comm-name class，会漏判）
+    if is_no_result(keyword_html):
         return short_circuit_result(
             "安居客", PlatformResultStatus.NO_DATA, "关键词搜索无在售房源",
             request_id, started_at,

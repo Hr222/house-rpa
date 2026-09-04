@@ -79,6 +79,20 @@ def detect_block(url: str, html: str) -> tuple[bool, str]:
     return False, ""
 
 
+def is_no_result(html: str) -> bool:
+    """空态判定：乐有家"没有找到"空态页。
+
+    真实 dump（2026-09-03 泰福名苑 lyj 5564 空态页 20260903_164138）：
+    <div class="search-none"><div class="no-data"><span class="sup">
+    很抱歉，没有找到与您条件相符的房源</span><span class="sub">以下精选
+    房源，猜您会喜欢！</span></div></div>，其后为大数据推荐位 20 条别的小区。
+    已核对 4 份正常结果页 dump（含翻页页）均不含该文案，无误伤。
+    零在售页面为空态 + 推荐位，解析前必须短路。
+    """
+    return ("很抱歉，没有找到" in (html or "")
+            or "没有找到与您条件相符" in (html or ""))
+
+
 # ============================================================
 # 页面交互辅助
 # ============================================================
@@ -418,7 +432,7 @@ async def _do_collect(
             "乐有家", PlatformResultStatus.LOGIN_EXPIRED, "搜索后进入登录页",
             request_id, started_at,
         )
-    if "很抱歉，没有找到" in keyword_html:
+    if is_no_result(keyword_html):
         log.info("乐有家无匹配小区: %s，返回 NO_DATA", community_name)
         return short_circuit_result(
             "乐有家", PlatformResultStatus.NO_DATA, f"乐有家无{community_name}在售记录和成交记录",

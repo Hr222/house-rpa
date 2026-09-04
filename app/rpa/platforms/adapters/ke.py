@@ -140,6 +140,17 @@ def detect_block(url: str, html: str) -> tuple[bool, str]:
     return False, ""
 
 
+def is_no_result(html: str) -> bool:
+    """空态判定：贝壳"暂无在售房源"页（与链家共用同一套列表组件）。
+
+    真实 dump（泰福名苑 c24000000024228）：<div class="m-noresult">当前
+    小区暂无在售房源，为您推荐附近小区房源</div>，其后 sellListContent
+    是别的小区推荐位。空态页仍有小区详情/列表结构，必须靠本 marker
+    在解析前短路，绝不能把推荐位当在售解析。
+    """
+    return "m-noresult" in (html or "")
+
+
 def _extract_xiaoqu_id(detail_url: Optional[str]) -> Optional[str]:
     if not detail_url:
         return None
@@ -517,8 +528,8 @@ async def _do_collect(
             request_id, started_at,
         )
 
-    # 无数据短路：贝壳"暂无房源"页面（仍有小区详情链接，需靠 m-noresult 识别）
-    if "m-noresult" in keyword_html:
+    # 无数据短路：贝壳"暂无房源"页面（仍有小区详情链接，需靠 is_no_result 识别）
+    if is_no_result(keyword_html):
         return short_circuit_result(
             "贝壳", PlatformResultStatus.NO_DATA, "小区暂无在售房源",
             request_id, started_at, detail_url=detail_url,

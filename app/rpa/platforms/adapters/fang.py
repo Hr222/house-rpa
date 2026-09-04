@@ -89,6 +89,27 @@ def detect_block(url: str, html: str) -> tuple[bool, str]:
     return False, ""
 
 
+def is_no_result(html: str) -> bool:
+    """空态判定：房天下挂牌聚合页"本小区无在售房源"。
+
+    marker 基于真实空态 dump 校准（莲通公司综合楼 house-xm2810134960，
+    2026-09-03 存档 debug/20260903_1805_fang_listing_空态_*.html）：
+    空态页主体有 <div class="shop_no"> 容器，内含文案
+    "很抱歉，没有找到<span>…</span>相符的房源！"；同页仍渲染其他小区的
+    推荐房源 dl 卡（鸣乐大厦等），因此不能按"无在售卡"判断。
+
+    三个特征组合判定（shop_no 容器 + 两句文案）才能与单条数据页区分：
+    单条页（莲塘派出所宿舍 house-xm2811125778）也有 shop_no，但那是
+    隐形弹窗（pop_up/close_pop），不含"很抱歉，没有找到"，故判非空态。
+    """
+    text = html or ""
+    return (
+        "shop_no" in text
+        and "很抱歉，没有找到" in text
+        and "相符的房源" in text
+    )
+
+
 # ============================================================
 # 页面交互辅助
 # ============================================================
@@ -670,8 +691,9 @@ async def _do_collect(
                 request_id, started_at,
             )
 
-        # 无数据短路：检查结果列表是否存在
-        if '<dl class="clearfix' not in keyword_html:
+        # 无数据短路：走平台统一空态入口 is_no_result（不能用"无 dl 卡"判断，
+        # 空态页仍渲染其他小区推荐卡；marker 见 is_no_result docstring）
+        if is_no_result(keyword_html):
             return short_circuit_result(
                 "房天下", PlatformResultStatus.NO_DATA, "关键词搜索无在售房源",
                 request_id, started_at,

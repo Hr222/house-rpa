@@ -59,10 +59,16 @@ def parse_listing_snapshots(html: str) -> list:
         <dd class="price_right"><span class="red"><b>530</b>万</span><span>59988元/㎡</span></dd>
       </dl>
 
-    边界：截断到"您可能感兴趣的新房"(InterestedNewHouse)之前，排除新房推荐位。
+    边界：同时截断两类推荐位——二手房推荐"您可能感兴趣的房源"
+    （tit_x 标题，房源少的单条/空态页会补其他小区推荐，见 dump
+    20260903_1805_fang_listing_单条_莲塘派出所宿舍）与新房推荐
+    "InterestedNewHouse"；取最早出现位置。
     注意：tit_shop 是营销标题（非小区名），真正的小区名在 p.add_shop a 里。
     """
-    cut = html.find("InterestedNewHouse")
+    cut_a = html.find("您可能感兴趣的房源")
+    cut_b = html.find("InterestedNewHouse")
+    candidates = [c for c in (cut_a, cut_b) if c > 0]
+    cut = min(candidates) if candidates else -1
     main_html = html[:cut] if cut > 0 else html
 
     snapshots = []

@@ -98,14 +98,21 @@ def normalize_listing_url(value: Any) -> str:
     )
 
 
-def normalize_page_url(value: Any) -> str:
-    """规范化小区列表入口 URL，保留业务查询参数。"""
+def normalize_page_url(value: Any, *, keep_trailing_slash: bool = False) -> str:
+    """规范化小区列表入口 URL，保留业务查询参数。
+
+    keep_trailing_slash=True 时保留**无 query 路径型 URL** 的尾斜杠
+    （成交页地址口径：链家 /chengjiao/c{id}/、房天下 /loupan/{id}/chengjiao/
+    带尾斜杠与页面一致，均无 query）；带 query 的 URL 仍统一剥 path
+    尾斜杠（query 参数才是关键，尾斜杠无语义）。挂牌页地址维持无尾
+    斜杠存储（keep_trailing_slash 默认 False）。
+    """
     text = str(value or "").strip()
     parts = urlsplit(text)
     if parts.scheme.lower() not in {"http", "https"} or not parts.netloc:
         raise ValueError(f"页面 URL 必须是完整 HTTP(S) 地址: {value!r}")
     path = parts.path or "/"
-    if path != "/":
+    if path != "/" and not (keep_trailing_slash and not parts.query):
         path = path.rstrip("/")
     return urlunsplit(
         (

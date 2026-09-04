@@ -191,7 +191,7 @@ class PropertyRecordsDatabase:
             source_platform,
             _optional_text(source_community_name),
             normalize_page_url(listing_page_url) if listing_page_url is not None else None,
-            normalize_page_url(deal_page_url) if deal_page_url is not None else None,
+            normalize_page_url(deal_page_url, keep_trailing_slash=True) if deal_page_url is not None else None,
         )
         if values[3] is None and values[4] is None:
             raise ValueError("listing_page_url 和 deal_page_url 不能同时为空")

@@ -117,6 +117,15 @@ def detect_block(url: str, html: str) -> tuple[bool, str]:
     return False, ""
 
 
+def is_no_result(html: str) -> bool:
+    """空态判定：链家"暂无在售房源"页（与贝壳共用同一套列表组件）。
+
+    空态页仍有小区详情/列表结构，必须靠 m-noresult 在解析前短路，
+    绝不能把推荐位当在售解析。marker 与贝壳同源（ke_adapter.is_no_result）。
+    """
+    return "m-noresult" in (html or "")
+
+
 # ============================================================
 # 页面交互辅助
 # ============================================================
@@ -616,7 +625,7 @@ async def _do_collect(
 
     # 3. 判搜索成功（正向检测，避免标记词误判）
     # 3.5 无数据短路：m-noresult（链家和贝壳共用）或 sellListContent 缺失
-    if "m-noresult" in keyword_html:
+    if is_no_result(keyword_html):
         return short_circuit_result(
             "链家", PlatformResultStatus.NO_DATA, "关键词搜索无在售房源",
             request_id, started_at,
