@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
-"""询价完成后编排落库：公共入口被调用、失败不阻断返回。"""
+"""询价完成后编排落库：估价先返回、落库后台执行、失败不阻断。"""
 import asyncio
-
-import pytest
 
 from app.inquiry.completion import InquiryCompletionOrchestrator
 from app.inquiry.models import ConfirmedCommunityContext
@@ -45,42 +43,60 @@ def _collection() -> RPACollectionResult:
     return RPACollectionResult(platform_results=[result])
 
 
-def test_complete_records_success_platform_before_evaluate(monkeypatch) -> None:
+def test_complete_returns_then_records_in_background(monkeypatch) -> None:
     calls: list[dict] = []
+    orchestrated = InquiryCompletionOrchestrator()
 
     def fake_record(**kwargs):
         calls.append(kwargs)
         return IngestionReport()
 
     monkeypatch.setattr("app.inquiry.completion.record_platform_result", fake_record)
-    handler = InquiryCompletionOrchestrator().handler_for(_context())
-    payload = asyncio.run(handler(_request(), _collection()))
-    assert calls, "落库公共入口应被调用"
-    assert calls[0]["community_id"] == 5380
-    assert calls[0]["result"].listing_page_url.startswith("https")
-    assert payload is not None
+
+    async def main():
+        handler = orchestrated.handler_for(_context())
+        payload = await handler(_request(), _collection())
+        assert payload is not None
+        assert not calls  # 返回时落库尚未同步完成（后台执行中）
+        await orchestrated.wait_background()
+        assert calls, "后台落库应被执行"
+        assert calls[0]["community_id"] == 5380
+
+    asyncio.run(main())
 
 
 def test_complete_record_failure_does_not_block_return(monkeypatch) -> None:
+    orchestrated = InquiryCompletionOrchestrator()
+
     def boom(**kwargs):
         raise RuntimeError("落库失败（如小区身份校验不通过）")
 
     monkeypatch.setattr("app.inquiry.completion.record_platform_result", boom)
-    handler = InquiryCompletionOrchestrator().handler_for(_context())
-    # 落库抛异常仅 warning，complete 仍返回完整 payload（估价不受阻）
-    payload = asyncio.run(handler(_request(), _collection()))
-    assert payload is not None
-    assert payload.task_result["success"] is False  # 无在售快照 → NO_DATA 正常返回
+
+    async def main():
+        handler = orchestrated.handler_for(_context())
+        payload = await handler(_request(), _collection())
+        assert payload is not None
+        assert payload.task_result["success"] is False  # 无在售快照 → NO_DATA 正常返回
+        await orchestrated.wait_background()  # 后台落库异常仅 warning，不抛
+
+    asyncio.run(main())
 
 
 def test_complete_without_context_skips_record(monkeypatch) -> None:
     calls: list[dict] = []
+    orchestrated = InquiryCompletionOrchestrator()
 
     def fake_record(**kwargs):
         calls.append(kwargs)
 
     monkeypatch.setattr("app.inquiry.completion.record_platform_result", fake_record)
-    handler = InquiryCompletionOrchestrator().handler_for(None)
-    payload = asyncio.run(handler(_request(), _collection()))
-    assert not calls
-    assert payload is not None
+
+    async def main():
+        handler = orchestrated.handler_for(None)
+        payload = await handler(_request(), _collection())
+        assert payload is not None
+        await orchestrated.wait_background()
+        assert not calls
+
+    asyncio.run(main())

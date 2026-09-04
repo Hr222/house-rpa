@@ -272,7 +272,8 @@ def record_platform_result(
                 "total_price": getattr(snapshot, "total_price", None),  # 万；入库层按默认"万"转元
             }
         )
-    return PropertyRecordsIngestion(database).ingest_rpa_result(
+    ingestion = PropertyRecordsIngestion(database)
+    report = ingestion.ingest_rpa_result(
         community_id=community_id,
         city=city,
         administrative_district=administrative_district,
@@ -283,3 +284,33 @@ def record_platform_result(
         listing_records=listing_rows,
         seen_at=seen_at,
     )
+    # 下架同步（软删除）：本次采集为有效列表时，把同小区同平台未再出现、
+    # 仍 is_deleted=0 的旧挂牌标记删除；observed_urls 为空（空态/空页）不调用，
+    # 避免把整小区误判下架（mark_listings_not_seen 本身也拒绝空列表）。
+    observed_urls = [
+        str(snapshot.listing_url).strip()
+        for snapshot in (getattr(result, "listing_snapshots", ()) or ())
+        if getattr(snapshot, "listing_url", None)
+    ]
+    if observed_urls:
+        try:
+            source_platform = normalize_source_platform(
+                getattr(result, "source_platform", None) or getattr(result, "name", "")
+            )
+            deleted = ingestion.database.mark_listings_not_seen(
+                community_id,
+                source_platform,
+                observed_urls,
+                updated_at=_normalize_observed_at(seen_at),
+            )
+            if deleted:
+                log.info(
+                    "下架同步：%s(%s) %s 软删除 %d 条未再挂牌",
+                    source_community_name,
+                    community_id,
+                    source_platform,
+                    len(deleted),
+                )
+        except Exception as exc:  # 下架同步失败不影响本次落库与估价
+            log.warning("下架同步失败：%s(%s)：%s", source_community_name, community_id, exc)
+    return report

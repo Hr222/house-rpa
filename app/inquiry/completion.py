@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import asdict
 
@@ -82,9 +83,39 @@ def _task_result_payload(result: InquiryResult) -> dict:
 class InquiryCompletionOrchestrator:
     """持有最终聚合，让 RPA 只负责采集。
 
-    采集完成后先按小区把各平台原始数据落库（挂牌/成交/入口行），
-    再做跨平台估价；落库失败只 warning，不阻塞询价返回。
+    主链先做跨平台估价并立即返回；数据沉淀（落库挂牌/成交）转后台执行
+    （sqlite 写入放线程池，避免阻塞事件循环与后续任务），失败仅 warning。
+    落库是幂等重跑型副作用，弱保证（进程在返回后立刻退出可能丢一次，
+    下次重采即补齐）；需要强保证时可在停服前调用 wait_background。
     """
+
+    def __init__(self) -> None:
+        self._background_tasks: set[asyncio.Task] = set()
+
+    async def wait_background(self) -> None:
+        """等待尚未完成的后台落库任务（停服前调用可保证落库不丢）。"""
+        pending = [task for task in self._background_tasks if not task.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _spawn_record(
+        self,
+        context: ConfirmedCommunityContext,
+        collection: RPACollectionResult,
+    ) -> None:
+        task = asyncio.create_task(self._record_async(context, collection))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _record_async(
+        self,
+        context: ConfirmedCommunityContext,
+        collection: RPACollectionResult,
+    ) -> None:
+        try:
+            await asyncio.to_thread(self._record_collection, context, collection)
+        except Exception as exc:  # 落库失败不阻塞询价返回
+            log.warning("后台落库失败：%s", exc)
 
     @staticmethod
     def _record_collection(
@@ -144,8 +175,6 @@ class InquiryCompletionOrchestrator:
                     context.community_id,
                     request.request_id or "-",
                 )
-                # 先落库（数据沉淀），再估价返回；落库失败不阻断询价
-                self._record_collection(context, collection)
             result = build_inquiry_result(
                 collection.platform_results,
                 request_area=request.area,
@@ -167,6 +196,9 @@ class InquiryCompletionOrchestrator:
                 callback_payload["candidates"] = task_result["candidates"]
             if result.note:
                 callback_payload["note"] = result.note
+            if context is not None:
+                # 估价已完成，落库转后台执行（幂等重跑型副作用，弱保证）
+                self._spawn_record(context, collection)
             return InquiryCompletionPayload(task_result, callback_payload)
 
         return complete

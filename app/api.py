@@ -74,6 +74,7 @@ def create_app(
     async def lifespan(app: FastAPI):
         app.state.runtime = runtime
         app.state.inquiry_task_manager = inquiry_task_manager
+        app.state.completion_orchestrator = completion_orchestrator
         if manage_runtime:
             await runtime.start()
         await inquiry_task_manager.start()
@@ -83,6 +84,8 @@ def create_app(
             await inquiry_task_manager.stop()
             if manage_runtime:
                 await runtime.stop()
+            # 停服前把后台落库任务跑完，避免丢最后一次询价落库（flush）
+            await completion_orchestrator.wait_background()
 
     app = FastAPI(title="jeethink-rpa", lifespan=lifespan)
 
