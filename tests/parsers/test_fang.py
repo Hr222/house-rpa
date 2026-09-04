@@ -42,3 +42,72 @@ def test_parse_listing_and_deal_records_for_storage():
     assert date_str == "2026-05-06"
     assert total == 558
     assert price == 74262.0
+
+
+# ============================================================
+# 空态/单条边界（基于真实 dump 校准，见 debug/20260903_1805_fang_listing_*）
+# marker：空态页主体 shop_no 容器 + "很抱歉，没有找到…相符的房源"；
+# 单条页也有 shop_no 但那是隐形弹窗（pop_up/close_pop），不能误判。
+# ============================================================
+
+
+def test_is_no_result_on_real_empty_page_marker():
+    """真实空态页（莲通公司综合楼 house-xm2810134960）：三段关键 HTML。"""
+    from app.rpa.platforms.adapters.fang import is_no_result
+
+    # 空态主体容器 + 同页仍渲染其他小区推荐 dl 卡
+    empty_html = """
+    <div class="shop_no"><dl><dt><img src="//static.soufunimg.com/esf/esf/online/esflistnew/static/images/icon_no.jpg"></dt><dd> 很抱歉，没有找到<span class='bold org'>莲通公司综合楼</span>相符的房源！ </dd></dl></div>
+    <div class="shop_no"><div class="shade" style="display: none;"></div><div class="pop_up" style="display: none;">...</div></div>
+    <dl class="clearfix"><dd><p class="add_shop"><a>鸣乐大厦</a></p></dd></dl>
+    <dl class="clearfix"><dd><p class="add_shop"><a>莲丰大厦</a></p></dd></dl>
+    """
+    assert is_no_result(empty_html) is True
+
+
+def test_is_no_result_false_on_single_result_page():
+    """单条数据页（莲塘派出所宿舍 house-xm2811125778）：有 shop_no 弹窗但非空态。"""
+    from app.rpa.platforms.adapters.fang import is_no_result
+
+    single_html = """
+    <dl class="clearfix"><dd><p class="add_shop"><a href="/house-xm2811125778/" title="莲塘派出所宿舍"> 莲塘派出所宿舍 </a></p></dd></dl>
+    <div class="shop_no"><div class="shade" style="display: none;"></div><div class="pop_up" style="display: none;"><i class="close_pop">x</i>...</div></div>
+    """
+    assert is_no_result(single_html) is False
+
+
+def test_is_no_result_false_on_normal_listing_page():
+    """正常挂牌页：无 shop_no 容器，多个在售卡。"""
+    from app.rpa.platforms.adapters.fang import is_no_result
+
+    normal_html = """
+    <dl class="clearfix"><dd><p class="add_shop"><a>佳兆业樾伴山</a></p></dd></dl>
+    <dl class="clearfix"><dd><p class="add_shop"><a>佳兆业樾伴山</a></p></dd></dl>
+    """
+    assert is_no_result(normal_html) is False
+
+
+def test_parse_listing_snapshots_cuts_recommended_listings():
+    """单条/空态页房源少时页面补'您可能感兴趣的房源'推荐位（其他小区），
+    parser 必须截断，否则他小区房源混入（dump 20260903_1805 单条样本）。"""
+    html = """
+    <dl class="clearfix">
+      <dd><h4><a><span class="tit_shop">莲塘派出所宿舍 3室</span></a></h4>
+          <p class="tel_shop">3室1厅 | 90.9㎡</p>
+          <p class="add_shop"><a title="莲塘派出所宿舍">莲塘派出所宿舍</a></p></dd>
+      <dd class="price_right"><span class="red"><b>300</b>万</span><span>33004元/㎡</span></dd>
+    </dl>
+    <p class="tit_x">您可能感兴趣的房源</p>
+    <div class="shop_list">
+      <dl class="clearfix">
+        <dd><h4><a><span class="tit_shop">鸣乐大厦 3室</span></a></h4>
+            <p class="tel_shop">3室2厅 | 84.16㎡</p>
+            <p class="add_shop"><a title="鸣乐大厦">鸣乐大厦</a></p></dd>
+        <dd class="price_right"><span class="red"><b>109</b>万</span><span>12951元/㎡</span></dd>
+      </dl>
+    </div>
+    """
+    snapshots = parse_listing_snapshots(html)
+
+    assert len(snapshots) == 1
+    assert snapshots[0].community_name == "莲塘派出所宿舍"
