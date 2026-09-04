@@ -324,18 +324,13 @@ class RPARuntime:
             self._focus_browser_window(f"{state.name} 仍需人工处理", code)
         return self._serialize_platform_state(state)
 
-    def _tile_browser_windows_once(self):
-        """首次完成登录初始化后平铺一次浏览器窗口。"""
-        if self._initial_window_layout_done:
-            return
-        self._initial_window_layout_done = True
-        pids = [
-            pid
-            for browser in self.browsers.values()
-            if (pid := getattr(getattr(browser, "_process", None), "pid", None))
-        ]
-        if pids:
-            tile_browser_windows(pids)
+    def _tile_browser_windows(self, force: bool = False):
+        """平铺浏览器窗口：首次就绪自动平铺，force=True 供人工确认后强制重铺。"""
+        if not force:
+            if self._initial_window_layout_done:
+                return
+            self._initial_window_layout_done = True
+        tile_browser_windows()
 
     def _refresh_service_status(self):
         states = list(self.platform_states.values())
@@ -346,7 +341,7 @@ class RPARuntime:
 
         if all(item.status == PlatformHealthStatus.READY for item in states):
             if self.status != ServiceStatus.READY:
-                self._tile_browser_windows_once()
+                self._tile_browser_windows()
             self.status = ServiceStatus.READY
             self.message = "所有平台已就绪"
             return
@@ -494,7 +489,10 @@ class RPARuntime:
 
         self._set_platform_health(code, event, reason)
         self._refresh_service_status()
-        if state != PlatformHealthStatus.READY:
+        if state == PlatformHealthStatus.READY:
+            # 风控恢复（人工回车处理后）：重新平铺，纠正被打乱的窗口布局
+            self._tile_browser_windows(force=True)
+        else:
             self._focus_browser_window(f"{self.platform_states[code].name} {reason}", code)
 
     async def _keepalive_loop(self):
@@ -620,6 +618,8 @@ class RPARuntime:
                             log.info("平台确认结果: %s -> %s", state.name, result["status"])
                         except Exception as exc:
                             log.warning("平台确认失败: %s -> %s", state.name, exc)
+                # 每轮人工确认后强制重新平铺，纠正采集/风控期间被打乱的窗口布局
+                self._tile_browser_windows(force=True)
             finally:
                 self._manual_confirmation_active = False
 
