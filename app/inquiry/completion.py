@@ -13,8 +13,9 @@ from app.inquiry.models import (
     InquiryCompletionPayload,
     InquiryResult,
 )
+from app.property_records.ingestion import record_platform_result
 from app.rpa.core.models import InquiryRequest, RPACollectionResult
-from app.rpa.core.status import TASK_STATUS_TEXT, TaskStatus
+from app.rpa.core.status import PlatformResultStatus, TASK_STATUS_TEXT, TaskStatus
 
 
 log = logging.getLogger(__name__)
@@ -79,7 +80,55 @@ def _task_result_payload(result: InquiryResult) -> dict:
 
 
 class InquiryCompletionOrchestrator:
-    """持有最终聚合，让 RPA 只负责采集。"""
+    """持有最终聚合，让 RPA 只负责采集。
+
+    采集完成后先按小区把各平台原始数据落库（挂牌/成交/入口行），
+    再做跨平台估价；落库失败只 warning，不阻塞询价返回。
+    """
+
+    @staticmethod
+    def _record_collection(
+        context: ConfirmedCommunityContext,
+        collection: RPACollectionResult,
+    ) -> None:
+        """把本次询价各成功平台结果落库（按小区一批，单平台一次 ingest）。"""
+        recorded = 0
+        for result in collection.platform_results:
+            if getattr(result, "status", None) != PlatformResultStatus.SUCCESS:
+                continue
+            if not getattr(result, "listing_page_url", None):
+                continue
+            try:
+                report = record_platform_result(
+                    community_id=context.community_id,
+                    city=context.city,
+                    administrative_district=context.administrative_district,
+                    source_community_name=context.canonical_name,
+                    result=result,
+                    listing_page_url=result.listing_page_url,
+                    deal_page_url=getattr(result, "deal_page_url", None),
+                )
+            except Exception as exc:
+                log.warning(
+                    "询价落库失败：%s(%s) 平台=%s：%s",
+                    context.canonical_name,
+                    context.community_id,
+                    getattr(result, "name", ""),
+                    exc,
+                )
+                continue
+            recorded += 1
+            log.info(
+                "询价落库：%s(%s) 平台=%s 挂牌 %d 条(带URL跳过 %d) 成交 %d 条",
+                context.canonical_name,
+                context.community_id,
+                getattr(result, "name", ""),
+                len(report.listings),
+                len(report.skipped_listings),
+                len(report.deals),
+            )
+        if recorded:
+            log.info("询价任务落库完成：%s(%s) 平台 %d 个", context.canonical_name, context.community_id, recorded)
 
     def handler_for(
         self,
@@ -95,6 +144,8 @@ class InquiryCompletionOrchestrator:
                     context.community_id,
                     request.request_id or "-",
                 )
+                # 先落库（数据沉淀），再估价返回；落库失败不阻断询价
+                self._record_collection(context, collection)
             result = build_inquiry_result(
                 collection.platform_results,
                 request_area=request.area,

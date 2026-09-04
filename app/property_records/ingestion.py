@@ -240,3 +240,46 @@ def _listing_total_price(row: Mapping[str, Any]) -> Any:
 
 
 __all__ = ["IngestionReport", "PropertyRecordsIngestion", "normalize_source_platform"]
+
+
+def record_platform_result(
+    *,
+    community_id: int,
+    city: str,
+    administrative_district: str,
+    source_community_name: str,
+    result: Any,
+    listing_page_url: str | None = None,
+    deal_page_url: str | None = None,
+    seen_at: str | None = None,
+    database: PropertyRecordsDatabase | None = None,
+) -> IngestionReport:
+    """把单个平台 PlatformResult 全量落库（工程/MVP 统一入口）。
+
+    从 result.listing_snapshots 构造挂牌明细行（listing_url 必填，缺失行由
+    入库层跳过并记 warning），成交取 result.deal_records 明细，并补挂
+    小区入口行（listing/deal_page_url）。面积/单价/总价等关键字段全部入库。
+    """
+    listing_rows = []
+    for snapshot in getattr(result, "listing_snapshots", ()) or ():
+        listing_rows.append(
+            {
+                "listing_url": getattr(snapshot, "listing_url", None),
+                "title": getattr(snapshot, "title", None),
+                "layout": getattr(snapshot, "layout", None),
+                "area_sqm": getattr(snapshot, "area", None),
+                "unit_price_yuan": getattr(snapshot, "unit_price", None),
+                "total_price": getattr(snapshot, "total_price", None),  # 万；入库层按默认"万"转元
+            }
+        )
+    return PropertyRecordsIngestion(database).ingest_rpa_result(
+        community_id=community_id,
+        city=city,
+        administrative_district=administrative_district,
+        source_community_name=source_community_name,
+        result=result,
+        listing_page_url=listing_page_url,
+        deal_page_url=deal_page_url,
+        listing_records=listing_rows,
+        seen_at=seen_at,
+    )
