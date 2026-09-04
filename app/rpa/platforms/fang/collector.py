@@ -26,8 +26,14 @@ from app.rpa.core.status import PlatformResultStatus
 from app.rpa.core.models import PlatformResult
 from app.rpa.platforms.fang import parser as parsers
 from app.rpa.utils.debug_utils import dump_html
-from app.rpa.platforms.base import _human_click, has_matching_community_snapshots, wait_and_reload_after_block
+from app.rpa.platforms.base import (
+    _human_click,
+    has_matching_community_snapshots,
+    short_circuit_result,
+    wait_and_reload_after_block,
+)
 from app.rpa.platforms.city_map import get_start_url
+from app.rpa.platforms.fang.constants import FANG_SOFT_BLOCK_SECONDS
 
 
 log = logging.getLogger(__name__)
@@ -53,13 +59,35 @@ def _is_login_url(url: str) -> bool:
     return "login" in url or "passport" in url or "signin" in url
 
 
+# 登录墙 HTML 标记（2026-09-04 自 fang_community_page_mvp 实测标记提升）：
+# 房天下会话失效时正文出现登录引导，而 URL 不含 login/passport。
+_LOGIN_HTML_MARKERS = ("请输入手机号", "请输入密码", "手机快捷登录", "扫码登录")
+
+
+def _is_login_html(html: str) -> bool:
+    return any(marker in (html or "") for marker in _LOGIN_HTML_MARKERS)
+
+
 def detect_block(url: str, html: str) -> tuple[bool, str]:
     """房天下风控/登录检测。"""
     if _is_captcha_url(url) or _is_captcha_html(html or ""):
         return True, "命中验证码拦截"
-    if _is_login_url(url):
+    if _is_login_url(url) or _is_login_html(html or ""):
         return True, "命中登录页"
     return False, ""
+
+
+class FangSoftBlockError(RuntimeError):
+    """房天下软风控：页面可访问、无验证码，但内容超过阈值仍未渲染。"""
+
+
+def check_soft_block_elapsed(started_at: float, label: str) -> None:
+    """软风控判定：单次"打开页面→可解析"耗时超过 FANG_SOFT_BLOCK_SECONDS 即抛出。"""
+    elapsed = time.monotonic() - started_at
+    if elapsed >= FANG_SOFT_BLOCK_SECONDS:
+        raise FangSoftBlockError(
+            f"{label}耗时 {elapsed:.0f}s ≥ {FANG_SOFT_BLOCK_SECONDS:.0f}s，判定触发软风控"
+        )
 
 
 def is_no_result(html: str) -> bool:
@@ -258,22 +286,56 @@ async def collect_listing_by_url(
     deal_page_url: Optional[str] = None,
     request_id: Optional[str] = None,
     max_pages: int = 50,
+    city: str = "深圳",
 ) -> PlatformResult:
     """URL 直达采集小区在售与真实成交（非交互，与 MVP 模板等价）。
 
-    在售：直达挂牌页 → 风控 → is_no_result 空态 → 归属 → 无点击翻页。
-    成交：deal_page_url 提供时独立直达采集全量真实成交（挂牌空态也采）。
-    只回传原始明细（listing_snapshots/deal_records）；成交面积收敛与
-    估价由算法层（aggregation → app.algorithm.deal_screening）接管。
+    在售：直达挂牌页 → 风控 → 软风控判定 → is_no_result 空态 → 归属 →
+    无点击翻页。成交：deal_page_url 提供时独立直达采集全量真实成交
+    （挂牌空态也采）。只回传原始明细（listing_snapshots/deal_records）；
+    成交面积收敛与估价由算法层（aggregation → deal_screening）接管。
+
+    软风控规则（FANG_SOFT_BLOCK_SECONDS）：打开挂牌页后内容超时未渲染，
+    先回首页刷新会话再直达一次；仍超时按 ERROR 返回，交人工处理。
     """
     start = time.time()
+    soft_block_refreshed = False
     try:
-        await page.get(listing_page_url)
-        await page
-        await asyncio.sleep(3)
-        html = await wait_and_reload_after_block(
-            page, detect_block, f"小区挂牌页[{community_name}]"
-        )
+        while True:
+            opened_at = time.monotonic()
+            await page.get(listing_page_url)
+            await page
+            await asyncio.sleep(3)
+            html = await wait_and_reload_after_block(
+                page, detect_block, f"小区挂牌页[{community_name}]"
+            )
+            try:
+                check_soft_block_elapsed(opened_at, f"挂牌页[{community_name}]")
+            except FangSoftBlockError:
+                if soft_block_refreshed:
+                    log.error(
+                        "[软风控] %s：会话刷新后再次超时（≥%.0fs），按失败返回",
+                        community_name,
+                        FANG_SOFT_BLOCK_SECONDS,
+                    )
+                    return short_circuit_result(
+                        "房天下",
+                        PlatformResultStatus.ERROR,
+                        f"软风控：挂牌页连续两次 {FANG_SOFT_BLOCK_SECONDS:.0f}s 未渲染，"
+                        "建议人工重置浏览器会话后重试",
+                        request_id,
+                        start,
+                        detail_url=listing_page_url,
+                    )
+                soft_block_refreshed = True
+                log.warning(
+                    "[软风控] %s：打开挂牌页超过 %.0fs 内容未就绪，回首页刷新会话后重试一次",
+                    community_name,
+                    FANG_SOFT_BLOCK_SECONDS,
+                )
+                page = await reset_to_start_page(page, city)
+                continue
+            break
         await _dump(page, "fang_listing_by_url_p1")
 
         if is_no_result(html):

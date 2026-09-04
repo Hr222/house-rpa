@@ -68,6 +68,7 @@ class FangPlatformAdapter(PlatformAdapter):
             listing_page_url=listing_url,
             deal_page_url=deal_url,
             request_id=request.request_id,
+            city=request.city,
         )
         try:
             session.page = await fang_adapter.reset_to_start_page(session.page, request.city)
