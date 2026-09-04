@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from app.rpa.core.models import (
     InquiryRequest,

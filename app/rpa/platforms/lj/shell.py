@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from app.rpa.platforms.lj import parser as parsers
 from app.rpa.platforms.lj import collector as lj_adapter

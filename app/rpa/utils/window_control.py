@@ -138,7 +138,7 @@ def close_windows_by_title(title_keywords: tuple[str, ...]) -> int:
 
 
 def enumerate_browser_windows() -> list[WindowInfo]:
-    """枚举所有可见的 Edge 顶层窗口（过滤小弹窗）。"""
+    """枚举所有可见的 Chrome 顶层窗口（过滤小弹窗）。"""
     windows: list[WindowInfo] = []
 
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -169,7 +169,7 @@ def enumerate_browser_windows() -> list[WindowInfo]:
     return windows
 
 
-def tile_browser_windows(pids: list[int] | None = None, margin: int = 0):
+def tile_browser_windows(margin: int = 0):
     """将多个浏览器窗口平铺填满屏幕。
 
     5 个窗口：2 列 × 3 行网格，右下角空出留给终端。
@@ -182,7 +182,6 @@ def tile_browser_windows(pids: list[int] | None = None, margin: int = 0):
       └──────┴──────┘
 
     Args:
-        pids: 浏览器进程 PID 列表（保留兼容，未使用；改为自动枚举）
         margin: 窗口间边距（像素），默认给任务栏留 60
     """
     screen_w = user32.GetSystemMetrics(0)
