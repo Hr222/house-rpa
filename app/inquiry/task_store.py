@@ -66,6 +66,8 @@ class InquiryTaskSnapshot:
                 city=request_data.get("city", "深圳"),
                 administrative_district=request_data.get("administrative_district"),
                 request_id=request_data.get("request_id"),
+                platform_listing_pages=request_data.get("platform_listing_pages") or {},
+                platform_deal_pages=request_data.get("platform_deal_pages") or {},
             ),
             confirmed_community=ConfirmedCommunityContext(
                 community_id=int(context_data["community_id"]),

@@ -128,13 +128,29 @@ def _algorithm_quote_price_lists(
 
 def _algorithm_deal_price_lists(
     successful_results: list[PlatformResult],
+    request_area: Optional[float],
 ) -> list[list[float]]:
-    return [
-        [float(price) for price in result.deal_prices if price is not None and price > 0]
-        for result in successful_results
-        if result.deal_source not in {"挂牌均价顶替", "小区均价顶替"}
-        and any(price is not None and price > 0 for price in result.deal_prices)
-    ]
+    """从各平台结果收集成交单价列表（算法层接管）。
+
+    优先用 RPA 回传的原始 deal_records 经算法层口径（screen_deal_records）
+    按请求面积收敛；老链路/接口平台仍只带 deal_prices（已平台侧筛好）时
+    回退该字段。均价顶替来源不计入真实成交。
+    """
+    from app.algorithm.deal_screening import screen_deal_records
+
+    lists: list[list[float]] = []
+    for result in successful_results:
+        if result.deal_source in {"挂牌均价顶替", "小区均价顶替", "无"}:
+            continue
+        records = result.deal_records or []
+        if records and request_area is not None:
+            prices = screen_deal_records(records, request_area, platform=result.name)
+        else:
+            prices = [float(price) for price in result.deal_prices
+                      if price is not None and price > 0]
+        if any(price is not None and price > 0 for price in prices):
+            lists.append(prices)
+    return lists
 
 
 def _luxury_data_is_sparse(selected_results: list[_SelectedPlatformData]) -> bool:
@@ -224,7 +240,7 @@ def build_inquiry_result(
         AlgorithmInput(
             quote_price_lists=_algorithm_quote_price_lists(selected_results),
             weighted_median_discount=get_weighted_median_discount(),
-            deal_price_lists=_algorithm_deal_price_lists(successful_results),
+            deal_price_lists=_algorithm_deal_price_lists(successful_results, request_area),
             area=request_area,
             luxury_data_sparse=_luxury_data_is_sparse(selected_results),
         )

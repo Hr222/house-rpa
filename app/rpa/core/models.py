@@ -21,6 +21,11 @@ class InquiryRequest:
     # 行政区用于行舟深房 xqData.json 中同名小区的消歧。
     # 保留 None 兼容旧的直接调用和崩溃恢复任务；API 入口要求传入。
     administrative_district: Optional[str] = None
+    # URL 白名单直达（编排层为每平台查好入口后携带；RPA 不感知 community_id）。
+    # 平台 code -> 小区挂牌列表入口；无该平台 key 表示未初始化入口，平台不采集。
+    platform_listing_pages: dict = field(default_factory=dict)
+    # 平台 code -> 小区成交列表入口（仅采真实成交的平台需要）。
+    platform_deal_pages: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -45,19 +50,29 @@ class ListingSnapshot:
 
 @dataclass
 class PlatformResult:
-    """单平台原始结构化采集结果。"""
+    """单平台原始结构化采集结果。
+
+    语义边界（算法层已剥离）：RPA 只负责"URL 白名单直达抓取原始数据并回传"，
+    ——携带入口 URL（listing_page_url/deal_page_url）与原始明细
+    （listing_snapshots 含每套 unit_price/total_price、deal_records 含每笔
+    area/date/price），以及页面直接展示的原值（community_avg_price，仅溯源
+    不作计算）；quote_prices/deal_prices 不再由 RPA 产出（历史兼容保留字段，
+    由编排层 aggregation 从原始明细推导并交给算法层估价）。
+    """
     name: str
     status: PlatformResultStatus
-    community_avg_price: Optional[float] = None   # 详情页小区均价(元/㎡) = P_quote
-    quote_prices: List[float] = field(default_factory=list)   # 快照中的有效单价镜像
-    deal_prices: List[float] = field(default_factory=list)    # 成交单价列表(筛选后)
-    deal_records: List[dict] = field(default_factory=list)     # 成交记录详情 [{area,date,total,price},...]
+    community_avg_price: Optional[float] = None   # 页面卡片原值(元/㎡)，仅溯源
+    quote_prices: List[float] = field(default_factory=list)   # 兼容字段：算法层推导，RPA 不填
+    deal_prices: List[float] = field(default_factory=list)    # 兼容字段：算法层推导，RPA 不填
+    deal_records: List[dict] = field(default_factory=list)     # 成交记录详情 [{area,date,total_price,price},...]（原始全量）
     reason: Optional[str] = None
     request_id: Optional[str] = None
     detail_url: Optional[str] = None
     elapsed_seconds: Optional[float] = None
     listing_snapshots: List[ListingSnapshot] = field(default_factory=list)
     deal_source: str = ""   # 成交来源说明: "成交记录" / "挂牌均价顶替" / "小区均价顶替" / "无"
+    listing_page_url: Optional[str] = None   # 小区挂牌销售列表入口（URL 直达采集回填）
+    deal_page_url: Optional[str] = None      # 小区成交列表入口（仅采成交平台有值）
 
 
 @dataclass(slots=True)

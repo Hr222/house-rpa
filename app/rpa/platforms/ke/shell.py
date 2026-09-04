@@ -7,7 +7,8 @@ import logging
 
 from app.rpa.platforms.ke import parser as parsers
 from app.rpa.platforms.ke import collector as ke_adapter
-from app.rpa.core.models import InquiryRequest, PlatformSession
+from app.rpa.core.models import InquiryRequest, PlatformResult, PlatformSession
+from app.rpa.core.status import PlatformResultStatus
 from app.rpa.platforms.base import PlatformAdapter
 from app.rpa.platforms.ke.constants import START_URL
 
@@ -49,13 +50,23 @@ class KePlatformAdapter(PlatformAdapter):
         # 确保浏览器在目标城市首页（城市不同时先导航过去）
         await self.ensure_city_navigated(session, request.city)
 
-        result = await ke_adapter.collect(
-            browser=browser,
-            main_page=session.page,
+        # URL 白名单直达（方案A）：只有编排层给本平台初始化了挂牌入口才采集；
+        # 未初始化（无 URL）的平台直接 NO_DATA，不做交互式搜索。
+        listing_url = (request.platform_listing_pages or {}).get(self.code)
+        if not listing_url:
+            log.info("[%s] 小区无 %s 挂牌入口（白名单未初始化），跳过采集", self.code, self.name)
+            return PlatformResult(
+                name=self.name,
+                status=PlatformResultStatus.NO_DATA,
+                reason="无挂牌入口（community_platform_pages 未初始化）",
+                request_id=request.request_id,
+            )
+
+        result = await ke_adapter.collect_listing_by_url(
+            page=session.page,
             community_name=request.community_name,
-            area=request.area,
+            listing_page_url=listing_url,
             request_id=request.request_id,
-            city=request.city,
         )
         try:
             session.page = await ke_adapter.reset_to_start_page(session.page, request.city)

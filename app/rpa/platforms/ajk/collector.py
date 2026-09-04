@@ -13,39 +13,22 @@
 """
 
 from __future__ import annotations
-
 import asyncio
 import logging
-import random
+import re
 import time
 from typing import Optional
 
-from app.rpa.core import config
 from app.rpa.core.status import PlatformResultStatus
-from app.rpa.platforms.base import (
-    _human_click,
-    click_area_segment,
-    has_matching_community_snapshots,
-    listing_filter_summary,
-    listing_no_data_reason,
-    listing_no_data_status,
-    prepare_listing_data,
-    short_circuit_result,
-    wait_and_reload_after_block,
-)
-from app.rpa.utils.debug_utils import dump_html
 from app.rpa.core.models import PlatformResult
 from app.rpa.platforms.ajk import parser as parsers
-from app.rpa.platforms.ajk.constants import START_URL
+from app.rpa.utils.debug_utils import dump_html
+from app.rpa.platforms.base import has_matching_community_snapshots, wait_and_reload_after_block
 from app.rpa.platforms.city_map import get_start_url
+from urllib.parse import urlparse
+
 
 log = logging.getLogger(__name__)
-
-
-# ============================================================
-# 风控 / 登录判定
-# ============================================================
-
 def _is_captcha_url(url: str) -> bool:
     """安居客 58 系验证码拦截页 URL 特征。"""
     url = (url or "").lower()
@@ -94,188 +77,10 @@ def is_no_result(html: str) -> bool:
 # 页面交互辅助
 # ============================================================
 
-async def _delay(min_s: float = 1.5, max_s: float = 3.5):
-    """真人操作间隔。"""
-    await asyncio.sleep(random.uniform(min_s, max_s))
-
-
 async def _dump(page, name: str):
     """调试模式下导出页面 HTML。"""
     await dump_html(page, name, logger=log)
 
-
-async def _is_interactable(element) -> bool:
-    try:
-        pos = await element.get_position()
-        return bool(pos and pos.width > 0 and pos.height > 0)
-    except Exception:
-        return False
-
-
-async def _get_search_input(page):
-    """定位安居客搜索框。
-
-    安居客首页搜索框占位符为"请输入小区名称、地址"。
-    """
-    selectors = [
-        "input#search-input",
-        "input#searchInput",
-        "input.search-input",
-        "input[name='keyword']",
-        "input[placeholder*='小区']",
-        "input[placeholder*='地址']",
-        "input[placeholder*='搜索']",
-    ]
-    for selector in selectors:
-        try:
-            elements = await page.select_all(selector, timeout=1.5)
-        except Exception:
-            continue
-        for element in elements:
-            if await _is_interactable(element):
-                return selector, element
-        if elements:
-            return selector, elements[0]
-    return None, None
-
-
-async def _fill_area_inputs(page, area_min, area_max):
-    """定位面积筛选区的自定义输入框并填值。
-
-    安居客结果页里有两处 input.input：一处在价格筛选区（unit=万），
-    一处在面积筛选区（unit=㎡）。靠父级 li 内的 unit 文本是"㎡"区分。
-    填值后"确定"按钮会显示，需点击提交。
-
-    注意：Element 用 query_selector_all（不是 select_all，那是 Tab 的方法）。
-    """
-    # 1. 遍历所有 line-item-input，靠 unit 文本是"㎡"定位面积区
-    line_items = await page.select_all("li.line-item-input")
-    log.info("line-item-input 数量: %d", len(line_items))
-
-    area_li = None
-    for li in line_items:
-        unit_text = await li.apply(
-            "(el) => { const u = el.querySelector('.unit'); return u ? u.textContent.trim() : ''; }"
-        )
-        if unit_text == "㎡":
-            area_li = li
-            break
-
-    if area_li is None:
-        raise RuntimeError("未找到面积筛选区（unit=㎡ 的 line-item-input）")
-
-    # 2. 取该 li 下两个 input
-    inputs = await area_li.query_selector_all("input.input")
-    if len(inputs) < 2:
-        raise RuntimeError(f"面积区 input 不足 2 个，实际 {len(inputs)} 个")
-    min_el, max_el = inputs[0], inputs[1]
-
-    # 3. 填下限
-    await _human_click(page, min_el, "area min input")
-    try:
-        await min_el.clear_input()
-    except Exception:
-        pass
-    await asyncio.sleep(0.3)
-    await min_el.send_keys(str(int(area_min)))
-    await page
-    await asyncio.sleep(0.5)
-
-    # 4. 填上限
-    await _human_click(page, max_el, "area max input")
-    try:
-        await max_el.clear_input()
-    except Exception:
-        pass
-    await asyncio.sleep(0.3)
-    await max_el.send_keys(str(int(area_max)))
-    await page
-    await asyncio.sleep(0.8)
-
-    # 5. 点"确定"提交
-    confirms = await area_li.query_selector_all(".confirm")
-    confirm_clicked = False
-    if confirms:
-        confirm_clicked = await _human_click(page, confirms[0], "area confirm")
-    if not confirm_clicked:
-        # 兜底回车
-        try:
-            await max_el.send_keys("\r")
-            await page
-            confirm_clicked = True
-        except Exception:
-            pass
-
-    await page
-    await asyncio.sleep(3)
-    return confirm_clicked
-
-
-# ============================================================
-# 滚动到底触发懒加载（安居客无分页，单页全展示）
-# ============================================================
-
-async def _scroll_to_bottom(page, max_rounds: int = 20, wait: float = 1.8) -> int:
-    """循环滚动到页面底部，触发懒加载，返回实际滚动轮数。
-
-    安居客 Vue 页面：滚动到底会加载下一批房源。
-    判定到底：连续两次滚动后 body 高度不变。
-    """
-    last_height = 0
-    rounds = 0
-    for i in range(max_rounds):
-        try:
-            current = await page.evaluate("document.body.scrollHeight", return_by_value=True)
-        except Exception:
-            current = last_height
-        if current == last_height and i > 0:
-            log.info("已到底（高度不变），共滚动 %d 轮", rounds)
-            break
-        last_height = current
-        rounds += 1
-        try:
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-            await page
-        except Exception:
-            pass
-        await asyncio.sleep(wait)
-
-    return rounds
-
-
-# ============================================================
-# 搜索
-# ============================================================
-
-async def _search_community(page, community_name: str) -> str:
-    """搜索小区，返回结果页 HTML。"""
-    _, inp = await _get_search_input(page)
-    if inp is None:
-        raise RuntimeError("未找到安居客搜索框")
-
-    if not await _human_click(page, inp, "search input"):
-        raise RuntimeError("搜索框未能成功点击")
-
-    try:
-        await inp.clear_input()
-    except Exception:
-        pass
-    await asyncio.sleep(0.5)
-    await inp.send_keys(community_name)
-    await page
-    await asyncio.sleep(1.0)
-
-    # 回车提交
-    await inp.send_keys("\r")
-    await page
-    await asyncio.sleep(3)
-
-    return await page.get_content()
-
-
-# ============================================================
-# 页面复位
-# ============================================================
 
 async def reset_to_start_page(page, city: str = "深圳"):
     """回到安居客二手房首页，并获取新的页面上下文。"""
@@ -291,188 +96,139 @@ async def reset_to_start_page(page, city: str = "深圳"):
 # ============================================================
 
 async def probe_ready(main_page) -> tuple[bool, str]:
-    """检查当前页是否已登录、未被风控、且能执行搜索。"""
+    """轻量就绪探测（URL 直达时代）：页面可用且未风控即 READY。"""
     try:
-        await main_page.select("body", timeout=10)
+        await main_page.select("body", timeout=8)
         await main_page
         html = await main_page.get_content()
-        current_url = main_page.target.url or ""
     except Exception as exc:
         return False, f"页面不可用: {exc}"
-
-    if _is_captcha_url(current_url) or _is_captcha_html(html):
-        return False, "命中验证码拦截，等待人工处理"
-    if _is_login_url(current_url):
-        return False, "当前会话未登录或已失效"
-
-    try:
-        _, inp = await _get_search_input(main_page)
-        if inp is None:
-            return False, "未找到搜索框，页面未就绪"
-    except Exception:
-        return False, "未找到搜索框，页面未就绪"
+    blocked, reason = detect_block(main_page.target.url or "", html)
+    if blocked:
+        return False, reason
     return True, "READY"
 
 
-async def keepalive(main_page) -> tuple[bool, str]:
-    """轻量保活：优先探测，必要时刷新。"""
-    ready, message = await probe_ready(main_page)
-    if ready:
-        try:
-            await main_page.evaluate("window.scrollTo(0, 0);")
-            await main_page
-        except Exception:
-            pass
-        return True, "READY"
+def _build_listing_pagination_urls(listing_url: str, first_page_html: str, max_pages: int = 50) -> list[str]:
+    """由第 1 页推导后续页 URL（安居客 /sale/p{N}/?comm_id=，无点击）。
 
-    try:
-        main_page = await reset_to_start_page(main_page)
-    except Exception as exc:
-        return False, f"刷新保活失败: {exc}"
+    页码取自 HTML 中指向同一小区（comm_id 一致）的分页链接；
+    只保留第 2 页起并套 max_pages 兜底。与 MVP build_page_urls 同源。
+    """
+    parsed = urlparse(listing_url)
+    origin = f"{parsed.scheme}://{parsed.hostname}"
+    comm_id_m = re.search(r"comm_id=(\d+)", listing_url)
+    if comm_id_m is None:
+        return []
+    comm_id = comm_id_m.group(1)
+    page_nums = sorted(
+        {
+            int(number)
+            for number in re.findall(
+                rf"/sale/p(\d+)/\?comm_id={comm_id}\b", first_page_html or ""
+            )
+        }
+    )
+    return [
+        f"{origin}/sale/p{page_no}/?comm_id={comm_id}"
+        for page_no in page_nums
+        if 2 <= page_no <= max_pages
+    ]
 
-    return await probe_ready(main_page)
 
-
-# ============================================================
-# 采集主体
-# ============================================================
-
-async def collect(
-    browser,
-    main_page,
+async def collect_listing_by_url(
+    page,
+    *,
     community_name: str,
-    area: float,
+    listing_page_url: str,
     request_id: Optional[str] = None,
-    city: str = "深圳",
+    max_pages: int = 50,
 ) -> PlatformResult:
-    """执行一次完整的安居客询价采集。"""
+    """URL 直达采集小区在售（非交互 HTML 提取方式，与 MVP 模板等价）。
+
+    流程：直达挂牌页 → 风控协议 → is_no_result 空态短路 → 解析在售与
+    挂牌均价 → 归属校验 → 无点击翻页 → parser 提取。安居客无成交，
+    挂牌均价按业务顶替 deal_prices（deal_source="挂牌均价顶替"）。
+    """
     start = time.time()
-    log.info("收到请求: 小区=%s 面积=%.1f㎡ 城市=%s", community_name, area, city)
     try:
-        return await _do_collect(
-            browser=browser,
-            main_page=main_page,
-            community_name=community_name,
-            area=area,
+        await page.get(listing_page_url)
+        await page
+        await asyncio.sleep(3)
+
+        html = await wait_and_reload_after_block(
+            page, detect_block, f"小区挂牌页[{community_name}]"
+        )
+        await _dump(page, "ajk_listing_by_url_p1")
+
+        if is_no_result(html):
+            log.info("[空态] %s 在安居客在售 0 条（跳过推荐位）", community_name)
+            return PlatformResult(
+                name="安居客",
+                status=PlatformResultStatus.NO_DATA,
+                community_avg_price=parsers.parse_community_avg_price(html),
+                reason="在售 0 条",
+                listing_page_url=listing_page_url,
+                request_id=request_id,
+                elapsed_seconds=round(time.time() - start, 2),
+            )
+
+        snapshots = parsers.parse_listing_snapshots(html)
+        community_avg_price = parsers.parse_community_avg_price(html)
+        if snapshots and not has_matching_community_snapshots(snapshots, community_name):
+            log.warning(
+                "[归属不符] %s：%s 页面快照与目标小区不匹配（%d 条全部弃用）",
+                community_name, listing_page_url, len(snapshots),
+            )
+            snapshots = []
+
+        page_urls = (
+            _build_listing_pagination_urls(listing_page_url, html, max_pages)
+            if snapshots else []
+        )
+        if page_urls:
+            log.info("[翻页] 第 1 页 %d 条；另有 %d 页待采", len(snapshots), len(page_urls))
+        for page_no, page_url in enumerate(page_urls, start=2):
+            await page.get(page_url)
+            await page
+            await asyncio.sleep(2)
+            page_html = await wait_and_reload_after_block(
+                page, detect_block, f"翻页第 {page_no} 页"
+            )
+            await _dump(page, f"ajk_listing_by_url_p{page_no}")
+            page_snapshots = parsers.parse_listing_snapshots(page_html)
+            snapshots.extend(page_snapshots)
+            if not page_snapshots:
+                log.info("[翻页] 第 %d 页无在售，停止翻页", page_no)
+                break
+            log.info("[翻页] 第 %d 页解析 %d 条，累计 %d 条", page_no, len(page_snapshots), len(snapshots))
+
+        status = PlatformResultStatus.SUCCESS if snapshots else PlatformResultStatus.NO_DATA
+        # RPA 语义收窄：挂牌均价为页面抓取原值（仅溯源），不再顶替 deal_prices
+        log.info(
+            "[采集汇总] %s：在售 %d 条，挂牌均价 %s 元/㎡",
+            community_name, len(snapshots),
+            f"{community_avg_price:.0f}" if community_avg_price else "未识别",
+        )
+        return PlatformResult(
+            name="安居客",
+            status=status,
+            community_avg_price=community_avg_price,  # 页面卡片原值，仅溯源
+            quote_prices=[],
+            deal_prices=[],
+            deal_source="挂牌均价顶替",
             request_id=request_id,
-            started_at=start,
-            city=city,
+            listing_page_url=listing_page_url,
+            elapsed_seconds=round(time.time() - start, 2),
+            listing_snapshots=snapshots,
         )
     except Exception as exc:
-        log.exception("采集异常")
+        log.exception("安居客 URL 直达采集异常：%s", exc)
         return PlatformResult(
             name="安居客",
             status=PlatformResultStatus.ERROR,
             reason=str(exc),
+            listing_page_url=listing_page_url,
             request_id=request_id,
             elapsed_seconds=round(time.time() - start, 2),
         )
-
-
-async def _do_collect(
-    *,
-    browser,
-    main_page,
-    community_name: str,
-    request_id: Optional[str],
-    started_at: float,
-    area: float,
-    city: str = "深圳",
-) -> PlatformResult:
-    # 1. 刷新首页保活
-    main_page = await reset_to_start_page(main_page, city)
-    # 采集起点风控兜底：首页若被风控(CAPTCHA/登录失效)，阻塞等人解除后重取
-    await wait_and_reload_after_block(main_page, detect_block, "首页")
-    await _dump(main_page, "ajk_refresh")
-
-    # 2. 搜索小区
-    keyword_html = await _search_community(main_page, community_name)
-    # 搜索后统一走 base.py 风控等待，恢复后再继续解析结果页。
-    keyword_html = await wait_and_reload_after_block(main_page, detect_block, "搜索后")
-    await _dump(main_page, "ajk_keyword_result")
-    keyword_url = main_page.target.url or ""
-
-    # 3. 判风控/登录
-    if _is_login_url(keyword_url):
-        return short_circuit_result(
-            "安居客", PlatformResultStatus.LOGIN_EXPIRED, "搜索后进入登录页",
-            request_id, started_at,
-        )
-
-    # 3.5 无数据短路：走平台统一空态入口 is_no_result（不能用"无房源卡"判断，
-    # 空态页仍渲染其他小区推荐卡且同样带 comm-name class，会漏判）
-    if is_no_result(keyword_html):
-        return short_circuit_result(
-            "安居客", PlatformResultStatus.NO_DATA, "关键词搜索无在售房源",
-            request_id, started_at,
-        )
-
-    keyword_snaps = parsers.parse_listing_snapshots(keyword_html)
-    if not has_matching_community_snapshots(keyword_snaps, community_name):
-        return short_circuit_result(
-            "安居客", PlatformResultStatus.NO_DATA, f"关键词搜索未匹配到小区: {community_name}",
-            request_id, started_at,
-        )
-
-    # 4. 面积筛选（动态读取页面档位，点击对应区间链接）
-    area_range = await click_area_segment(main_page, area, parsers.parse_area_segments, "ajk")
-    await _dump(main_page, "ajk_after_area")
-
-    # 面积筛选后统一等待页面恢复，禁止风控 HTML 进入房源解析。
-    area_html = await wait_and_reload_after_block(main_page, detect_block, "面积筛选后")
-    if area_range is None:
-        return short_circuit_result(
-            "安居客", PlatformResultStatus.NO_DATA, "该面积区间无在售房源（档位已禁用）",
-            request_id, started_at,
-        )
-
-    # 5. 滚动到底（安居客无分页，单页全展示）
-    await _scroll_to_bottom(main_page)
-    area_html = await wait_and_reload_after_block(main_page, detect_block, "滚动到底后")
-
-    # 6. 解析在售房源
-    parsed_snapshots = parsers.parse_listing_snapshots(area_html)
-    snapshots, quote_prices = prepare_listing_data(
-        parsed_snapshots, community_name
-    )
-    log.info(
-        "安居客在售房源最终校验: %s",
-        listing_filter_summary(parsed_snapshots, community_name, area),
-    )
-    if not snapshots:
-        return short_circuit_result(
-            "安居客", listing_no_data_status(parsed_snapshots, community_name, area),
-            listing_no_data_reason(parsed_snapshots, community_name, area),
-            request_id, started_at,
-        )
-    if not quote_prices:
-        return short_circuit_result(
-            "安居客", PlatformResultStatus.NO_DATA, "面积结果页未抓到在售单价",
-            request_id, started_at,
-        )
-
-    # 7. 挂牌均价（安居客无成交记录，挂牌均价顶替 deal_prices）
-    listing_price = parsers.parse_community_avg_price(area_html)
-    # 安居客特殊：无成交记录，把挂牌均价作为 deal_prices 唯一元素，
-    # 保留平台无成交记录时的业务数据兼容字段，由统一加权落点算法取值。
-    deal_prices = [listing_price] if listing_price is not None else []
-
-    log.info(
-        "在售均价=%.2f 挂牌均价(顶替成交)=%s 在售条数=%d",
-        sum(quote_prices) / len(quote_prices),
-        listing_price,
-        len(quote_prices),
-    )
-
-    return PlatformResult(
-        name="安居客",
-        status=PlatformResultStatus.SUCCESS,
-        community_avg_price=None,
-        quote_prices=quote_prices,
-        deal_prices=deal_prices,
-        deal_source="挂牌均价顶替",
-        request_id=request_id,
-        detail_url=None,
-        elapsed_seconds=round(time.time() - started_at, 2),
-        listing_snapshots=snapshots,
-    )

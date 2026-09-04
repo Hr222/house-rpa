@@ -12,6 +12,9 @@ import time
 from abc import ABC, abstractmethod
 from typing import Awaitable, Callable, Optional
 
+# 说明（算法层剥离，2026-09-04）：URL 白名单直达/全量抓取暂不做面积筛选，
+# 面积口径由算法层（app.algorithm）统一处理；下述面积区间工具仅服务历史
+# 搜索式采集的"面积无数据"判定，代码保留不删除（随旧采集链路一并清理时移除）。
 from app.algorithm.area_rules import (
     LISTING_AREA_TOLERANCE,
     deal_area_bounds,
@@ -608,6 +611,7 @@ def filter_snapshots_by_community(snapshots: list, community_name: str) -> list:
     ]
 
 
+    # [遗留] 旧搜索式采集链路配套；URL 白名单直达不再使用（保留不删除，待统一清理批次移除）。
 def filter_snapshots_by_area(
     snapshots: list[ListingSnapshot],
     area: float,
@@ -630,6 +634,7 @@ def _quote_prices_from_snapshots(snapshots: list[ListingSnapshot]) -> list[float
     ]
 
 
+    # [遗留] 旧搜索式采集链路配套；URL 白名单直达不再使用（保留不删除，待统一清理批次移除）。
 def listing_filter_summary(
     snapshots: list[ListingSnapshot],
     community_name: str,
@@ -654,6 +659,7 @@ def listing_filter_summary(
     )
 
 
+    # [遗留] 旧搜索式采集链路配套；URL 白名单直达不再使用（保留不删除，待统一清理批次移除）。
 def listing_no_data_reason(
     snapshots: list[ListingSnapshot],
     community_name: str,
@@ -673,6 +679,7 @@ def listing_no_data_reason(
     )
 
 
+    # [遗留] 旧搜索式采集链路配套；URL 白名单直达不再使用（保留不删除，待统一清理批次移除）。
 def listing_no_data_status(
     snapshots: list[ListingSnapshot],
     community_name: str,
@@ -688,6 +695,7 @@ def listing_no_data_status(
     return PlatformResultStatus.NO_DATA
 
 
+    # [遗留] 旧搜索式采集链路配套；URL 白名单直达不再使用（保留不删除，待统一清理批次移除）。
 def prepare_listing_data(
     snapshots: list[ListingSnapshot],
     community_name: str,
@@ -868,6 +876,7 @@ async def safe_select_and_click(
 MAX_CONSECUTIVE_EMPTY_PAGES = 2
 
 
+    # [遗留] 旧搜索式采集链路配套；URL 白名单直达不再使用（保留不删除，待统一清理批次移除）。
 def check_empty_listing_page(
     page_no: int,
     page_count: int,

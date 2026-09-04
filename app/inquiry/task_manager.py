@@ -13,7 +13,7 @@ import logging
 import time
 import uuid
 from dataclasses import replace
-from typing import Optional
+from typing import Callable, Optional
 
 from app.inquiry.completion import InquiryCompletionOrchestrator
 from app.inquiry.models import ConfirmedCommunityContext
@@ -38,12 +38,43 @@ class InquiryTaskManager:
         self,
         runtime: RPARuntime,
         completion_orchestrator: InquiryCompletionOrchestrator,
+        platform_entry_loader: Optional[Callable[[int], tuple[dict, dict]]] = None,
     ) -> None:
         self.runtime = runtime
         self.completion_orchestrator = completion_orchestrator
+        self._platform_entry_loader = platform_entry_loader
         self._started = False
         self._recovery_complete = asyncio.Event()
         self._recovery_task: Optional[asyncio.Task] = None
+
+    def _resolve_platform_entries(self, community_id: int) -> tuple[dict, dict]:
+        """按社区查各平台挂牌/成交入口（URL 白名单直达，方案A）。
+
+        返回 (platform_listing_pages, platform_deal_pages)：code -> 入口 URL。
+        未初始化入口的平台不在结果中，对应平台采集时直接 NO_DATA。
+        """
+        if self._platform_entry_loader is not None:
+            return self._platform_entry_loader(community_id)
+        from app.rpa.registry import build_default_adapters
+        from app.property_records.database import PropertyRecordsDatabase
+
+        database = PropertyRecordsDatabase()
+        listing_pages: dict[str, str] = {}
+        deal_pages: dict[str, str] = {}
+        for adapter in build_default_adapters():
+            code = adapter.code
+            try:
+                page = database.get_community_platform_page(community_id, code)
+            except Exception as exc:
+                log.warning("读取平台入口失败 code=%s community_id=%s: %s", code, community_id, exc)
+                continue
+            if page is None:
+                continue
+            if page.listing_page_url:
+                listing_pages[code] = page.listing_page_url
+            if page.deal_page_url:
+                deal_pages[code] = page.deal_page_url
+        return listing_pages, deal_pages
 
     @property
     def recovery_complete(self) -> bool:
@@ -83,12 +114,15 @@ class InquiryTaskManager:
 
         task_id = context.request_id or uuid.uuid4().hex
         task_context = replace(context, request_id=task_id)
+        listing_pages, deal_pages = self._resolve_platform_entries(task_context.community_id)
         request = InquiryRequest(
             community_name=task_context.canonical_name,
             area=task_context.area,
             city=task_context.city,
             administrative_district=task_context.administrative_district,
             request_id=task_id,
+            platform_listing_pages=listing_pages,
+            platform_deal_pages=deal_pages,
         )
         snapshot = InquiryTaskSnapshot(
             task_id=task_id,
