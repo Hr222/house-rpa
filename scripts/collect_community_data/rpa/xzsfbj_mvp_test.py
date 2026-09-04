@@ -8,10 +8,10 @@
 
 用法：
     powershell -ExecutionPolicy Bypass -File scripts/setup_xzsfbj_wmpf_bridge.ps1
-    python scripts/rpa/xzsfbj_mvp_test.py --community 月亮湾花园 --area 91.5 --debug
-    python scripts/rpa/xzsfbj_mvp_test.py --community 月亮湾花园 --area 91.5
-    python scripts/rpa/xzsfbj_mvp_test.py --community 月亮湾花园,大冲城市花园
-    python scripts/rpa/xzsfbj_mvp_test.py --scroll-mvp
+    python -m scripts.collect_community_data.rpa.xzsfbj_mvp_test --community 月亮湾花园 --area 91.5 --debug
+    python -m scripts.collect_community_data.rpa.xzsfbj_mvp_test --community 月亮湾花园 --area 91.5
+    python -m scripts.collect_community_data.rpa.xzsfbj_mvp_test --community 月亮湾花园,大冲城市花园
+    python -m scripts.collect_community_data.rpa.xzsfbj_mvp_test --scroll-mvp
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ import httpx
 import websockets
 
 # 复用 rpa 的日志配置、状态、模型、公共函数、MVP 输出
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 from app.rpa.utils.logging_utils import setup_logging
 from app.rpa.core import config
 from app.algorithm.models import AlgorithmInput
@@ -105,7 +105,7 @@ USER_AGENT = (
 REFERER = "https://servicewechat.com/wxd49effb77288061d/56/page-frame.html"
 
 DEBUG_DIR = config.DEBUG_DIR
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 WMPF_BRIDGE_DIR_ENV = "XZSFBJ_WMPF_BRIDGE_DIR"
 DEFAULT_WMPF_BRIDGE_DIR = PROJECT_ROOT / "third_party" / "zhong_wmpf_bridge"
 TOKEN_CAPTURE_TIMEOUT = 30
