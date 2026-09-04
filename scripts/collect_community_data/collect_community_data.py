@@ -39,11 +39,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.algorithm.models import AlgorithmInput
-from app.algorithm.weighted_median import evaluate_algorithm
-from app.algorithm.config import get_weighted_median_discount
+from app.algorithm.branch_text import BRANCH_TEXT
 from app.community_data import resolve_communities
 from app.community_data.models import EstateType
+from app.inquiry.aggregation import build_inquiry_result
 from app.inquiry.models import ConfirmedCommunityContext
 from app.property_records.ingestion import record_platform_result
 from app.rpa.core.models import PlatformResult
@@ -257,6 +256,18 @@ async def run_platforms(
     return results, platform_errors
 
 
+def _platform_result_from(item: CommunityCollection) -> PlatformResult:
+    """把抓取结果容器映射为工程 PlatformResult（记录/估价两环节共用）。"""
+    return PlatformResult(
+        name=item.platform,
+        status=PlatformResultStatus(item.status),
+        community_avg_price=item.community_avg_price,
+        listing_snapshots=item.listings,
+        deal_records=item.deals,
+        deal_source="成交记录" if item.deals else "无",
+    )
+
+
 def record_stage(
     results: list[CommunityCollection],
     contexts: dict[int, ConfirmedCommunityContext],
@@ -304,14 +315,7 @@ def record_stage(
             )
             continue
 
-        platform_result = PlatformResult(
-            name=item.platform,
-            status=PlatformResultStatus(item.status),
-            community_avg_price=item.community_avg_price,
-            listing_snapshots=item.listings,
-            deal_records=item.deals,
-            deal_source="成交记录" if item.deals else "无",
-        )
+        platform_result = _platform_result_from(item)
         with_url = sum(1 for snapshot in item.listings if snapshot.listing_url)
         try:
             report_ingest = record_platform_result(
@@ -349,40 +353,62 @@ def record_stage(
     return report
 
 
-def evaluate_stage(results: list[CommunityCollection]) -> list[dict]:
-    """筛选计算环节：工程 evaluate_algorithm（加权落点中位数）。
+def evaluate_stage(
+    results: list[CommunityCollection],
+    contexts: dict[int, ConfirmedCommunityContext],
+) -> list[dict]:
+    """筛选计算环节：与线上同口径，联合调用工程 build_inquiry_result。
 
-    对未被拦的小区逐个计算在售均价与最终价；被拦小区不参与计算。
+    把同一小区全部未被拦平台的原始结果组装为 PlatformResult 列表，交
+    工程 aggregation 做面积筛选（有请求面积时）、跨平台去重、成交口径
+    收敛与加权落点中位数算法；面积缺失时 request_area 传 None，仅按在售
+    估值（成交无法按面积收敛）。被拦小区不参与计算。
     """
-    evaluations: list[dict] = []
+    grouped: dict[int, list[CommunityCollection]] = {}
     for item in results:
-        if item.blocked_reason:
+        if item.blocked_reason or item.community_id is None:
             continue
-        prices = [s.unit_price for s in item.listings if s.unit_price]
-        entry: dict = {
-            "platform": item.platform,
-            "community_id": item.community_id,
-            "community_name": item.canonical_name or item.community_name,
-            "listing_count": len(item.listings),
-            "listing_avg": sum(prices) / len(prices) if prices else None,
-            "community_avg_price": item.community_avg_price,
-            "deal_count": len(item.deals),
-        }
-        if prices:
-            evaluation = evaluate_algorithm(
-                inputs=AlgorithmInput(
-                    quote_price_lists=[prices],
-                    weighted_median_discount=get_weighted_median_discount(),
+        grouped.setdefault(item.community_id, []).append(item)
+
+    evaluations: list[dict] = []
+    for community_id, items in grouped.items():
+        platform_results = [_platform_result_from(item) for item in items]
+        context = contexts.get(community_id)
+        area = context.area if context and context.area and context.area > 0 else None
+        result = build_inquiry_result(platform_results, request_area=area)
+
+        all_listings = [s for item in items for s in item.listings]
+        prices = [s.unit_price for s in all_listings if s.unit_price]
+        evaluations.append(
+            {
+                "community_id": community_id,
+                "community_name": items[0].canonical_name or items[0].community_name,
+                "area": area,
+                "platforms": [item.platform for item in items],
+                "listing_count": len(all_listings),
+                "listing_avg": sum(prices) / len(prices) if prices else None,
+                "deal_count": sum(len(item.deals) for item in items),
+                "community_avg_price": next(
+                    (i.community_avg_price for i in items if i.community_avg_price), None
                 ),
-            )
-            entry.update(
-                {
-                    "deal_avg": evaluation.deal_avg,
-                    "final_price": evaluation.decision.final_price,
-                    "branch": evaluation.decision.branch,
-                }
-            )
-        evaluations.append(entry)
+                "success": result.success,
+                "quote_avg": result.quote_avg,
+                "deal_avg": result.deal_avg,
+                "final_price": result.final_price,
+                "branch_code": result.branch,
+                "branch": BRANCH_TEXT.get(result.branch, result.branch),
+                "candidates": [
+                    {
+                        "quote_price": c.quote_price,
+                        "final_price": c.final_price,
+                        "count": c.count,
+                        "frequency": c.frequency,
+                    }
+                    for c in result.candidates
+                ],
+                "note": result.note,
+            }
+        )
     return evaluations
 
 
@@ -408,19 +434,20 @@ def print_report(
         candidates = f"，候选：{'、'.join(item['candidates'])}" if item.get("candidates") else ""
         print(f"[需人工] {item['city']}/{item['administrative_district']}/{item['community_name']}：{item['reason']}{candidates}")
 
-    eval_by_key = {(e["platform"], e["community_id"]): e for e in evaluations}
+    eval_by_id = {e["community_id"]: e for e in evaluations}
     print("\n===== 抓取与计算汇总 =====")
     for item in results:
         location = f"[{item.platform}] {item.canonical_name or item.community_name}"
         if item.blocked_reason:
             print(f"[被拦] {location}：{item.blocked_reason}")
             continue
-        evaluation = eval_by_key.get((item.platform, item.community_id), {})
+        evaluation = eval_by_id.get(item.community_id, {})
         print(
             f"[完成] {location}：在售 {len(item.listings)} 条，"
             f"在售均价 {evaluation.get('listing_avg') or '未识别'}，"
             f"挂牌均价 {item.community_avg_price or '未识别'}，"
             f"算法最终价 {evaluation.get('final_price') or '-'}"
+            f"（{evaluation.get('branch') or '-'}）"
         )
     for item in platform_errors:
         print(f"[平台中断] [{item['platform']}]：{item['error']}")
@@ -522,7 +549,7 @@ def main() -> int:
     record_report = record_stage(results, contexts, args.dry_run)
 
     # 筛选计算
-    evaluations = evaluate_stage(results)
+    evaluations = evaluate_stage(results, contexts)
 
     payload = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
