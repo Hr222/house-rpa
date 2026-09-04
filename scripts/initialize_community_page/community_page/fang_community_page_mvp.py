@@ -16,7 +16,7 @@
 ``--result-file`` 输出 JSON，由编排层负责落库。
 
 用法：
-  python -m scripts.rpa.fang_community_page_mvp --manual-login \
+  python -m scripts.initialize_community_page.community_page.fang_community_page_mvp --manual-login \
       --city "深圳" --administrative-district "龙岗区" \
       --community "翰熙典居" "远洋新干线"
 """
@@ -382,6 +382,40 @@ async def wait_for_manual_close() -> None:
     )
 
 
+def build_deal_page_url(listing_page_url: str) -> str:
+    """由已核对的挂牌页 URL 推导成交页 URL。
+
+    房天下二手房小区（house-xm{id}）与楼盘（/loupan/{id}/）同 ID
+    （2026-09-02 人工核对），路径直换：/house-xm{id}/ → /loupan/{id}/chengjiao/。
+    """
+    parsed = urlparse(listing_page_url)
+    match = re.search(r"/house-xm(\d+)", parsed.path)
+    if match is None:
+        raise RuntimeError(f"挂牌页 URL 不含 house-xm ID，无法推导成交页：{listing_page_url}")
+    return f"{parsed.scheme}://{parsed.hostname}/loupan/{match.group(1)}/chengjiao/"
+
+
+async def collect_deal_page_url(page, *, listing_page_url: str, expected_host: str, community_name: str) -> str:
+    """由挂牌页 URL 同 ID 推导成交页并实打开复核，返回实际成交页地址。
+
+    推导只做路径直换；打开后核对最终 URL 含同一 loupan ID 且含
+    /chengjiao/（排除全市成交页），不校验成交条数（零成交小区合法为空）。
+    """
+    deal_page_url = build_deal_page_url(listing_page_url)
+    loupan_id = re.search(r"/house-xm(\d+)", urlparse(listing_page_url).path).group(1)
+
+    await page.get(deal_page_url)
+    await page
+    await asyncio.sleep(2)
+    await ensure_accessible(page, label="小区成交页", expected_host=expected_host)
+    await dump_html(page, f"fang_community_page_deal_{_safe_file_token(community_name)}")
+    actual_url = page.target.url or deal_page_url
+    actual_path = urlparse(actual_url).path
+    if f"/loupan/{loupan_id}/" not in actual_path or "/chengjiao/" not in actual_path:
+        raise RuntimeError(f"成交页打开后非目标小区成交 URL：{actual_url}")
+    return actual_url
+
+
 async def main(
     city: str,
     administrative_district: str,
@@ -389,8 +423,16 @@ async def main(
     manual_login: bool,
     debug: bool,
     result_file: Optional[str] = None,
-) -> None:
-    """批量执行房天下小区挂牌页 URL 初始化，单小区失败不中断。"""
+    manual_close: bool = True,
+    include_deal: bool = False,
+) -> list[dict]:
+    """批量执行房天下小区挂牌页 URL 初始化，单小区失败不中断。
+
+    返回逐小区结果摘要（含 success 标记）；manual_close=False 时跳过结束前的
+    人工确认回车；include_deal=True 时为每个成功小区追加初始化成交页 URL
+    （/loupan/{id}/chengjiao/，由挂牌页 URL 同 ID 推导并实打开复核），
+    供统一初始化入口复用。
+    """
     if debug:
         set_debug_mode(True)
 
@@ -436,6 +478,20 @@ async def main(
                 consecutive_restarts = 0
                 index += 1
                 summary["success"] = True
+                if include_deal:
+                    try:
+                        summary["deal_page_url"] = await collect_deal_page_url(
+                            page,
+                            listing_page_url=summary["listing_page_url"],
+                            expected_host=expected_host,
+                            community_name=community_name,
+                        )
+                        print(f"deal_page_url：{summary['deal_page_url']}")
+                    except Exception as deal_exc:
+                        log.warning(
+                            "小区[%s]成交页初始化失败（不影响挂牌结果）：%s", community_name, deal_exc
+                        )
+                        summary["deal_error"] = str(deal_exc)
                 summaries.append(summary)
                 print(f"\n[成功] {community_name}")
                 print(f"城市：{summary['city']}")
@@ -507,9 +563,12 @@ async def main(
         )
         print(f"结果已写 {result_path}")
 
-        await wait_for_manual_close()
+        if manual_close:
+            await wait_for_manual_close()
     finally:
         browser.stop()
+
+    return summaries
 
 
 def cli() -> None:

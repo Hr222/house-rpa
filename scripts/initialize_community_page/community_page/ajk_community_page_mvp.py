@@ -15,7 +15,7 @@
 浏览器使用固定 profile（persist/ajk_profile）留存验证状态。
 
 用法：
-  python -m scripts.rpa.ajk_community_page_mvp --manual-login \
+  python -m scripts.initialize_community_page.community_page.ajk_community_page_mvp --manual-login \
       --city "深圳" --administrative-district "罗湖区" \
       --community "联城美园" "绿景虹湾"
 """
@@ -567,14 +567,19 @@ async def main(
     community_names: list[str],
     manual_login: bool,
     debug: bool,
-) -> None:
-    """批量执行安居客小区挂牌页 URL 初始化，单小区失败不中断。"""
+    manual_close: bool = True,
+) -> list[dict]:
+    """批量执行安居客小区挂牌页 URL 初始化，单小区失败不中断。
+
+    返回逐小区结果摘要（含 success 标记）；manual_close=False 时跳过结束前的
+    人工确认回车，供统一初始化入口 scripts/initialize_community_page/init_community_pages.py 复用。
+    """
     if debug:
         set_debug_mode(True)
     start_url = get_start_url("ajk", city)
     expected_host = (urlparse(start_url).hostname or "").lower()
     # 固定浏览器 profile：首次人工验证后 cookie 留存，后续运行不再"首次必风控"。
-    profile_dir = Path(__file__).resolve().parents[2] / "persist" / "ajk_profile"
+    profile_dir = Path(__file__).resolve().parents[3] / "persist" / "ajk_profile"
     profile_dir.mkdir(parents=True, exist_ok=True)
     browser = await uc.start(
         headless=False,
@@ -642,9 +647,12 @@ async def main(
             len(summaries),
             sum(1 for item in summaries if item["success"]),
         )
-        await wait_for_manual_close()
+        if manual_close:
+            await wait_for_manual_close()
     finally:
         browser.stop()
+
+    return summaries
 
 
 def cli() -> None:

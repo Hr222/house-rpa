@@ -11,7 +11,7 @@
 本脚本只用于独立验证，不写入数据库，也不接入正式 RPA 编排链路。
 
 用法：
-  python -m scripts.rpa.lyj_community_page_mvp --manual-login \
+  python -m scripts.initialize_community_page.community_page.lyj_community_page_mvp --manual-login \
       --city "深圳" --administrative-district "福田区" \
       --community "绿景虹湾" "香蜜湖一号"
 """
@@ -294,8 +294,13 @@ async def main(
     community_district: str,
     manual_login: bool,
     debug: bool,
-) -> None:
-    """批量执行乐有家小区挂牌页 URL 初始化，单小区失败不中断。"""
+    manual_close: bool = True,
+) -> list[dict]:
+    """批量执行乐有家小区挂牌页 URL 初始化，单小区失败不中断。
+
+    返回逐小区结果摘要（含 success 标记）；manual_close=False 时跳过结束前的
+    人工确认回车，供统一初始化入口 scripts/initialize_community_page/init_community_pages.py 复用。
+    """
     if debug:
         set_debug_mode(True)
 
@@ -366,9 +371,12 @@ async def main(
             len(summaries),
             sum(1 for item in summaries if item["success"]),
         )
-        await wait_for_manual_close()
+        if manual_close:
+            await wait_for_manual_close()
     finally:
         browser.stop()
+
+    return summaries
 
 
 def cli() -> None:
