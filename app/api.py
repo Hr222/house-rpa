@@ -55,6 +55,7 @@ def create_app(
     manage_runtime: bool = True,
     inquiry_orchestrator: Optional[InquiryOrchestrator] = None,
     inquiry_task_manager: Optional[InquiryTaskManager] = None,
+    skip_task_recovery: bool = False,
 ) -> FastAPI:
     completion_orchestrator = InquiryCompletionOrchestrator()
     if runtime is None:
@@ -63,6 +64,7 @@ def create_app(
         inquiry_task_manager = inquiry_task_manager or InquiryTaskManager(
             runtime,
             completion_orchestrator,
+            recover_pending=not skip_task_recovery,
         )
         inquiry_orchestrator = InquiryOrchestrator(
             inquiry_task_manager,

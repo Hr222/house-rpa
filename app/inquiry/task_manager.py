@@ -19,6 +19,7 @@ from app.inquiry.completion import InquiryCompletionOrchestrator
 from app.inquiry.models import ConfirmedCommunityContext
 from app.inquiry.task_store import (
     InquiryTaskSnapshot,
+    clear_pending_tasks,
     delete_pending_task,
     load_pending_tasks,
     save_pending_task,
@@ -39,10 +40,12 @@ class InquiryTaskManager:
         runtime: RPARuntime,
         completion_orchestrator: InquiryCompletionOrchestrator,
         platform_entry_loader: Optional[Callable[[int], tuple[dict, dict]]] = None,
+        recover_pending: bool = True,
     ) -> None:
         self.runtime = runtime
         self.completion_orchestrator = completion_orchestrator
         self._platform_entry_loader = platform_entry_loader
+        self._recover_pending = recover_pending
         self._started = False
         self._recovery_complete = asyncio.Event()
         self._recovery_task: Optional[asyncio.Task] = None
@@ -87,6 +90,11 @@ class InquiryTaskManager:
             return
         self._started = True
         self._recovery_complete = asyncio.Event()
+        if not self._recover_pending:
+            # 测试模式：不恢复历史任务，直接清空残留快照，保持启动干净
+            clear_pending_tasks()
+            self._recovery_complete.set()
+            return
         snapshots = load_pending_tasks()
         if not snapshots:
             self._recovery_complete.set()

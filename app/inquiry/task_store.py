@@ -118,6 +118,20 @@ def delete_pending_task(task_id: str) -> None:
         pass
 
 
+def clear_pending_tasks() -> int:
+    """清空全部残留询价任务快照（测试模式启动时使用），返回清除数量。"""
+    cleared = 0
+    for task_file in _persist_dir().glob("*.json"):
+        try:
+            task_file.unlink()
+            cleared += 1
+        except OSError:
+            log.warning("残留询价任务快照删除失败: %s", task_file.name, exc_info=True)
+    if cleared:
+        log.info("已清空 %d 个残留询价任务快照", cleared)
+    return cleared
+
+
 def load_pending_tasks() -> list[InquiryTaskSnapshot]:
     """加载本编排层目录中可解析的残留任务，按创建时间恢复。"""
     snapshots: list[InquiryTaskSnapshot] = []

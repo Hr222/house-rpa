@@ -35,6 +35,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=config.API_PORT,
         help=f"API 监听端口（默认 {config.API_PORT}）。",
     )
+    parser.add_argument(
+        "--no-recovery",
+        dest="no_recovery",
+        action="store_true",
+        help="测试模式：启动时清空 persist/inquiries 残留快照并跳过崩溃恢复（正式值守不要加）。",
+    )
     return parser
 
 
@@ -59,7 +65,7 @@ def main():
     setup_logging()
     _ensure_port_available(config.API_HOST, args.port)
     runtime = RPARuntime(enable_console_ready_confirmation=args.manual_login)
-    app = create_app(runtime=runtime, manage_runtime=True)
+    app = create_app(runtime=runtime, manage_runtime=True, skip_task_recovery=args.no_recovery)
     uvicorn.run(
         app,
         host=config.API_HOST,
