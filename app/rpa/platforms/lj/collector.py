@@ -31,7 +31,12 @@ from app.rpa.core.status import PlatformResultStatus
 from app.rpa.core.models import PlatformResult
 from app.rpa.platforms.lj import parser as parsers
 from app.rpa.utils.debug_utils import dump_html
-from app.rpa.platforms.base import _human_click, has_matching_community_snapshots, wait_and_reload_after_block
+from app.rpa.platforms.base import (
+    _human_click,
+    has_matching_community_snapshots,
+    safe_select_and_click,
+    wait_and_reload_after_block,
+)
 from app.rpa.platforms.city_map import get_start_url
 
 
@@ -164,8 +169,8 @@ async def probe_ready(main_page) -> tuple[bool, str]:
 
 
 def _token_from_url(page_url: str) -> Optional[str]:
-    """从链家挂牌/成交入口 URL 提取 c{ID} 小区 token。"""
-    m = re.search(r"/(?:ershoufang|chengjiao)/(c\d+)", page_url or "")
+    """从链家挂牌/成交入口 URL 提取小区 token（挂牌 c{ID}，成交 sq{ID}）。"""
+    m = re.search(r"/(?:ershoufang|chengjiao)/((?:c|sq)\d+)", page_url or "")
     return m.group(1) if m else None
 
 

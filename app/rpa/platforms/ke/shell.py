@@ -75,14 +75,8 @@ class KePlatformAdapter(PlatformAdapter):
         return result
 
     async def _probe_ready(self, page, html: str) -> tuple[bool, str]:
-        """贝壳特有：人机验证 + 搜索框。登录检测由基类 check_ready 负责。"""
-        if ke_adapter._is_manual_verify_html(html):
-            return False, "命中人机验证，等待人工处理"
-        try:
-            await ke_adapter._get_search_input(page)
-        except Exception:
-            return False, "未找到搜索框，页面未就绪"
-        return True, "READY"
+        """贝壳特有探测：委托 collector 的轻量就绪探测（URL 白名单直达时代）。"""
+        return await ke_adapter.probe_ready(page)
 
     def detect_block(self, url: str, html: str) -> tuple[bool, str]:
         return ke_adapter.detect_block(url, html)

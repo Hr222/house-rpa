@@ -8,7 +8,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from app.property_records.database import PropertyRecordsDatabase
+from app.property_records.database import (
+    PropertyRecordsDatabase,
+    normalize_observed_at,
+)
 from app.property_records.models import (
     CommunityPlatformPage,
     DealRecord,
@@ -301,7 +304,7 @@ def record_platform_result(
                 community_id,
                 source_platform,
                 observed_urls,
-                updated_at=_normalize_observed_at(seen_at),
+                updated_at=normalize_observed_at(seen_at),
             )
             if deleted:
                 log.info(

@@ -253,7 +253,7 @@ class PropertyRecordsDatabase:
             raise ValueError(f"挂牌来源平台不支持: {source_platform}")
         source_name = _required_text(source_community_name, "source_community_name")
         url = normalize_listing_url(listing_url)
-        observed_at = _normalize_observed_at(seen_at)
+        observed_at = normalize_observed_at(seen_at)
         written_at = _now()
         if area_sqm is not None:
             area_sqm = normalize_area_sqm(area_sqm)
@@ -567,7 +567,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _normalize_observed_at(value: str | None) -> str:
+def normalize_observed_at(value: str | None) -> str:
     """规范化采集时间，缺失时使用当前 UTC 时间。"""
     text = str(value or "").strip()
     if not text:
