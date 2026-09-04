@@ -6,7 +6,9 @@
 """
 
 import re
+from html import unescape
 from typing import Optional
+from urllib.parse import urljoin
 
 from app.rpa.core.models import ListingSnapshot
 
@@ -21,8 +23,11 @@ def _extract_first(pattern, text, cast=float):
         return None
 
 
-def parse_listing_snapshots(html: str) -> list:
+def parse_listing_snapshots(html: str, base_url: Optional[str] = None) -> list:
     """提取主结果区房源快照。
+
+    base_url: 页面 URL（直达采集传入），用于把房源详情链接 urljoin 成绝对
+    listing_url；不传时保留原始 href（可能含 &amp;，已 unescape）。
 
     安居客结果页结构：主结果区与推荐区是两个并列的 <section class="list">，
     中间靠 <h3 class="list-guess-title">分隔。只取边界标志之前的部分。
@@ -68,6 +73,13 @@ def parse_listing_snapshots(html: str) -> list:
         if title_m:
             title = title_m.group(1).strip()
 
+        # 房源详情链接：chunk 内 /prop/view/{id} 链接
+        listing_url = None
+        view_m = re.search(r'<a[^>]*href="([^"]*prop/view/[^"]*)"', chunk, re.S)
+        if view_m:
+            href = view_m.group(1)
+            listing_url = urljoin(base_url, unescape(href)) if base_url else unescape(href)
+
         total_price = _extract_first(
             r'property-price-total-num[^>]*>\s*([\d,]+)', chunk
         )
@@ -83,6 +95,7 @@ def parse_listing_snapshots(html: str) -> list:
                 house_id="",
                 community_name=community_name,
                 title=title,
+                listing_url=listing_url,
                 area=area,
                 layout=layout,
                 unit_price=unit_price,

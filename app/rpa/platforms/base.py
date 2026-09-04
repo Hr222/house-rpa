@@ -314,8 +314,9 @@ class PlatformAdapter(ABC):
         """
         raise NotImplementedError(f"平台[{self.code}] 未实现 is_no_result 能力")
 
-    def parse_listing_snapshots(self, html: str) -> list:
-        """解析在售房源快照（委托工程 parser，保持纯函数层与单测）。"""
+    def parse_listing_snapshots(self, html: str, base_url: Optional[str] = None) -> list:
+        """解析在售房源快照（委托工程 parser，保持纯函数层与单测）。
+        base_url 为页面 URL，用于把房源详情相对链接 urljoin 成绝对 listing_url。"""
         raise NotImplementedError(f"平台[{self.code}] 未实现 parse_listing_snapshots 能力")
 
     def parse_community_avg_price(self, html: str) -> Optional[float]:

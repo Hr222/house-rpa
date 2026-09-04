@@ -7,12 +7,18 @@
 
 import re
 from datetime import datetime, timedelta
+from html import unescape
+from typing import Optional
+from urllib.parse import urljoin
 
 from app.rpa.core.models import ListingSnapshot
 
 
-def parse_listing_snapshots(html: str) -> list:
+def parse_listing_snapshots(html: str, base_url: Optional[str] = None) -> list:
     """从结果页主结果列表提取在售房源快照。
+
+    base_url: 页面 URL（直达采集传入），用于把房源详情链接 urljoin 成绝对
+    listing_url；不传时保留原始 href。
 
     DOM（和贝壳一致）：
       <ul class="sellListContent">
@@ -37,11 +43,14 @@ def parse_listing_snapshots(html: str) -> list:
         name_m = re.search(r'<div class="positionInfo">.*?<a[^>]*>([^<]+)</a>', chunk, re.S)
         community_name = name_m.group(1).strip() if name_m else None
 
-        # 营销标题
+        # 营销标题 + 房源详情链接（div.title a，/ershoufang/{houseId}.html）
         title = None
-        tit_m = re.search(r'<div class="title">.*?<a[^>]*>(.*?)</a>', chunk, re.S)
+        listing_url = None
+        tit_m = re.search(r'<div class="title">.*?<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', chunk, re.S)
         if tit_m:
-            title = re.sub(r'<[^>]+>', '', tit_m.group(1)).strip() or None
+            href = tit_m.group(1)
+            listing_url = urljoin(base_url, unescape(href)) if base_url else unescape(href)
+            title = re.sub(r'<[^>]+>', '', tit_m.group(2)).strip() or None
 
         # 户型+面积
         info_m = re.search(r'<div class="houseInfo">.*?>(.*?)</div>', chunk, re.S)
@@ -74,6 +83,7 @@ def parse_listing_snapshots(html: str) -> list:
                 house_id="",
                 community_name=community_name,
                 title=title,
+                listing_url=listing_url,
                 area=area,
                 layout=layout,
                 unit_price=unit_price,

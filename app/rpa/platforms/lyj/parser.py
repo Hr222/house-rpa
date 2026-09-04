@@ -6,7 +6,9 @@
 """
 
 import re
+from html import unescape
 from typing import Optional
+from urllib.parse import urljoin
 
 from app.rpa.core.models import ListingSnapshot
 
@@ -15,8 +17,11 @@ def _normalize_text(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text or "").strip()
 
 
-def parse_listing_snapshots(html: str) -> list:
+def parse_listing_snapshots(html: str, base_url: Optional[str] = None) -> list:
     """从乐有家搜索结果页提取房源快照。
+
+    base_url: 页面 URL（直达采集传入），用于把房源详情链接 urljoin 成绝对
+    listing_url；不传时保留原始 href。
 
     每个房源在 <li class="item clearfix"> 内：
       p.tit a              → 标题
@@ -39,11 +44,14 @@ def parse_listing_snapshots(html: str) -> list:
         if comm_m:
             community_name = _normalize_text(comm_m.group(1))
 
-        # 营销标题：p.tit a
+        # 营销标题 + 房源详情链接（p.tit a，href /esf/detail/{id}）
         title = None
-        tit_m = re.search(r'<p class="tit">\s*<a[^>]*>(.*?)</a>', chunk, re.S)
+        listing_url = None
+        tit_m = re.search(r'<p class="tit">\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', chunk, re.S)
         if tit_m:
-            title = _normalize_text(tit_m.group(1)) or None
+            href = tit_m.group(1)
+            listing_url = urljoin(base_url, unescape(href)) if base_url else unescape(href)
+            title = _normalize_text(tit_m.group(2)) or None
 
         layout = None
         layout_m = re.search(r"(\d+室\d+厅)", chunk)
@@ -73,6 +81,7 @@ def parse_listing_snapshots(html: str) -> list:
                 house_id="",
                 community_name=community_name,
                 title=title,
+                listing_url=listing_url,
                 area=area,
                 layout=layout,
                 unit_price=unit_price,

@@ -297,7 +297,7 @@ async def collect_listing_by_url(
             listing_snapshots = []
             empty_listing = True
         else:
-            listing_snapshots = parsers.parse_listing_snapshots(html)
+            listing_snapshots = parsers.parse_listing_snapshots(html, base_url=page.target.url)
             empty_listing = False
             if listing_snapshots and not has_matching_community_snapshots(listing_snapshots, community_name):
                 log.warning(
@@ -318,7 +318,7 @@ async def collect_listing_by_url(
                     page, detect_block, f"在售翻页第 {page_no} 页"
                 )
                 await _dump(page, f"lj_listing_by_url_p{page_no}")
-                page_snapshots = parsers.parse_listing_snapshots(page_html)
+                page_snapshots = parsers.parse_listing_snapshots(page_html, base_url=page.target.url)
                 listing_snapshots.extend(page_snapshots)
                 if not page_snapshots:
                     log.info("[翻页] 在售第 %d 页无房源，停止翻页", page_no)

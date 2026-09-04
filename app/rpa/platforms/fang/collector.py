@@ -280,7 +280,7 @@ async def collect_listing_by_url(
             log.info("[空态] %s 在房天下在售 0 条（跳过推荐位）", community_name)
             listing_snapshots = []
         else:
-            listing_snapshots = parsers.parse_listing_snapshots(html)
+            listing_snapshots = parsers.parse_listing_snapshots(html, base_url=page.target.url)
             if listing_snapshots and not has_matching_community_snapshots(listing_snapshots, community_name):
                 log.warning(
                     "[归属不符] %s：%s 页面快照与目标小区不匹配（%d 条全部弃用）",
@@ -300,7 +300,7 @@ async def collect_listing_by_url(
                     page, detect_block, f"在售翻页第 {page_no} 页"
                 )
                 await _dump(page, f"fang_listing_by_url_p{page_no}")
-                page_snapshots = parsers.parse_listing_snapshots(page_html)
+                page_snapshots = parsers.parse_listing_snapshots(page_html, base_url=page.target.url)
                 listing_snapshots.extend(page_snapshots)
                 if not page_snapshots:
                     log.info("[翻页] 在售第 %d 页无房源，停止翻页", page_no)

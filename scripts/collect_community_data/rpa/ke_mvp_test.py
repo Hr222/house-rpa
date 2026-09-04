@@ -78,6 +78,8 @@ def print_listing_snapshots(snapshots: list):
             f"几房几厅: {item.layout or ''}, 售价: {item.unit_price or ''}元/平, "
             f"总价: {item.total_price or ''}万}}"
         )
+        _url = item.listing_url or "-"
+        print("  房源链接:", _url if len(_url) <= 72 else _url[:69] + "...")
 
 
 async def browser_gone(tab) -> bool:
@@ -410,7 +412,7 @@ async def collect_community(
         # 面积筛选（如有）会刷新页面，重新读取当前 HTML
         html = await tab.get_content()
 
-    snapshots = _platform.parse_listing_snapshots(html)
+    snapshots = _platform.parse_listing_snapshots(html, base_url=tab.target.url)
 
     # 页面归属校验（工程件，与 ajk/lyj 模板同款）：解析出的快照必须
     # 能与目标小区名匹配，否则判定入口落地页错误，整页弃用不入库
@@ -447,7 +449,7 @@ async def collect_community(
         )
         if debug:
             await dump_html(tab, f"ke_listing_{target['community_id'] or 'direct'}_p{page_no}")
-        page_snapshots = _platform.parse_listing_snapshots(page_html)
+        page_snapshots = _platform.parse_listing_snapshots(page_html, base_url=tab.target.url)
         snapshots.extend(page_snapshots)
         if not page_snapshots:
             # 空页 = 已翻过真实在售末页，停止翻页

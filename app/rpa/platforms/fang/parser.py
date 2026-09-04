@@ -7,7 +7,9 @@
 
 import re
 from datetime import datetime, timedelta
+from html import unescape
 from typing import Optional
+from urllib.parse import urljoin
 
 from app.rpa.core.models import ListingSnapshot
 
@@ -49,8 +51,11 @@ def find_deal_link(html: str) -> Optional[str]:
     return f"https:{raw}" if raw.startswith("//") else raw
 
 
-def parse_listing_snapshots(html: str) -> list:
+def parse_listing_snapshots(html: str, base_url: Optional[str] = None) -> list:
     """从主结果区提取在售房源快照。
+
+    base_url: 页面 URL（直达采集传入），用于把房源详情链接 urljoin 成绝对
+    listing_url；不传时保留原始 href。
 
     DOM:
       <dl class="clearfix ...">
@@ -75,11 +80,18 @@ def parse_listing_snapshots(html: str) -> list:
     for block in re.finditer(r'<dl class="clearfix[^"]*"[^>]*>(.*?)</dl>', main_html, re.S):
         chunk = block.group(1)
 
-        # 营销标题：tit_shop
+        # 营销标题：tit_shop（h4 内 span）
         title = None
         title_m = re.search(r'tit_shop[^>]*>(.*?)</span>', chunk, re.S)
         if title_m:
             title = re.sub(r'<[^>]+>', '', title_m.group(1)).strip() or None
+
+        # 房源详情链接：h4 内 <a href>（/chushou/{id}.htm）
+        listing_url = None
+        link_m = re.search(r'<h4[^>]*>\s*<a[^>]*href="([^"]+)"', chunk, re.S)
+        if link_m:
+            href = link_m.group(1)
+            listing_url = urljoin(base_url, unescape(href)) if base_url else unescape(href)
 
         # 小区名：add_shop 里的 <a> 链接（title 属性或文本）
         community_name = None
@@ -116,6 +128,7 @@ def parse_listing_snapshots(html: str) -> list:
                 house_id="",
                 community_name=community_name,
                 title=title,
+                listing_url=listing_url,
                 area=area,
                 layout=layout,
                 unit_price=unit_price,

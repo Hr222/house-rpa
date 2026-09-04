@@ -92,9 +92,9 @@ class LyjPlatformAdapter(PlatformAdapter):
         """统一“空/边界”校验（委托 adapter 平台 marker）。"""
         return lyj_adapter.is_no_result(html)
 
-    def parse_listing_snapshots(self, html: str) -> list:
+    def parse_listing_snapshots(self, html: str, base_url: Optional[str] = None) -> list:
         """解析在售快照（委托工程 parser）。"""
-        return parsers.parse_listing_snapshots(html)
+        return parsers.parse_listing_snapshots(html, base_url)
 
     def parse_community_avg_price(self, html: str):
         """解析小区参考均价（委托工程 parser）。"""

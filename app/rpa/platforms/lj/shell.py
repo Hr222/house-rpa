@@ -97,9 +97,9 @@ class LjPlatformAdapter(PlatformAdapter):
         """统一“空/边界”校验（委托 adapter 平台 marker）。"""
         return lj_adapter.is_no_result(html)
 
-    def parse_listing_snapshots(self, html: str) -> list:
+    def parse_listing_snapshots(self, html: str, base_url: Optional[str] = None) -> list:
         """解析在售快照（委托工程 parser）。"""
-        return parsers.parse_listing_snapshots(html)
+        return parsers.parse_listing_snapshots(html, base_url)
 
     def parse_deal_records(self, html: str) -> list:
         """解析成交记录（委托工程 parser）。"""

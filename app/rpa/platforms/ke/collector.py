@@ -201,7 +201,7 @@ async def collect_listing_by_url(
                 elapsed_seconds=round(time.time() - start, 2),
             )
 
-        snapshots = parsers.parse_listing_snapshots(html)
+        snapshots = parsers.parse_listing_snapshots(html, base_url=page.target.url)
         if snapshots and not has_matching_community_snapshots(snapshots, community_name):
             log.warning(
                 "[归属不符] %s：%s 页面快照与目标小区不匹配（%d 条全部弃用）",
@@ -223,7 +223,7 @@ async def collect_listing_by_url(
                 page, detect_block, f"翻页第 {page_no} 页"
             )
             await _dump(page, f"ke_listing_by_url_p{page_no}")
-            page_snapshots = parsers.parse_listing_snapshots(page_html)
+            page_snapshots = parsers.parse_listing_snapshots(page_html, base_url=page.target.url)
             snapshots.extend(page_snapshots)
             if not page_snapshots:
                 log.info("[翻页] 第 %d 页无在售，停止翻页", page_no)

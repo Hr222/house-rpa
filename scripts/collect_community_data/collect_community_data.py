@@ -257,6 +257,27 @@ async def run_platforms(
     return results, platform_errors
 
 
+def _listing_rows(item: CommunityCollection) -> list[dict]:
+    """把单平台挂牌快照映射为入库行（含房源详情 URL 与面积/价格关键数据）。
+
+    row 键与入库层对齐：listing_url 必填（缺失行由入库层跳过并记 warning），
+    area_sqm / unit_price_yuan / total_price(万) / layout / title 可选。
+    """
+    rows: list[dict] = []
+    for snapshot in item.listings:
+        rows.append(
+            {
+                "listing_url": snapshot.listing_url,
+                "title": snapshot.title,
+                "layout": snapshot.layout,
+                "area_sqm": snapshot.area,
+                "unit_price_yuan": snapshot.unit_price,
+                "total_price": snapshot.total_price,  # 万；入库层按默认"万"转元
+            }
+        )
+    return rows
+
+
 def record_stage(
     results: list[CommunityCollection],
     contexts: dict[int, ConfirmedCommunityContext],
@@ -264,8 +285,8 @@ def record_stage(
 ) -> dict:
     """记录环节：CommunityCollection 与工程 PlatformResult 同构，直接映射入库。
 
-    ajk 现阶段无成交明细、挂牌快照缺详情链接（listing_records 置空），
-    实际入库物为入口行补全；详情链接方案确定后填充 listing_records 即可。
+    挂牌明细（listing_records）带房源详情 URL 与面积/单价/总价等关键数据，
+    无详情链接的行由入库层跳过并记 warning（真机核验提取覆盖率的信号）。
     被拦小区与直传 URL（无身份上下文）跳过记录；异常不中断批次。
     """
     report: dict = {"dry_run": dry_run, "recorded": 0, "errors": [], "skipped": []}
@@ -274,12 +295,15 @@ def record_stage(
             if item.blocked_reason or not item.listing_page_url:
                 continue
             report["recorded"] += 1
+            rows = _listing_rows(item)
+            with_url = sum(1 for row in rows if row["listing_url"])
             log.info(
-                "[dry-run] 将记录 %s(%s) 平台=%s 在售 %d 条 成交 %d 条",
+                "[dry-run] 将记录 %s(%s) 平台=%s 在售 %d 条(带详情URL %d) 成交 %d 条",
                 item.community_name,
                 item.community_id,
                 item.platform,
                 len(item.listings),
+                with_url,
                 len(item.deals),
             )
         return report
@@ -306,13 +330,14 @@ def record_stage(
             name=item.platform,
             status=PlatformResultStatus(item.status),
             community_avg_price=item.community_avg_price,
-            quote_prices=[s.unit_price for s in item.listings if s.unit_price],
             listing_snapshots=item.listings,
             deal_records=item.deals,
             deal_source="成交记录" if item.deals else "无",
         )
+        listing_rows = _listing_rows(item)
+        with_url = sum(1 for row in listing_rows if row["listing_url"])
         try:
-            ingestion.ingest_rpa_result(
+            report_ingest = ingestion.ingest_rpa_result(
                 community_id=item.community_id,
                 city=context.city,
                 administrative_district=context.administrative_district,
@@ -320,9 +345,19 @@ def record_stage(
                 result=platform_result,
                 listing_page_url=item.listing_page_url,
                 deal_page_url=item.deal_page_url,
-                listing_records=[],
+                listing_records=listing_rows,
             )
             report["recorded"] += 1
+            log.info(
+                "落库：%s(%s) 平台=%s 挂牌 %d 条(带URL %d/跳过 %d) 成交 %d 条",
+                item.community_name,
+                item.community_id,
+                item.platform,
+                len(report_ingest.listings),
+                with_url,
+                len(report_ingest.skipped_listings),
+                len(report_ingest.deals),
+            )
         except Exception as exc:
             log.error(
                 "记录失败：%s(%s) 平台=%s：%s", item.community_name, item.community_id, item.platform, exc

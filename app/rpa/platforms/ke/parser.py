@@ -3,7 +3,9 @@
 
 import json
 import re
+from html import unescape
 from typing import Iterable, List, Optional
+from urllib.parse import urljoin
 
 from app.rpa.core.models import DealRecord, ListingSnapshot
 
@@ -132,8 +134,12 @@ def parse_listing_records(html: str) -> List[tuple[str, float]]:
     return _parse_listing_records_regex(html)
 
 
-def parse_listing_snapshots(html: str) -> List[ListingSnapshot]:
-    """解析搜索结果页主结果列表中的房源摘要。"""
+def parse_listing_snapshots(html: str, base_url: Optional[str] = None) -> List[ListingSnapshot]:
+    """解析搜索结果页主结果列表中的房源摘要。
+
+    base_url: 页面 URL（直达采集传入当前列表页），用于把房源详情相对链接
+    urljoin 成绝对 listing_url；不传时 listing_url 保留原始 href（可能相对）。
+    """
     if _HAS_BS4:
         soup = BeautifulSoup(html, "html.parser")
         snapshots: list[ListingSnapshot] = []
@@ -155,11 +161,15 @@ def parse_listing_snapshots(html: str) -> List[ListingSnapshot]:
             if community_el:
                 community_name = _normalize_text(community_el.get_text(" ", strip=True))
 
-            # 营销标题
+            # 营销标题 + 房源详情链接（div.title a，href 为 /ershoufang/{houseId}.html）
             title = None
+            listing_url = None
             title_el = li.select_one(".title a")
             if title_el:
                 title = _normalize_text(title_el.get_text(" ", strip=True))
+                href = title_el.get("href")
+                if href:
+                    listing_url = urljoin(base_url, unescape(href)) if base_url else unescape(href)
 
             house_info_text = ""
             house_info_el = li.select_one(".houseInfo")
@@ -177,6 +187,7 @@ def parse_listing_snapshots(html: str) -> List[ListingSnapshot]:
                     house_id=house_id,
                     community_name=community_name,
                     title=title,
+                    listing_url=listing_url,
                     area=_extract_area(house_info_text),
                     layout=_extract_layout(house_info_text),
                     unit_price=unit_price,
