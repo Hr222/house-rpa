@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
-"""房产评估对比测试：逐条调用 RPA 询价接口，比较询价结果与评估单价的偏差。
+"""批量询价评估：逐条循环调用询价接口，与评估单价对比，输出偏差 Excel。
 
 用法：
   1. 先启动 RPA 服务并确认所有平台就绪：
      python -m scripts.api_server --debug --manual-login
   2. 再跑本脚本：
-     python test_evaluate.py
+     python -m scripts.batch_inquiry_evaluation [--input 评估表.xlsx] [--city 深圳] [--limit N]
 
-输出：results/评估对比_{timestamp}.xlsx
+输出：results/评估对比_{timestamp}.xlsx（Excel 含 city 列时逐行优先城市）
 """
 
+import argparse
 import time
 import sys
 import requests
@@ -19,19 +20,61 @@ from pathlib import Path
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_DEFAULT_INPUT = _PROJECT_ROOT / "test_data" / "房产评估汇总表_仅广州.xlsx"
+_DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "results"
+
 # ─── 配置 ──────────────────────────────────────────────
 BASE_URL = "http://127.0.0.1:8000"
-INPUT_FILE = Path(__file__).parent / "test_data/房产评估汇总表_仅广州.xlsx"
-OUTPUT_DIR = Path(__file__).parent / "results"
 POLL_INTERVAL = 6       # 轮询间隔秒数（>5 避免连续 429）
 MAX_WAIT = 600          # 单任务软等待阈值；超过后只报警，不判失败，继续阻塞等待
-DEFAULT_CITY = "深圳"    # Excel 无 city 列时的默认城市
 REQUEST_TIMEOUT = 15    # 单次 HTTP 请求超时
 READY_CHECK_INTERVAL = 5
 MANUAL_BLOCK_KEYWORDS = (
     "验证码", "人机验证", "验证", "风控", "captcha", "verify",
     "登录已失效", "登录", "WAIT_MANUAL_VERIFY", "LOGIN_EXPIRED",
 )
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description="批量询价评估对比（循环 POST /inquiries，与评估单价对比输出 Excel）"
+    )
+    parser.add_argument("--input", default=str(_DEFAULT_INPUT),
+                        help="评估表 xlsx 路径（需含 行政区/小区名称/面积㎡/评估单价 列；可选 city 列）")
+    parser.add_argument("--city", default="深圳",
+                        help="默认城市（Excel 无 city 列时使用；有 city 列则逐行优先）")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="只跑前 N 条（冒烟/单条验证用，例如 --limit 1）")
+    parser.add_argument("--output-dir", default=str(_DEFAULT_OUTPUT_DIR),
+                        help="对比结果输出目录")
+    parser.add_argument("--base-url", default=BASE_URL, help="服务地址")
+    return parser.parse_args()
+
+
+ARGS = _parse_args()
+BASE_URL = ARGS.base_url
+INPUT_FILE = Path(ARGS.input)
+OUTPUT_DIR = Path(ARGS.output_dir)
+DEFAULT_CITY = ARGS.city
+LIMIT = ARGS.limit
+
+
+def _classify_note(note: str | None) -> str | None:
+    """把无数据 note 归类，便于输出识别（URL 白名单/期数/城市等业务分支）。"""
+    if not note:
+        return None
+    if "不支持该城市" in note:
+        return "城市不支持"
+    if "挂牌入口" in note or "未初始化" in note:
+        return "未初始化入口"
+    if "期数未明确" in note:
+        return "多期需指定"
+    if "非住宅" in note or "类型不支持" in note:
+        return "类型不支持"
+    if "无数据" in note or "无在售" in note:
+        return "无在售数据"
+    return note
 
 
 def _safe_json(resp):
@@ -221,10 +264,11 @@ for c in range(1, ws_in.max_column + 1):
 city_col = col_map.get("city")
 administrative_district_col = col_map.get("行政区") or col_map.get("administrativeDistrict")
 area_col = col_map.get("面积㎡", 1)
-price_col = col_map.get("评估单价", 2)
+price_col = col_map.get("评估单价")   # 评估分析模式列（可选：无此列则为纯批量询价采集模式）
 community_col = col_map.get("小区名称", 4)
 last_data_col = max(col_map.values()) if col_map else 4
-out_start_col = last_data_col + 1  # 对比列起始位置
+out_start_col = last_data_col + 1  # 追加列起始位置
+HAS_EVAL = price_col is not None   # 有评估单价列 → 偏差分析；无 → 纯询价结果模式
 
 if city_col:
     print(f"[city] 检测到 city 列（第 {city_col} 列），将逐行读取城市")
@@ -233,15 +277,23 @@ else:
 
 if not administrative_district_col:
     raise SystemExit("评估表缺少‘行政区’列，无法创建新的询价请求")
+mode_text = "评估偏差分析" if HAS_EVAL else "纯批量询价（无评估单价/总值对比）"
+print(f"[模式] {mode_text}")
 
 # 表头列名: city? | 面积㎡ | 评估单价 | 房产评估总值 | 小区名称 | ...
 data = []
 for row_idx in range(2, ws_in.max_row + 1):
     community = ws_in.cell(row=row_idx, column=community_col).value
     area = ws_in.cell(row=row_idx, column=area_col).value
-    eval_price = ws_in.cell(row=row_idx, column=price_col).value
-    if not community or not area or not eval_price:
+    if not community or not area:
         continue
+    if price_col is not None:
+        eval_price = ws_in.cell(row=row_idx, column=price_col).value
+        if eval_price is None or str(eval_price).strip() == "":
+            continue  # 有评估列但本行缺失 → 跳过（原行为）
+        eval_price = float(eval_price)
+    else:
+        eval_price = None
     city = None
     if city_col:
         city = ws_in.cell(row=row_idx, column=city_col).value
@@ -261,10 +313,13 @@ for row_idx in range(2, ws_in.max_row + 1):
         "administrative_district": administrative_district,
         "community": str(community).strip(),
         "area": float(area),
-        "eval_price": float(eval_price),
+        "eval_price": eval_price,
     })
 
-print(f"读取到 {len(data)} 条评估记录")
+print(f"读取到 {len(data)} 条记录")
+if LIMIT is not None:
+    data = data[:LIMIT]
+    print(f"[limit] 只跑前 {LIMIT} 条")
 
 # ─── 检查服务就绪 ───────────────────────────────────────
 r = _http("GET", "/health/ready")
@@ -285,7 +340,7 @@ for i, item in enumerate(data):
 
     print(
         f"\n[{i+1}/{len(data)}] {city} {administrative_district} {community} "
-        f"面积={area}㎡ 评估单价={eval_price}"
+        f"面积={area}㎡ 评估单价={eval_price if eval_price is not None else '-'}"
     )
     final_data = None
     while True:
@@ -297,6 +352,7 @@ for i, item in enumerate(data):
                 "社区": community, "面积": area, "评估单价": eval_price,
                 "询价单价": None, "差距%": None, "分支": "ERROR",
                 "在售均价": None, "成交均价": None, "状态": "FAILED",
+                "备注": "创建任务失败",
             })
             break
 
@@ -338,10 +394,14 @@ for i, item in enumerate(data):
         continue
 
     if final_price is None:
+        note = (final_data or {}).get("note") or ""
+        note_display = _classify_note(note) or "全部平台无数据"
+        print(f"  无数据: {note_display}（{note or '-'}）")
         results.append({
             "社区": community, "面积": area, "评估单价": eval_price,
             "询价单价": None, "差距%": None, "分支": branch or "NO_DATA",
-            "在售均价": quote_avg, "成交均价": deal_avg, "状态": "全部平台无数据",
+            "在售均价": quote_avg, "成交均价": deal_avg, "状态": note_display,
+            "备注": note,
         })
         continue
 
@@ -359,7 +419,7 @@ for i, item in enumerate(data):
     else:
         branch_display = str(branch)
 
-    print(f"  询价={final_price} | 评估={eval_price} | 差距={diff_pct}% | {branch_display}")
+    print(f"  询价={final_price} | 评估={eval_price if eval_price is not None else '-'} | 差距={diff_pct}% | {branch_display}")
 
     results.append({
         "社区": community,
@@ -373,16 +433,16 @@ for i, item in enumerate(data):
         "状态": "OK",
     })
 
-# ─── 输出 Excel（基于原表追加对比列）─────────────────────
+# ─── 输出 Excel（基于原表右侧追加结果列）────────────────
 OUTPUT_DIR.mkdir(exist_ok=True)
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-out_path = OUTPUT_DIR / f"评估对比_{timestamp}.xlsx"
+suffix = "评估对比" if HAS_EVAL else "分析"
+out_path = OUTPUT_DIR / f"{suffix}_{timestamp}.xlsx"
 
 # 复制原表
 wb_in = openpyxl.load_workbook(INPUT_FILE)
 ws = wb_in.active
 
-# 在原表右侧追加对比表头
 header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
 header_font = Font(bold=True, size=11, color="FFFFFF")
 thin_border = Border(
@@ -390,83 +450,101 @@ thin_border = Border(
     top=Side(style="thin"), bottom=Side(style="thin"),
 )
 
-add_headers = ["询价单价", "差距比例%", "偏差评级", "是否采用售均价"]
-add_headers.append("多峰候选（中位数 -> 最终值 / 频率）")
-for j, h in enumerate(add_headers):
+# 追加列按模式组装
+headers = ["询价单价"]
+if HAS_EVAL:
+    headers += ["差距比例%", "偏差评级", "决策分支"]
+else:
+    headers += ["在售均价", "成交均价", "决策分支"]
+if any(result.get("多峰候选") for result in results):
+    headers.append("多峰候选（中位数 -> 最终值 / 频率）")
+headers.append("备注")
+
+for j, h in enumerate(headers):
     cell = ws.cell(row=1, column=out_start_col + j, value=h)
     cell.font = header_font
     cell.fill = header_fill
     cell.alignment = Alignment(horizontal="center")
     cell.border = thin_border
 
-# 补数据
+COL = {h: out_start_col + j for j, h in enumerate(headers)}
+
+
+def _rating(diff):
+    if diff is None:
+        return "N/A"
+    if abs(diff) <= 5:
+        return "偏差小（≤5%）"
+    if abs(diff) <= 10:
+        return "偏差中等（5%~10%）"
+    return "偏差大（>10%）"
+
+
+def _put(row, header, value, *, fmt=None, wrap=False):
+    cell = ws.cell(row=row, column=COL[header], value=value)
+    cell.border = thin_border
+    if wrap:
+        cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+    else:
+        cell.alignment = Alignment(horizontal="center")
+    if fmt and value is not None and not isinstance(value, str):
+        cell.number_format = fmt
+    return cell
+
+
+for result in results:
+    result.setdefault("备注", result.get("分支") or "")
+
 for i, r in enumerate(results):
     row = i + 2
-
-    # 询价单价
-    cell = ws.cell(row=row, column=out_start_col, value=r["询价单价"])
-    cell.border = thin_border
-    cell.alignment = Alignment(horizontal="center")
-    if r["询价单价"]:
-        cell.number_format = '#,##0.00'
-
-    # 差距比例%
-    diff = r["差距%"]
-    cell = ws.cell(row=row, column=out_start_col + 1, value=diff if diff is not None else "N/A")
-    cell.border = thin_border
-    cell.alignment = Alignment(horizontal="center")
-    if diff is not None:
-        cell.number_format = '0.00"%"'
-
-    # 偏差评级
-    if diff is None:
-        rating = "N/A"
-    elif abs(diff) <= 5:
-        rating = "偏差小（≤5%）"
-    elif abs(diff) <= 10:
-        rating = "偏差中等（5%~10%）"
+    _put(row, "询价单价", r["询价单价"], fmt="#,##0.00")
+    if HAS_EVAL:
+        diff = r["差距%"]
+        _put(row, "差距比例%", diff if diff is not None else "N/A", fmt='0.00"%"')
+        _put(row, "偏差评级", _rating(diff))
     else:
-        rating = "偏差大（>10%）"
-    cell = ws.cell(row=row, column=out_start_col + 2, value=rating)
-    cell.border = thin_border
-    cell.alignment = Alignment(horizontal="center")
-
-    # 是否采用售均价
-    cell = ws.cell(row=row, column=out_start_col + 3, value=r["分支"])
-    cell.border = thin_border
-    cell.alignment = Alignment(horizontal="center")
+        _put(row, "在售均价", r["在售均价"], fmt="#,##0.00")
+        _put(row, "成交均价", r["成交均价"], fmt="#,##0.00")
+    _put(row, "决策分支", r["分支"])
+    if "多峰候选（中位数 -> 最终值 / 频率）" in COL:
+        _put(row, "多峰候选（中位数 -> 最终值 / 频率）", r.get("多峰候选") or "", wrap=True)
+    _put(row, "备注", r.get("备注") or "", wrap=True)
 
 # 列宽
 from openpyxl.utils import get_column_letter
-for i, result in enumerate(results):
-    candidate_cell = ws.cell(
-        row=i + 2,
-        column=out_start_col + 4,
-        value=result.get("\u591a\u5cf0\u5019\u9009", ""),
-    )
-    candidate_cell.border = thin_border
-    candidate_cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-
-for j, width in enumerate([14, 14, 16, 28, 52]):
-    col_letter = get_column_letter(out_start_col + j)
-    ws.column_dimensions[col_letter].width = width
+width_map = {
+    "询价单价": 14, "差距比例%": 14, "偏差评级": 16,
+    "在售均价": 14, "成交均价": 14, "决策分支": 26,
+    "多峰候选（中位数 -> 最终值 / 频率）": 50, "备注": 32,
+}
+for j, h in enumerate(headers):
+    ws.column_dimensions[get_column_letter(out_start_col + j)].width = width_map.get(h, 20)
 
 # 汇总行
 summary_row = len(results) + 3
 summary_col = community_col
 ws.cell(row=summary_row, column=summary_col, value="汇总").font = Font(bold=True)
 
-valid_diffs = [r["差距%"] for r in results if r["差距%"] is not None]
-if valid_diffs:
-    avg_diff = sum(valid_diffs) / len(valid_diffs)
-    max_diff = max(valid_diffs)
-    min_diff = min(valid_diffs)
-    within_10 = sum(1 for d in valid_diffs if abs(d) <= 10)
-    ws.cell(row=summary_row, column=out_start_col, value=f"有效: {len(valid_diffs)}/{len(results)} 条")
-    ws.cell(row=summary_row + 1, column=out_start_col, value=f"平均偏差: {avg_diff:.2f}%")
-    ws.cell(row=summary_row + 2, column=out_start_col, value=f"最大偏差: {max_diff:.2f}%")
-    ws.cell(row=summary_row + 3, column=out_start_col, value=f"最小偏差: {min_diff:.2f}%")
-    ws.cell(row=summary_row + 4, column=out_start_col, value=f"偏差≤10%: {within_10}/{len(valid_diffs)} 条")
+done = sum(1 for r in results if r.get("询价单价") is not None)
+ws.cell(row=summary_row, column=out_start_col, value=f"完成 {done}/{len(results)} 条")
+if HAS_EVAL:
+    valid_diffs = [r["差距%"] for r in results if r["差距%"] is not None]
+    if valid_diffs:
+        avg_diff = sum(valid_diffs) / len(valid_diffs)
+        max_diff = max(valid_diffs)
+        min_diff = min(valid_diffs)
+        within_10 = sum(1 for d in valid_diffs if abs(d) <= 10)
+        ws.cell(row=summary_row + 1, column=out_start_col, value=f"平均偏差: {avg_diff:.2f}%")
+        ws.cell(row=summary_row + 2, column=out_start_col, value=f"最大偏差: {max_diff:.2f}%")
+        ws.cell(row=summary_row + 3, column=out_start_col, value=f"最小偏差: {min_diff:.2f}%")
+        ws.cell(row=summary_row + 4, column=out_start_col, value=f"偏差≤10%: {within_10}/{len(valid_diffs)} 条")
+else:
+    # 无评估列：整批小区"大致价格"汇总（最终建议单价统计）
+    prices = [r["询价单价"] for r in results if r.get("询价单价") is not None]
+    if prices:
+        avg_p = sum(prices) / len(prices)
+        ws.cell(row=summary_row + 1, column=out_start_col, value=f"小区最终单价均值: {avg_p:,.0f} 元/㎡")
+        ws.cell(row=summary_row + 2, column=out_start_col, value=f"区间: {min(prices):,.0f} ~ {max(prices):,.0f} 元/㎡")
 
 wb_in.save(out_path)
 print(f"\n✅ 结果已保存: {out_path}")
