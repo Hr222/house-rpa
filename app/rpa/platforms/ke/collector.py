@@ -13,7 +13,7 @@ from typing import Optional
 from app.algorithm.area_rules import deal_area_bounds
 from app.rpa.core import config
 from app.rpa.core.status import PlatformResultStatus
-from app.rpa.parsers import ke as parsers
+from app.rpa.platforms.ke import parser as parsers
 from app.rpa.utils.debug_utils import dump_html
 from app.rpa.core.models import DealRecord, ListingSnapshot, PlatformResult
 from app.rpa.platforms.base import (

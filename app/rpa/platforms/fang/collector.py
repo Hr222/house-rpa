@@ -26,8 +26,8 @@ from app.rpa.core import config
 from app.rpa.core.status import PlatformResultStatus
 from app.rpa.utils.debug_utils import dump_html
 from app.rpa.core.models import ListingSnapshot, PlatformResult
-from app.rpa.parsers import fang as parsers
-from app.rpa.platforms.fang_constants import START_URL
+from app.rpa.platforms.fang import parser as parsers
+from app.rpa.platforms.fang.constants import START_URL
 from app.rpa.platforms.city_map import get_start_url
 from app.rpa.platforms.base import (
     wait_and_reload_after_block,

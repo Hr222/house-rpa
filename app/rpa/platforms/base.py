@@ -294,6 +294,36 @@ class PlatformAdapter(ABC):
         """检测当前页面是否被风控/登录拦截。"""
 
 
+    # ------------------------------------------------------------------
+    # 平台能力统一入口（多态）：子类（薄壳）按平台能力实现并委托工程
+    # adapter（风控/空态 marker，如 is_no_result/detect_block）或 parser
+    # （HTML 解析，保持纯函数层）。无对应能力的平台不重写，调用时抛
+    # NotImplementedError 明示缺失。消费方只持有 PlatformAdapter 抽象引用，
+    # 不在业务代码里直接 import 具体平台模块调用。
+    # ------------------------------------------------------------------
+
+    def is_no_result(self, html: str) -> bool:
+        """统一"空/边界"校验入口（与 detect_block 同级的能力）。
+
+        MVP 与工程链路的空态短路一律调它，不感知各平台 marker 差异
+        （ke/lj=m-noresult、ajk=没有找到相关房源、lyj=很抱歉没有找到、
+        fang=平台空态组合），实现委托各平台 adapter。
+        """
+        raise NotImplementedError(f"平台[{self.code}] 未实现 is_no_result 能力")
+
+    def parse_listing_snapshots(self, html: str) -> list:
+        """解析在售房源快照（委托工程 parser，保持纯函数层与单测）。"""
+        raise NotImplementedError(f"平台[{self.code}] 未实现 parse_listing_snapshots 能力")
+
+    def parse_community_avg_price(self, html: str) -> Optional[float]:
+        """解析小区参考均价（仅平台页面提供该信息的平台实现）。"""
+        raise NotImplementedError(f"平台[{self.code}] 未实现 parse_community_avg_price 能力")
+
+    def parse_deal_records(self, html: str) -> list:
+        """解析成交记录（仅采集真实成交的平台实现）。"""
+        raise NotImplementedError(f"平台[{self.code}] 未实现 parse_deal_records 能力")
+
+
 async def human_linger(page, page_no: int, linger_seconds: float = None):
     """翻页后模拟停留，所有平台共用。"""
     from app.rpa.core import config

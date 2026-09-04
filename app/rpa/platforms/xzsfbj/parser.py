@@ -13,7 +13,7 @@ import re
 from typing import Any, Iterable, Optional
 
 from app.rpa.core.models import DealRecord, ListingSnapshot
-from app.rpa.platforms import xzsfbj_constants as constants
+from app.rpa.platforms.xzsfbj import constants
 
 
 def _as_float(value: Any) -> Optional[float]:

@@ -35,7 +35,7 @@ from nodriver.core import util as nodriver_util
 from app.rpa.core import config
 from app.rpa.core.models import ListingSnapshot
 from app.rpa.core.status import PlatformResultStatus
-from app.rpa.platforms.adapters import ajk as ajk_adapter
+from app.rpa.platforms import AjkPlatformAdapter
 from app.rpa.platforms.base import wait_and_reload_after_block, has_matching_community_snapshots
 from app.rpa.utils.debug_utils import dump_html as shared_dump_html
 from app.rpa.utils.debug_utils import set_debug_mode
@@ -45,6 +45,7 @@ from scripts.collect_community_data.models import CommunityCollection
 
 setup_logging()
 log = logging.getLogger("ajk-mvp-test")
+_platform = AjkPlatformAdapter()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PAGES_DB = PROJECT_ROOT / "persist" / "property_records.sqlite3"
@@ -114,6 +115,7 @@ async def browser_gone(tab) -> bool:
 # 通用：人工等待
 # ============================================================
 
+
 async def wait_for_manual_login():
     """风控交互：暂停等人工在浏览器处理，回车确认后继续。"""
     prompt = (
@@ -126,6 +128,7 @@ async def wait_for_manual_login():
 # ============================================================
 # 交互工具：真人点击（仅供可选的面积筛选使用）
 # ============================================================
+
 
 async def is_interactable(element) -> bool:
     try:
@@ -166,6 +169,7 @@ async def human_click(page, element, label: str) -> bool:
 # ============================================================
 # 可选面积筛选（--area 时才使用，默认不筛选）
 # ============================================================
+
 
 async def fill_area_inputs(page, area_min, area_max):
     """定位面积筛选区的自定义输入框并填值。
@@ -249,89 +253,10 @@ async def fill_area_inputs(page, area_min, area_max):
 # 解析：主结果区在售快照（截断到"推荐以下房源"之前）与挂牌均价
 # ============================================================
 
+
 def parse_main_listing_prices(html: str) -> list:
     """提取主结果区在售单价（兼容旧调用）。"""
-    return [s.unit_price for s in parse_listing_snapshots(html) if s.unit_price]
-
-
-def _extract_first(pattern, text, cast=float):
-    m = re.search(pattern, text)
-    if not m:
-        return None
-    try:
-        return cast(m.group(1).replace(",", ""))
-    except (ValueError, TypeError):
-        return None
-
-
-def parse_listing_snapshots(html: str) -> list:
-    """提取主结果区房源快照。
-
-    安居客结果页结构：主结果区与推荐区是两个并列的 <section class="list">，
-    中间靠 <h3 class="list-guess-title">分隔。只取边界标志之前的部分。
-
-    单条房源字段：
-      - 户型: property-content-info-attribute（如 3室2厅2卫）
-      - 面积: property-content-info-text 里的 XX.XX㎡
-      - 小区名: property-content-info-comm-name
-      - 总价: property-price-total-num
-      - 单价: property-price-average
-    """
-    cut = html.find("list-guess-title")
-    main_html = html[:cut] if cut > 0 else html
-
-    snapshots = []
-    for block in re.finditer(
-        r'<div[^>]*class="property"[^>]*>(.*?)(?=<div[^>]*class="property"|$)',
-        main_html,
-        re.S,
-    ):
-        chunk = block.group(1)
-
-        # 户型: <p class="...attribute"><span>3</span>室<span>2</span>厅<span>2</span>卫
-        layout = None
-        attr_m = re.search(
-            r'property-content-info-attribute[^>]*>(.*?)</p>', chunk, re.S
-        )
-        if attr_m:
-            nums = re.findall(r'<span[^>]*>(\d+)</span>', attr_m.group(1))
-            labels = re.findall(r'(室|厅|卫)', attr_m.group(1))
-            if len(nums) >= 2:
-                layout = f"{nums[0]}室{nums[1]}厅"
-
-        # 面积: property-content-info-text 里的 XX.XX㎡
-        area = _extract_first(r'([\d.]+)\s*㎡', chunk)
-
-        # 小区名
-        name_m = re.search(
-            r'property-content-info-comm-name[^>]*>([^<]+)<', chunk
-        )
-        community_name = name_m.group(1).strip() if name_m else None
-
-        # 总价(万)
-        total_price = _extract_first(
-            r'property-price-total-num[^>]*>\s*([\d,]+)', chunk
-        )
-
-        # 单价
-        unit_price = _extract_first(
-            r'property-price-average[^>]*>\s*([\d,]+)\s*元', chunk
-        )
-
-        if unit_price is None and total_price is None:
-            continue
-
-        snapshots.append(
-            ListingSnapshot(
-                house_id="",
-                community_name=community_name,
-                area=area,
-                layout=layout,
-                unit_price=unit_price,
-                total_price=total_price,
-            )
-        )
-    return snapshots
+    return [s.unit_price for s in parsers.parse_listing_snapshots(html) if s.unit_price]
 
 
 def print_listing_snapshots(snapshots: list):
@@ -347,28 +272,6 @@ def print_listing_snapshots(snapshots: list):
             f"总价: {item.total_price or ''}万}}"
         )
 
-
-def parse_community_avg_price(html: str):
-    """从结果页顶部社区卡片提取挂牌均价。
-
-    安居客结果页顶部社区信息卡：
-      <div class="community-info-detail-price">
-        <p class="community-info-detail-price-money"><em>84307</em>元/㎡</p>
-      </div>
-
-    注意：安居客无成交记录，业务上把挂牌均价当作 deal_prices 的替代，
-    加权落点中位数算法只使用在售房源价格；这组替代成交数据仅保留用于采集记录。
-    """
-    m = re.search(
-        r'community-info-detail-price-money[^>]*>\s*<em[^>]*>\s*([\d,]+)\s*</em>\s*元\s*/?\s*㎡',
-        html,
-    )
-    return float(m.group(1).replace(",", "")) if m else None
-
-
-# ============================================================
-# 库内入口查找：只抓"有的"小区
-# ============================================================
 
 def resolve_listing_urls(community_ids: list[int]) -> list[dict]:
     """从房源记录库读取安居客已初始化的挂牌入口。
@@ -401,6 +304,7 @@ def resolve_listing_urls(community_ids: list[int]) -> list[dict]:
 # ============================================================
 # 单小区直达采集
 # ============================================================
+
 
 def build_page_urls(listing_url: str, first_page_html: str) -> list[str]:
     """由第 1 页分页链接推导后续页 URL（/sale/p{N}/?comm_id=，URL 直达无点击）。
@@ -450,16 +354,16 @@ async def collect_community(
 
     # 第 1 页：走工程风控协议，风控未解除前不会返回
     html = await wait_and_reload_after_block(
-        tab, ajk_adapter.detect_block, f"小区挂牌页[{target['community_name']}]"
+        tab, _platform.detect_block, f"小区挂牌页[{target['community_name']}]"
     )
     if debug:
         await dump_html(tab, f"ajk_listing_{target['community_id'] or 'direct'}_p1")
 
     # 空态识别：调用子平台 adapter 导出的判空能力（与 detect_block 同级，
-    # 洪湖14号大院类，真实 dump 已核对，见 ajk_adapter.is_no_result）。
+    # 洪湖14号大院类，真实 dump 已核对，见 _platform.is_no_result）。
     # 在售 0 套，小区均价卡照常展示，照常采集
-    if ajk_adapter.is_no_result(html):
-        community_avg_price = parse_community_avg_price(html)
+    if _platform.is_no_result(html):
+        community_avg_price = _platform.parse_community_avg_price(html)
         log.info(
             "[空态] %s 在安居客在售 0 条（页面为无房源空态），挂牌均价 %s 元/㎡",
             target["community_name"],
@@ -486,8 +390,8 @@ async def collect_community(
         # 面积筛选（如有）会刷新页面，重新读取当前 HTML
         html = await tab.get_content()
 
-    snapshots = parse_listing_snapshots(html)
-    community_avg_price = parse_community_avg_price(html)
+    snapshots = _platform.parse_listing_snapshots(html)
+    community_avg_price = _platform.parse_community_avg_price(html)
 
     # 页面归属校验（工程件，与 lyj 模板同款）：快照须与目标小区名匹配，
     # 不符则整页弃用且不翻页（防入口串页/推荐位混入）
@@ -520,11 +424,11 @@ async def collect_community(
         await asyncio.sleep(2)
         # 每页同样走工程风控协议：命中拦截暂停等人工，干净后才解析
         page_html = await wait_and_reload_after_block(
-            tab, ajk_adapter.detect_block, f"翻页第 {page_no} 页"
+            tab, _platform.detect_block, f"翻页第 {page_no} 页"
         )
         if debug:
             await dump_html(tab, f"ajk_listing_{target['community_id'] or 'direct'}_p{page_no}")
-        page_snapshots = parse_listing_snapshots(page_html)
+        page_snapshots = _platform.parse_listing_snapshots(page_html)
         snapshots.extend(page_snapshots)
         if not page_snapshots:
             # 空页 = 已翻过真实在售末页，停止翻页
@@ -603,7 +507,7 @@ async def main(
     await asyncio.sleep(3)
     if manual_login:
         await wait_for_manual_login()
-    await wait_and_reload_after_block(tab, ajk_adapter.detect_block, "安居客首页")
+    await wait_and_reload_after_block(tab, _platform.detect_block, "安居客首页")
 
     summaries: list[CommunityCollection] = []
     try:

@@ -35,8 +35,8 @@ from app.rpa.platforms.base import (
 )
 from app.rpa.utils.debug_utils import dump_html
 from app.rpa.core.models import PlatformResult
-from app.rpa.parsers import ajk as parsers
-from app.rpa.platforms.ajk_constants import START_URL
+from app.rpa.platforms.ajk import parser as parsers
+from app.rpa.platforms.ajk.constants import START_URL
 from app.rpa.platforms.city_map import get_start_url
 
 log = logging.getLogger(__name__)

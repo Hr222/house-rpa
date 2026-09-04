@@ -10,8 +10,8 @@ deal_page_url=/chengjiao/c{ID}），本脚本按 community_id 直达两个入口
 
 流程：读取库内 lj 入口（挂牌+成交）→ 首页先行建立会话（--manual-login 时
 人工过验证码/登录）→ page.get(listing_page_url) 直达在售 →
-风控协议（工程件 wait_and_reload_after_block + lj_adapter.detect_block）
-→ 空态短路（lj_adapter.is_no_result，m-noresult）→ 归属校验 →
+风控协议（工程件 wait_and_reload_after_block + _platform.detect_block）
+→ 空态短路（_platform.is_no_result，m-noresult）→ 归属校验 →
 URL 直达翻页（pg{N}c{ID} 原生链接收集）→ page.get(deal_page_url) 直达
 成交页 → 风控协议 → 解析真实成交明细（工程 parsers.lj.parse_deal_records）
 → 成交翻页（优先 URL 直达，无分页链接时回退点击）。
@@ -45,8 +45,8 @@ from nodriver.core import util as nodriver_util
 from app.rpa.core import config
 from app.rpa.core.models import ListingSnapshot
 from app.rpa.core.status import PlatformResultStatus
-from app.rpa.parsers import lj as parsers
-from app.rpa.platforms.adapters import lj as lj_adapter
+from app.rpa.platforms.lj import parser as parsers
+from app.rpa.platforms import LjPlatformAdapter
 from app.rpa.platforms.base import (
     wait_and_reload_after_block,
     has_matching_community_snapshots,
@@ -59,6 +59,7 @@ from scripts.collect_community_data.models import CommunityCollection
 
 setup_logging()
 log = logging.getLogger("lj-mvp-test")
+_platform = LjPlatformAdapter()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PAGES_DB = PROJECT_ROOT / "persist" / "property_records.sqlite3"
@@ -348,11 +349,6 @@ def build_page_urls(page_url: str, first_page_html: str) -> list[str]:
 # 在售采集（URL 直达挂牌页）
 # ============================================================
 
-def parse_listing_snapshots(html: str) -> list[ListingSnapshot]:
-    """从链家列表页解析在售快照（工程 parser，截断"猜你喜欢"）。"""
-    return parsers.parse_listing_snapshots(html)
-
-
 def print_listing_snapshots(snapshots: list):
     if not snapshots:
         print("链家: 未抓到在售房源摘要")
@@ -384,14 +380,14 @@ async def collect_listing(
     await asyncio.sleep(3)
 
     html = await wait_and_reload_after_block(
-        tab, lj_adapter.detect_block, f"小区挂牌页[{target['community_name']}]"
+        tab, _platform.detect_block, f"小区挂牌页[{target['community_name']}]"
     )
     if debug:
         await dump_html(tab, f"lj_listing_{target['community_id'] or 'direct'}_p1")
 
-    # 空态识别：m-noresult（与贝壳共用组件，lj_adapter.is_no_result 已核对）。
+    # 空态识别：m-noresult（与贝壳共用组件，_platform.is_no_result 已核对）。
     # 命中即在售 0 条，跳过在售解析与翻页（下方可能是别的小区推荐位）
-    if lj_adapter.is_no_result(html):
+    if _platform.is_no_result(html):
         log.info("[空态] %s 在链家在售 0 条（跳过推荐位）", target["community_name"])
         return [], html
 
@@ -402,7 +398,7 @@ async def collect_listing(
             log.warning("[筛选] 面积筛选未成功提交，本次为全量在售")
         html = await tab.get_content()
 
-    snapshots = parse_listing_snapshots(html)
+    snapshots = _platform.parse_listing_snapshots(html)
 
     # 页面归属校验（工程件，与 ajk/ke/lyj 模板同款）：快照须与目标小区名
     # 匹配，否则判定入口落地页错误，整页弃用且不翻页（防串页/推荐位混入）
@@ -434,11 +430,11 @@ async def collect_listing(
         await tab
         await asyncio.sleep(2)
         page_html = await wait_and_reload_after_block(
-            tab, lj_adapter.detect_block, f"在售翻页第 {page_no} 页"
+            tab, _platform.detect_block, f"在售翻页第 {page_no} 页"
         )
         if debug:
             await dump_html(tab, f"lj_listing_{target['community_id'] or 'direct'}_p{page_no}")
-        page_snapshots = parse_listing_snapshots(page_html)
+        page_snapshots = _platform.parse_listing_snapshots(page_html)
         snapshots.extend(page_snapshots)
         if not page_snapshots:
             log.info("[翻页] 在售第 %d 页无房源，停止翻页", page_no)
@@ -501,13 +497,13 @@ async def collect_deals(
     await tab
     await asyncio.sleep(3)
     first_html = await wait_and_reload_after_block(
-        tab, lj_adapter.detect_block, f"小区成交页[{target['community_name']}]"
+        tab, _platform.detect_block, f"小区成交页[{target['community_name']}]"
     )
     if debug:
         await dump_html(tab, f"lj_deal_{target['community_id'] or 'direct'}_p1")
 
     # 解析第 1 页成交记录（工程 parser，与挂牌同源 DOM）
-    raw_records = parsers.parse_deal_records(first_html)
+    raw_records = _platform.parse_deal_records(first_html)
     deals = [
         {"area": r[0], "date": r[1], "total_price": r[2], "price": r[3]}
         for r in raw_records
@@ -527,11 +523,11 @@ async def collect_deals(
             await tab
             await asyncio.sleep(2)
             page_html = await wait_and_reload_after_block(
-                tab, lj_adapter.detect_block, f"成交翻页第 {page_no} 页"
+                tab, _platform.detect_block, f"成交翻页第 {page_no} 页"
             )
             if debug:
                 await dump_html(tab, f"lj_deal_{target['community_id'] or 'direct'}_p{page_no}")
-            page_raw = parsers.parse_deal_records(page_html)
+            page_raw = _platform.parse_deal_records(page_html)
             page_deals = [
                 {"area": r[0], "date": r[1], "total_price": r[2], "price": r[3]}
                 for r in page_raw if r[0] is not None and r[3] is not None
@@ -550,11 +546,11 @@ async def collect_deals(
                 log.warning("[成交] 第 %d 页无法翻页，停止", page_no)
                 break
             page_html = await wait_and_reload_after_block(
-                tab, lj_adapter.detect_block, f"成交点击第 {page_no} 页"
+                tab, _platform.detect_block, f"成交点击第 {page_no} 页"
             )
             if debug:
                 await dump_html(tab, f"lj_deal_{target['community_id'] or 'direct'}_p{page_no}")
-            page_raw = parsers.parse_deal_records(page_html)
+            page_raw = _platform.parse_deal_records(page_html)
             page_deals = [
                 {"area": r[0], "date": r[1], "total_price": r[2], "price": r[3]}
                 for r in page_raw if r[0] is not None and r[3] is not None
@@ -594,7 +590,7 @@ async def collect_community(
     listing_snapshots, listing_html = await collect_listing(
         tab, target=target, area=area, debug=debug
     )
-    listing_empty = lj_adapter.is_no_result(listing_html)
+    listing_empty = _platform.is_no_result(listing_html)
 
     # 成交采集：入口存在即独立执行（挂牌空态不影响成交事实采集）
     deals: list[dict] = []
@@ -692,7 +688,7 @@ async def main(
     await asyncio.sleep(3)
     if manual_login:
         await wait_for_manual_login()
-    await wait_and_reload_after_block(tab, lj_adapter.detect_block, "链家首页")
+    await wait_and_reload_after_block(tab, _platform.detect_block, "链家首页")
 
     summaries: list[CommunityCollection] = []
     try:

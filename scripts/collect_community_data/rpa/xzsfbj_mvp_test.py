@@ -56,9 +56,9 @@ from app.rpa.platforms.base import (
     prepare_listing_data,
     short_circuit_result,
 )
-from app.rpa.platforms import xzsfbj_constants as constants
-from app.rpa.platforms.adapters.xzsfbj import DealPageRisk
-from app.rpa.parsers.xzsfbj import (
+from app.rpa.platforms.xzsfbj import constants
+from app.rpa.platforms.xzsfbj.collector import DealPageRisk
+from app.rpa.platforms.xzsfbj.parser import (
     filter_deal_records,
     find_community_candidates,
     parse_community_index,
@@ -70,7 +70,7 @@ from app.rpa.utils.mvp_result import print_mvp_result
 
 setup_logging()
 logging.getLogger("httpx").setLevel(logging.WARNING)
-log = logging.getLogger("app.rpa.platforms.adapters.xzsfbj")
+log = logging.getLogger("xzsfbj-mvp")
 
 
 def select_listing_data_for_mvp(

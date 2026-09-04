@@ -8,7 +8,7 @@ community_id 直达挂牌列表页，不走"首页 → 搜索 → 面积筛选"�
 
 流程：读取库内 ke 入口 → 首页先行建立会话（--manual-login 时人工
 过验证码/登录）→ page.get(listing_page_url) 直达 → 风控协议（工程件：
-wait_and_reload_after_block + ke_adapter.detect_block，命中拦截 →
+wait_and_reload_after_block + _platform.detect_block，命中拦截 →
 置前 + 暂停等人工 → 回车 → 复检）→ 读 HTML 解析 → /ershoufang/
 分页 URL 直达翻页累加。
 
@@ -38,10 +38,9 @@ from nodriver.core import util as nodriver_util
 
 from app.rpa.core import config
 from app.rpa.core.status import PlatformResultStatus
-from app.rpa.parsers import ke as parsers
-from app.rpa.platforms.adapters import ke as ke_adapter
-from app.rpa.platforms.base import wait_and_reload_after_block, has_matching_community_snapshots
-from app.rpa.platforms.ke_constants import START_URL
+from app.rpa.platforms import KePlatformAdapter
+from app.rpa.platforms.base import _human_click, wait_and_reload_after_block, has_matching_community_snapshots
+from app.rpa.platforms.ke.constants import START_URL
 from app.rpa.utils.debug_utils import dump_html as shared_dump_html
 from app.rpa.utils.debug_utils import set_debug_mode
 from app.rpa.utils.logging_utils import setup_logging
@@ -50,6 +49,7 @@ from scripts.collect_community_data.models import CommunityCollection
 
 setup_logging()
 log = logging.getLogger("ke-mvp-test")
+_platform = KePlatformAdapter()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PAGES_DB = PROJECT_ROOT / "persist" / "property_records.sqlite3"
@@ -156,7 +156,7 @@ async def _apply_area_filter(page, area_min, area_max):
             btn_text = ""
         if "更多选项" in (btn_text or ""):
             log.info("[3] 点击全局'更多选项'展开")
-            await ke_adapter._human_click(page, more_btn, "global btn-more")
+            await _human_click(page, more_btn, "global btn-more")
             await page
             await asyncio.sleep(1.5)
         else:
@@ -190,7 +190,7 @@ async def _apply_area_filter(page, area_min, area_max):
         btns = []
     if btns:
         log.info("[3] 点击建筑面积区的 btn-showmore 展开")
-        await ke_adapter._human_click(page, btns[0], "btn-showmore")
+        await _human_click(page, btns[0], "btn-showmore")
         await page
         await asyncio.sleep(1.5)
 
@@ -218,7 +218,7 @@ async def _apply_area_filter(page, area_min, area_max):
     min_el, max_el = min_el[0], max_el[0]
 
     # 4. 填下限
-    await ke_adapter._human_click(page, min_el, "area min input")
+    await _human_click(page, min_el, "area min input")
     try:
         await min_el.clear_input()
     except Exception:
@@ -230,7 +230,7 @@ async def _apply_area_filter(page, area_min, area_max):
     log.info("[3] 填入下限: %s", area_min)
 
     # 5. 填上限
-    await ke_adapter._human_click(page, max_el, "area max input")
+    await _human_click(page, max_el, "area max input")
     try:
         await max_el.clear_input()
     except Exception:
@@ -252,7 +252,7 @@ async def _apply_area_filter(page, area_min, area_max):
     confirm_clicked = False
     try:
         # 按钮可能为 hide 类，用 JS 点击兜底
-        await ke_adapter._human_click(page, btns[0], "area confirm")
+        await _human_click(page, btns[0], "area confirm")
         confirm_clicked = True
     except Exception:
         pass
@@ -379,15 +379,15 @@ async def collect_community(
 
     # 第 1 页：走工程风控协议，风控未解除前不会返回
     html = await wait_and_reload_after_block(
-        tab, ke_adapter.detect_block, f"小区挂牌页[{target['community_name']}]"
+        tab, _platform.detect_block, f"小区挂牌页[{target['community_name']}]"
     )
     if debug:
         await dump_html(tab, f"ke_listing_{target['community_id'] or 'direct'}_p1")
 
     # 空态识别：调用子平台 adapter 导出的判空能力（与 detect_block 同级，
-    # 真实空态页见 ke_adapter.is_no_result docstring）。命中即在售 0 条，
+    # 真实空态页见 _platform.is_no_result docstring）。命中即在售 0 条，
     # 直接 NO_DATA 返回，不解析不翻页（空态页下方是别的小区推荐位）
-    if ke_adapter.is_no_result(html):
+    if _platform.is_no_result(html):
         log.info("[空态] %s 在贝壳在售 0 条（跳过推荐位）", target["community_name"])
         return CommunityCollection(
             platform="ke",
@@ -410,7 +410,7 @@ async def collect_community(
         # 面积筛选（如有）会刷新页面，重新读取当前 HTML
         html = await tab.get_content()
 
-    snapshots = parsers.parse_listing_snapshots(html)
+    snapshots = _platform.parse_listing_snapshots(html)
 
     # 页面归属校验（工程件，与 ajk/lyj 模板同款）：解析出的快照必须
     # 能与目标小区名匹配，否则判定入口落地页错误，整页弃用不入库
@@ -443,11 +443,11 @@ async def collect_community(
         await asyncio.sleep(2)
         # 每页同样走工程风控协议：命中拦截暂停等人工，干净后才解析
         page_html = await wait_and_reload_after_block(
-            tab, ke_adapter.detect_block, f"翻页第 {page_no} 页"
+            tab, _platform.detect_block, f"翻页第 {page_no} 页"
         )
         if debug:
             await dump_html(tab, f"ke_listing_{target['community_id'] or 'direct'}_p{page_no}")
-        page_snapshots = parsers.parse_listing_snapshots(page_html)
+        page_snapshots = _platform.parse_listing_snapshots(page_html)
         snapshots.extend(page_snapshots)
         if not page_snapshots:
             # 空页 = 已翻过真实在售末页，停止翻页
@@ -523,7 +523,7 @@ async def main(
     await asyncio.sleep(3)
     if manual_login:
         await wait_for_manual_login()
-    await wait_and_reload_after_block(tab, ke_adapter.detect_block, "贝壳首页")
+    await wait_and_reload_after_block(tab, _platform.detect_block, "贝壳首页")
 
     summaries: list[CommunityCollection] = []
     try:

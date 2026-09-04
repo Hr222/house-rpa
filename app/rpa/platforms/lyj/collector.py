@@ -24,8 +24,8 @@ from app.rpa.core import config
 from app.rpa.core.status import PlatformResultStatus
 from app.rpa.utils.debug_utils import dump_html
 from app.rpa.core.models import PlatformResult
-from app.rpa.parsers import lyj as parsers
-from app.rpa.platforms.lyj_constants import START_URL
+from app.rpa.platforms.lyj import parser as parsers
+from app.rpa.platforms.lyj.constants import START_URL
 from app.rpa.platforms.city_map import get_start_url
 from app.rpa.platforms.base import (
     human_linger,

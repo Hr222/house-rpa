@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """乐有家核心挂牌 HTML 解析测试。"""
 
-from app.rpa.parsers.lyj import parse_listing_snapshots
+from app.rpa.platforms.lyj.parser import parse_listing_snapshots
 
 
 def test_parse_listing_snapshot_extracts_storage_fields():

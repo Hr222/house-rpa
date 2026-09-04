@@ -8,7 +8,7 @@ community_id 直达挂牌列表页，不走"首页 → 搜索 → 面积筛选"�
 
 流程：读取库内 lyj 入口 → 首页先行建立会话（--manual-login 时人工
 过验证码/登录）→ page.get(listing_page_url) 直达 → 风控协议（工程件：
-wait_and_reload_after_block + lyj_adapter.detect_block，命中拦截 →
+wait_and_reload_after_block + _platform.detect_block，命中拦截 →
 置前 + 暂停等人工 → 回车 → 复检）→ 读 HTML 解析 → /esf/n{page}/
 URL 直达翻页累加。
 
@@ -39,7 +39,7 @@ from nodriver.core import util as nodriver_util
 from app.rpa.core import config
 from app.rpa.core.models import ListingSnapshot
 from app.rpa.core.status import PlatformResultStatus
-from app.rpa.platforms.adapters import lyj as lyj_adapter
+from app.rpa.platforms import LyjPlatformAdapter
 from app.rpa.platforms.base import wait_and_reload_after_block, has_matching_community_snapshots
 from app.rpa.utils.debug_utils import dump_html as shared_dump_html
 from app.rpa.utils.debug_utils import set_debug_mode
@@ -49,6 +49,7 @@ from scripts.collect_community_data.models import CommunityCollection
 
 setup_logging()
 log = logging.getLogger("lyj-mvp-test")
+_platform = LyjPlatformAdapter()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PAGES_DB = PROJECT_ROOT / "persist" / "property_records.sqlite3"
@@ -81,6 +82,7 @@ async def wait_for_manual_login():
 # ============================================================
 # 交互工具：真人点击（仅供可选的面积筛选使用）
 # ============================================================
+
 
 async def is_interactable(element) -> bool:
     try:
@@ -121,6 +123,7 @@ async def human_click(page, element, label: str) -> bool:
 # ============================================================
 # 可选面积筛选（--area 时才使用，默认不筛选）
 # ============================================================
+
 
 async def fill_area_inputs(page, area_min, area_max):
     """乐有家面积筛选：找到"面积"区 → 点"更多及自定义" → 填值 → 点确定。"""
@@ -225,80 +228,6 @@ async def fill_area_inputs(page, area_min, area_max):
 # 解析：在售快照（截断到"猜你喜欢"之前）与小区均价（社区信息卡）
 # ============================================================
 
-def _normalize_text(text: str) -> str:
-    return re.sub(r"<[^>]+>", "", text or "").strip()
-
-
-def parse_listing_snapshots(html: str) -> list[ListingSnapshot]:
-    """从乐有家列表页提取房源快照。
-
-    每个房源在 <li class="item clearfix"> 内：
-      p.tit a              → 标题
-      p.attr span          → "3室2厅1卫 / 建筑面积73.5㎡"
-      p.attr a[href*="/xq/detail"]  → 小区名链接
-      span.salePrice       → 总价数字
-      p.sub                → "单价44218元/㎡"
-    排除猜你喜欢/推荐位 — 截断到"猜你喜欢"之前。
-    """
-    # 截断到尾页/猜你喜欢之前
-    cut = html.find("猜你喜欢")
-    source = html[:cut] if cut > 0 else html
-
-    snapshots = []
-    # 匹配 <li class="item clearfix" ...> ... </li>
-    for block in re.finditer(
-        r'<li class="item clearfix"[^>]*>(.*?)</li>', source, re.S
-    ):
-        chunk = block.group(1)
-
-        # 小区名：p.attr 中的 a（/xq/detail/xxx 或带 font 包裹）
-        community_name = None
-        comm_m = re.search(r'href="/xq/detail/\d+[^"]*"[^>]*>(?:<[^>]+>)*\s*([^<]+)', chunk)
-        if comm_m:
-            community_name = _normalize_text(comm_m.group(1))
-
-        # 户型：p.attr 中的第一组数字室数字厅
-        layout = None
-        layout_m = re.search(r"(\d+室\d+厅)", chunk)
-        if layout_m:
-            layout = layout_m.group(1)
-
-        # 面积：建筑面积XX.XX㎡
-        area = None
-        area_m = re.search(r"建筑面积\s*([\d.]+)\s*㎡", chunk)
-        if area_m:
-            area = float(area_m.group(1))
-
-        # 总价(万): span.salePrice
-        total_price = None
-        tp_m = re.search(r'salePrice[^>]*>\s*([\d,]+)\s*<', chunk)
-        if tp_m:
-            total_price = float(tp_m.group(1).replace(",", ""))
-
-        # 单价: p.sub 中的 "单价44218元/㎡"
-        unit_price = None
-        up_m = re.search(
-            r'<p class="sub">.*?([\d,]+)\s*元\s*/?\s*㎡',
-            chunk,
-        )
-        if up_m:
-            unit_price = float(up_m.group(1).replace(",", ""))
-
-        if unit_price is None and total_price is None:
-            continue
-
-        snapshots.append(
-            ListingSnapshot(
-                house_id="",
-                community_name=community_name,
-                area=area,
-                layout=layout,
-                unit_price=unit_price,
-                total_price=total_price,
-            )
-        )
-    return snapshots
-
 
 def print_listing_snapshots(snapshots: list[ListingSnapshot]):
     if not snapshots:
@@ -312,20 +241,6 @@ def print_listing_snapshots(snapshots: list[ListingSnapshot]):
             f"总价: {item.total_price or ''}万}}"
         )
 
-
-def parse_community_avg_price(html: str) -> Optional[float]:
-    """从结果页社区信息卡提取小区均价。
-
-    DOM: <em class="txt">54386元/㎡</em>
-    乐有家无成交记录，业务上用小区均价顶替 deal_prices。
-    """
-    m = re.search(r"小区均价</em>\s*<em\s[^>]*>\s*([\d,]+)\s*元", html)
-    return float(m.group(1).replace(",", "")) if m else None
-
-
-# ============================================================
-# 库内入口查找与翻页 URL 推导
-# ============================================================
 
 def resolve_listing_urls(community_ids: list[int]) -> list[dict]:
     """从房源记录库读取乐有家已初始化的挂牌入口。
@@ -395,6 +310,7 @@ def terminate_browser() -> None:
 # 单小区直达采集
 # ============================================================
 
+
 async def collect_community(
     tab,
     *,
@@ -415,15 +331,15 @@ async def collect_community(
 
     # 第 1 页：走工程风控协议，风控未解除前不会返回
     html = await wait_and_reload_after_block(
-        tab, lyj_adapter.detect_block, f"小区挂牌页[{target['community_name']}]"
+        tab, _platform.detect_block, f"小区挂牌页[{target['community_name']}]"
     )
     if debug:
         await dump_html(tab, f"lyj_listing_{target['community_id'] or 'direct'}_p1")
 
     # 空态识别：调用子平台 adapter 导出的判空能力（与 detect_block 同级）。
     # 零在售小区页面为空态 + 其他小区推荐位，绝不能把推荐位当在售解析；
-    # marker 真实性待编排层实测核对（见 lyj_adapter.is_no_result docstring）
-    if lyj_adapter.is_no_result(html):
+    # marker 真实性待编排层实测核对（见 _platform.is_no_result docstring）
+    if _platform.is_no_result(html):
         log.info(
             "[空态] %s 在乐有家在售 0 条（页面为无房源空态，跳过推荐位）",
             target["community_name"],
@@ -449,8 +365,8 @@ async def collect_community(
         # 面积筛选（如有）会刷新页面，重新读取当前 HTML
         html = await tab.get_content()
 
-    snapshots = parse_listing_snapshots(html)
-    community_avg_price = parse_community_avg_price(html)
+    snapshots = _platform.parse_listing_snapshots(html)
+    community_avg_price = _platform.parse_community_avg_price(html)
 
     # 页面归属校验（工程件，与 URL 初始化 MVP 同款）：解析出的快照必须
     # 能与目标小区名匹配，否则判定入口落地页错误，整页弃用不入库
@@ -485,11 +401,11 @@ async def collect_community(
         await asyncio.sleep(2)
         # 每页同样走工程风控协议：命中拦截暂停等人工，干净后才解析
         page_html = await wait_and_reload_after_block(
-            tab, lyj_adapter.detect_block, f"翻页第 {page_no} 页"
+            tab, _platform.detect_block, f"翻页第 {page_no} 页"
         )
         if debug:
             await dump_html(tab, f"lyj_listing_{target['community_id'] or 'direct'}_p{page_no}")
-        page_snapshots = parse_listing_snapshots(page_html)
+        page_snapshots = _platform.parse_listing_snapshots(page_html)
         snapshots.extend(page_snapshots)
         if not page_snapshots:
             # 空页 = 已翻过真实在售末页，停止翻页
@@ -568,7 +484,7 @@ async def main(
     await asyncio.sleep(3)
     if manual_login:
         await wait_for_manual_login()
-    await wait_and_reload_after_block(tab, lyj_adapter.detect_block, "乐有家首页")
+    await wait_and_reload_after_block(tab, _platform.detect_block, "乐有家首页")
 
     summaries: list[CommunityCollection] = []
     try:

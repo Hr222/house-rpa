@@ -38,7 +38,7 @@ import nodriver as uc
 
 from app.community_data import resolve_communities
 from app.rpa.core import config
-from app.rpa.parsers import fang as fang_parsers
+from app.rpa.platforms.fang import parser as fang_parsers
 from app.rpa.platforms.base import community_name_match, has_matching_community_snapshots
 from app.rpa.platforms.city_map import get_start_url
 from app.rpa.utils.debug_utils import dump_html as shared_dump_html

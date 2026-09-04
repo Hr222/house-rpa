@@ -26,8 +26,8 @@ import websockets
 from app.rpa.core import config
 from app.rpa.core.models import InquiryRequest, PlatformResult
 from app.rpa.core.status import PlatformHealthStatus, PlatformResultStatus
-from app.rpa.parsers import xzsfbj as parsers
-from app.rpa.platforms import xzsfbj_constants as constants
+from app.rpa.platforms.xzsfbj import parser as parsers
+from app.rpa.platforms.xzsfbj import constants
 from app.rpa.platforms.base import (
     listing_no_data_reason,
     listing_no_data_status,

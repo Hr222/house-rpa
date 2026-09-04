@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import logging
 
-from app.rpa.platforms.adapters import lj as lj_adapter
+from app.rpa.platforms.lj import parser as parsers
+from app.rpa.platforms.lj import collector as lj_adapter
 from app.rpa.core.models import InquiryRequest, PlatformSession
 from app.rpa.platforms.base import PlatformAdapter
-from app.rpa.platforms.lj_constants import START_URL
+from app.rpa.platforms.lj.constants import START_URL
 
 log = logging.getLogger(__name__)
 
@@ -79,3 +80,15 @@ class LjPlatformAdapter(PlatformAdapter):
 
     def detect_block(self, url: str, html: str) -> tuple[bool, str]:
         return lj_adapter.detect_block(url, html)
+
+    def is_no_result(self, html: str) -> bool:
+        """统一“空/边界”校验（委托 adapter 平台 marker）。"""
+        return lj_adapter.is_no_result(html)
+
+    def parse_listing_snapshots(self, html: str) -> list:
+        """解析在售快照（委托工程 parser）。"""
+        return parsers.parse_listing_snapshots(html)
+
+    def parse_deal_records(self, html: str) -> list:
+        """解析成交记录（委托工程 parser）。"""
+        return parsers.parse_deal_records(html)

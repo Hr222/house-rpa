@@ -1,21 +1,22 @@
 # -*- coding: utf-8 -*-
-"""乐有家平台适配器。"""
+"""房天下平台适配器。"""
 
 from __future__ import annotations
 
 import logging
 
-from app.rpa.platforms.adapters import lyj as lyj_adapter
+from app.rpa.platforms.fang import parser as parsers
+from app.rpa.platforms.fang import collector as fang_adapter
 from app.rpa.core.models import InquiryRequest, PlatformSession
 from app.rpa.platforms.base import PlatformAdapter
-from app.rpa.platforms.lyj_constants import START_URL
+from app.rpa.platforms.fang.constants import START_URL
 
 log = logging.getLogger(__name__)
 
 
-class LyjPlatformAdapter(PlatformAdapter):
-    code = "lyj"
-    name = "乐有家"
+class FangPlatformAdapter(PlatformAdapter):
+    code = "fang"
+    name = "房天下"
     start_url = START_URL
 
     async def open_session(self, browser, new_tab=False) -> PlatformSession:
@@ -42,13 +43,13 @@ class LyjPlatformAdapter(PlatformAdapter):
                 session.page = await session.page.get(self.start_url)
                 await session.page
             except Exception as exc:
-                log.warning("failed to keepalive lyj page: %s", exc)
+                log.warning("failed to keepalive fang page: %s", exc)
             return skip
 
         # 确保浏览器在目标城市首页（城市不同时先导航过去）
         await self.ensure_city_navigated(session, request.city)
 
-        result = await lyj_adapter.collect(
+        result = await fang_adapter.collect(
             browser=browser,
             main_page=session.page,
             community_name=request.community_name,
@@ -57,22 +58,34 @@ class LyjPlatformAdapter(PlatformAdapter):
             city=request.city,
         )
         try:
-            session.page = await lyj_adapter.reset_to_start_page(session.page, request.city)
+            session.page = await fang_adapter.reset_to_start_page(session.page, request.city)
         except Exception as exc:
-            log.warning("failed to reset lyj main page to standby: %s", exc)
+            log.warning("failed to reset fang main page to standby: %s", exc)
         return result
 
     async def _probe_ready(self, page, html: str) -> tuple[bool, str]:
-        """乐有家特有：验证码 + 筛选区。登录检测由基类负责。"""
-        if lyj_adapter._is_captcha_html(html):
+        """房天下特有：验证码 + 搜索框。登录检测由基类负责。"""
+        if fang_adapter._is_captcha_html(html):
             return False, "命中验证码拦截"
-        if lyj_adapter._is_login_url(page.target.url or ""):
+        if fang_adapter._is_login_url(page.target.url or ""):
             return False, "当前会话未登录或已失效"
         try:
-            await page.select("div.selected-index", timeout=3)
+            await page.select("body", timeout=10)
         except Exception:
-            return False, "未找到筛选区"
+            return False, "页面未就绪"
         return True, "READY"
 
     def detect_block(self, url: str, html: str) -> tuple[bool, str]:
-        return lyj_adapter.detect_block(url, html)
+        return fang_adapter.detect_block(url, html)
+
+    def is_no_result(self, html: str) -> bool:
+        """统一“空/边界”校验（委托 adapter 平台 marker）。"""
+        return fang_adapter.is_no_result(html)
+
+    def parse_listing_snapshots(self, html: str) -> list:
+        """解析在售快照（委托工程 parser）。"""
+        return parsers.parse_listing_snapshots(html)
+
+    def parse_deal_records(self, html: str) -> list:
+        """解析成交记录（委托工程 parser）。"""
+        return parsers.parse_deal_records(html)

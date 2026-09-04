@@ -1,6 +1,6 @@
 """贝壳核心挂牌 HTML 解析测试。"""
 
-from app.rpa.parsers.ke import (
+from app.rpa.platforms.ke.parser import (
     find_detail_link,
     parse_listing_snapshots,
 )

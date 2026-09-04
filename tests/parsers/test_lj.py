@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """链家核心挂牌与成交 HTML 解析测试。"""
 
-from app.rpa.parsers.lj import (
+from app.rpa.platforms.lj.parser import (
     parse_deal_records,
     parse_listing_snapshots,
 )

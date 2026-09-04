@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """房天下核心挂牌与成交 HTML 解析测试。"""
 
-from app.rpa.parsers.fang import (
+from app.rpa.platforms.fang.parser import (
     parse_deal_records,
     parse_listing_snapshots,
 )
@@ -53,7 +53,7 @@ def test_parse_listing_and_deal_records_for_storage():
 
 def test_is_no_result_on_real_empty_page_marker():
     """真实空态页（莲通公司综合楼 house-xm2810134960）：三段关键 HTML。"""
-    from app.rpa.platforms.adapters.fang import is_no_result
+    from app.rpa.platforms.fang.collector import is_no_result
 
     # 空态主体容器 + 同页仍渲染其他小区推荐 dl 卡
     empty_html = """
@@ -67,7 +67,7 @@ def test_is_no_result_on_real_empty_page_marker():
 
 def test_is_no_result_false_on_single_result_page():
     """单条数据页（莲塘派出所宿舍 house-xm2811125778）：有 shop_no 弹窗但非空态。"""
-    from app.rpa.platforms.adapters.fang import is_no_result
+    from app.rpa.platforms.fang.collector import is_no_result
 
     single_html = """
     <dl class="clearfix"><dd><p class="add_shop"><a href="/house-xm2811125778/" title="莲塘派出所宿舍"> 莲塘派出所宿舍 </a></p></dd></dl>
@@ -78,7 +78,7 @@ def test_is_no_result_false_on_single_result_page():
 
 def test_is_no_result_false_on_normal_listing_page():
     """正常挂牌页：无 shop_no 容器，多个在售卡。"""
-    from app.rpa.platforms.adapters.fang import is_no_result
+    from app.rpa.platforms.fang.collector import is_no_result
 
     normal_html = """
     <dl class="clearfix"><dd><p class="add_shop"><a>佳兆业樾伴山</a></p></dd></dl>

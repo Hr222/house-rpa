@@ -10,8 +10,8 @@ from app.rpa.core.models import (
     PlatformResult,
     PlatformSession,
 )
-from app.rpa.platforms import xzsfbj_constants as constants
-from app.rpa.platforms.adapters.xzsfbj import XzsfbjApiAdapter
+from app.rpa.platforms.xzsfbj import constants
+from app.rpa.platforms.xzsfbj.collector import XzsfbjApiAdapter
 from app.rpa.platforms.base import PlatformAdapter
 
 log = logging.getLogger(__name__)

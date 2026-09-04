@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import logging
 
-from app.rpa.platforms.adapters import ajk as ajk_adapter
+from app.rpa.platforms.ajk import parser as parsers
+from app.rpa.platforms.ajk import collector as ajk_adapter
 from app.rpa.core.models import InquiryRequest, PlatformSession
-from app.rpa.platforms.ajk_constants import START_URL
+from app.rpa.platforms.ajk.constants import START_URL
 from app.rpa.platforms.base import PlatformAdapter
 
 log = logging.getLogger(__name__)
@@ -65,3 +66,15 @@ class AjkPlatformAdapter(PlatformAdapter):
 
     def detect_block(self, url: str, html: str) -> tuple[bool, str]:
         return ajk_adapter.detect_block(url, html)
+
+    def is_no_result(self, html: str) -> bool:
+        """统一“空/边界”校验（委托 adapter 平台 marker）。"""
+        return ajk_adapter.is_no_result(html)
+
+    def parse_listing_snapshots(self, html: str) -> list:
+        """解析在售快照（委托工程 parser）。"""
+        return parsers.parse_listing_snapshots(html)
+
+    def parse_community_avg_price(self, html: str):
+        """解析小区参考均价（委托工程 parser）。"""
+        return parsers.parse_community_avg_price(html)

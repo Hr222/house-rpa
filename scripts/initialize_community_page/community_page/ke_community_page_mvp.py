@@ -32,7 +32,7 @@ import nodriver as uc
 
 from app.community_data import resolve_communities
 from app.rpa.core import config
-from app.rpa.platforms.adapters import ke as ke_adapter
+from app.rpa.platforms.ke import collector as ke_adapter
 from app.rpa.platforms.base import community_name_match
 from app.rpa.platforms.city_map import get_start_url
 from app.rpa.utils.debug_utils import dump_html as shared_dump_html

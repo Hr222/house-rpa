@@ -33,7 +33,7 @@ from app.rpa.core import config
 from app.rpa.core.status import PlatformResultStatus
 from app.rpa.utils.debug_utils import dump_html
 from app.rpa.core.models import ListingSnapshot, PlatformResult
-from app.rpa.parsers import lj as parsers
+from app.rpa.platforms.lj import parser as parsers
 from app.rpa.platforms.base import (
     wait_and_reload_after_block,
     human_linger,
@@ -49,7 +49,7 @@ from app.rpa.platforms.base import (
     prepare_listing_data,
     check_empty_listing_page,
 )
-from app.rpa.platforms.lj_constants import START_URL
+from app.rpa.platforms.lj.constants import START_URL
 from app.rpa.platforms.city_map import get_start_url
 
 log = logging.getLogger(__name__)
