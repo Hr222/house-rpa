@@ -464,11 +464,11 @@ python -m scripts.api_server --debug --manual-login
 ### 单平台 MVP 测试
 
 ```bash
-python -m scripts.rpa.ke_mvp_test --debug --manual-login       # 贝壳
-python -m scripts.rpa.ajk_mvp_test --debug --manual-login      # 安居客
-python -m scripts.rpa.lj_mvp_test --debug --manual-login       # 链家
-python -m scripts.rpa.fang_mvp_test --debug --manual-login     # 房天下
-python -m scripts.rpa.lyj_mvp_test --debug --manual-login      # 乐有家
+python -m scripts.collect_community_data.rpa.ke_mvp_test --debug       # 贝壳
+python -m scripts.collect_community_data.rpa.ajk_mvp_test --debug      # 安居客
+python -m scripts.collect_community_data.rpa.lj_mvp_test --debug       # 链家
+python -m scripts.collect_community_data.rpa.fang_mvp_test --debug     # 房天下
+python -m scripts.collect_community_data.rpa.lyj_mvp_test --debug      # 乐有家
 ```
 
 ### 行舟深房（xzsfbj）环境准备
