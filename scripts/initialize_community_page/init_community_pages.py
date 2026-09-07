@@ -26,10 +26,15 @@ community_id 必填：落库归属以清单为准。数据库更新统一对接�
 save_community_platform_pages.py（同目录），本入口不直接依赖 app 落库能力。
 aliases 为主数据核对信息，搜索兜底仍由各 MVP 内部查主数据（同一来源）。
 
-用法：
+库中已具备本平台入口（lj/fang 为挂牌+成交齐全）的小区默认直接跳过、
+不做搜索，只初始化缺失的小区；--include-existing 强制对已有入口重新
+搜索校验（复核旧/错入口时使用）。
+
+用法（--platforms 必填且一次只允许一个平台：本入口定位为单平台链路
+校验，多平台全量验证走 api_server 正式链路）：
   python -m scripts.initialize_community_page.init_community_pages \
       --input test_data/community_init_list.json \
-      [--platforms ajk ke fang lj lyj] [--manual-login] [--dry-run] [--debug]
+      --platforms ke [--manual-login] [--dry-run] [--debug]
 
 边界：本脚本是运行入口壳，不做页面解析；浏览器、登录态与风控协议全部
 留在各 MVP 模块内（独立浏览器、固定 profile、拦截时人工回车确认）。
@@ -43,6 +48,7 @@ import argparse
 import importlib
 import json
 import logging
+import sqlite3
 from pathlib import Path
 import sys
 import time
@@ -134,24 +140,94 @@ def group_by_district(entries: list[dict]) -> dict[str, list[dict]]:
     return groups
 
 
-async def run_platforms(instruction: dict, args: argparse.Namespace) -> tuple[list[dict], list[dict]]:
-    """按“平台 × 行政区”顺序执行初始化，返回全部小区结果与平台级中断记录。
+def _load_existing_entry_ids(platform: str, community_ids: list[int]) -> set[int]:
+    """只读查询 property_records 中已具备本平台入口的 community_id 集合。
+
+    lj/fang（有成交页）须挂牌+成交入口齐全才算已初始化；库不存在或查询
+    失败时返回空集（视为全部缺失，不阻断初始化）。
+    """
+    if not community_ids:
+        return set()
+    db_path = PROJECT_ROOT / "persist" / "property_records.sqlite3"
+    if not db_path.is_file():
+        return set()
+    placeholders = ",".join("?" for _ in community_ids)
+    try:
+        connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        log.warning("连接 property_records 失败（视为无既有入口）：%s", exc)
+        return set()
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT community_id, listing_page_url, deal_page_url
+            FROM community_platform_pages
+            WHERE source_platform = ? AND community_id IN ({placeholders})
+            """,
+            [platform, *community_ids],
+        ).fetchall()
+    except sqlite3.Error as exc:
+        log.warning("平台[%s]既有入口查询失败（视为无）：%s", platform, exc)
+        return set()
+    finally:
+        connection.close()
+    deal_required = platform in SUPPORTS_DEAL
+    existing: set[int] = set()
+    for community_id, listing_url, deal_url in rows:
+        if not listing_url:
+            continue
+        if deal_required and not deal_url:
+            continue
+        existing.add(int(community_id))
+    return existing
+
+
+async def run_platforms(instruction: dict, args: argparse.Namespace) -> tuple[list[dict], list[dict], list[dict]]:
+    """按“平台 × 行政区”顺序执行初始化，返回全部小区结果、平台级中断记录与跳过清单。
 
     MVP 批次按行政区运行（同名小区跨区不混淆）；片区/别名/community_id 属于
     清单项信息，执行完由本层回填到结果，不作为 MVP 批次参数。各平台 main
     独立开浏览器并自动关闭（manual_close=False）；单小区失败不断批，
     单平台中断记录后继续下一平台。
+    库中已有本平台入口的小区默认直接跳过、不搜索（--include-existing 强制重查）。
     """
     results: list[dict] = []
     platform_errors: list[dict] = []
+    skipped_existing: list[dict] = []
     groups = group_by_district(instruction["entries"])
     for platform in args.platforms:
         module = importlib.import_module(PLATFORM_MODULES[platform])
         for district, entries in groups.items():
+            if args.include_existing:
+                to_run = list(entries)
+            else:
+                existing_ids = _load_existing_entry_ids(
+                    platform, [entry["community_id"] for entry in entries]
+                )
+                to_run = [entry for entry in entries if entry["community_id"] not in existing_ids]
+                for entry in entries:
+                    if entry["community_id"] in existing_ids:
+                        log.info(
+                            "平台[%s] %s(%s) 入口已存在，跳过搜索",
+                            platform,
+                            entry["community_name"],
+                            entry["community_id"],
+                        )
+                        skipped_existing.append(
+                            {
+                                "platform": platform,
+                                "administrative_district": district,
+                                "community_name": entry["community_name"],
+                                "community_id": entry["community_id"],
+                            }
+                        )
+            if not to_run:
+                log.info("平台[%s] 行政区[%s] %d 个小区入口均已存在，整批跳过", platform, district, len(entries))
+                continue
             kwargs: dict = {
                 "city": instruction["city"],
                 "administrative_district": district,
-                "community_names": [entry["community_name"] for entry in entries],
+                "community_names": [entry["community_name"] for entry in to_run],
                 "manual_login": args.manual_login,
                 "debug": args.debug,
                 "manual_close": False,
@@ -165,7 +241,7 @@ async def run_platforms(instruction: dict, args: argparse.Namespace) -> tuple[li
                 "===== 平台[%s] 行政区[%s] 开始入口初始化（共 %d 个小区）=====",
                 platform,
                 district,
-                len(entries),
+                len(to_run),
             )
             try:
                 summaries = await module.main(**kwargs)
@@ -176,7 +252,7 @@ async def run_platforms(instruction: dict, args: argparse.Namespace) -> tuple[li
                 )
                 continue
 
-            entry_by_name = {entry["community_name"]: entry for entry in entries}
+            entry_by_name = {entry["community_name"]: entry for entry in to_run}
             for item in summaries:
                 item["platform"] = platform
                 entry = entry_by_name.get(item.get("community_name", ""))
@@ -243,7 +319,12 @@ def write_result_file(path: Path, payload: dict) -> None:
     print(f"结果已写 {path}")
 
 
-def print_report(results: list[dict], platform_errors: list[dict], report: dict) -> None:
+def print_report(
+    results: list[dict],
+    platform_errors: list[dict],
+    report: dict,
+    skipped_existing: list[dict] | None = None,
+) -> None:
     """打印与 MVP/save 脚本同风格的文本汇总。"""
     print("\n===== 批量结果汇总 =====")
     for item in results:
@@ -258,6 +339,10 @@ def print_report(results: list[dict], platform_errors: list[dict], report: dict)
             print(f"[失败] {location} {item.get('community_name')}：{item.get('error')}")
     for item in platform_errors:
         print(f"[平台中断] [{item['platform']}] {item['administrative_district']}：{item['error']}")
+    if skipped_existing:
+        print(f"\n===== 已有入口跳过（{len(skipped_existing)} 条，未搜索）=====")
+        for item in skipped_existing:
+            print(f"[跳过] [{item['platform']}] {item['community_name']}(id={item['community_id']})")
 
     print("\n===== 落库汇总 =====")
     mode = "dry-run 预览" if report["dry_run"] else "实际写入"
@@ -284,8 +369,13 @@ def main() -> int:
         "--platforms",
         nargs="+",
         choices=sorted(PLATFORM_MODULES),
-        default=sorted(PLATFORM_MODULES),
-        help="平台代码，缺省全部 5 平台",
+        required=True,
+        help="平台代码，必填且一次只允许一个（本入口定位为单平台链路校验）",
+    )
+    parser.add_argument(
+        "--include-existing",
+        action="store_true",
+        help="库中已有本平台入口的小区默认直接跳过、不搜索；本选项强制对其重新搜索校验（复核旧/错入口时用）",
     )
     parser.add_argument("--manual-login", action="store_true", help="验证码/登录拦截时置前浏览器等待人工处理")
     parser.add_argument("--debug", action="store_true", help="各平台导出关键页面 HTML")
@@ -296,6 +386,11 @@ def main() -> int:
         help="统一结果 JSON 路径；缺省 results/community_page/init_community_pages_<时间戳>.json",
     )
     args = parser.parse_args()
+    if len(args.platforms) != 1:
+        parser.error(
+            "--platforms 一次只能指定一个平台：本入口定位为单平台链路校验，"
+            "多平台全量验证请走 api_server 正式链路"
+        )
 
     input_path = Path(args.input) if Path(args.input).is_absolute() else PROJECT_ROOT / args.input
     try:
@@ -311,7 +406,9 @@ def main() -> int:
         len(groups),
     )
 
-    results, platform_errors = uc.loop().run_until_complete(run_platforms(instruction, args))
+    results, platform_errors, skipped_existing = uc.loop().run_until_complete(
+        run_platforms(instruction, args)
+    )
     report = update_database(results, args.dry_run)
 
     payload = {
@@ -322,19 +419,21 @@ def main() -> int:
         "dry_run": args.dry_run,
         "results": results,
         "platform_errors": platform_errors,
+        "skipped_existing": skipped_existing,
         "ingest_report": report,
     }
     result_path = Path(args.result_file) if args.result_file else (
         PROJECT_ROOT / "results" / "community_page" / f"init_community_pages_{time.strftime('%Y%m%d_%H%M%S')}.json"
     )
     write_result_file(result_path, payload)
-    print_report(results, platform_errors, report)
+    print_report(results, platform_errors, report, skipped_existing)
     log.info(
-        "统一初始化完成：小区结果 %d 条，写入 %d 条，需人工 %d 条，平台中断 %d 个",
+        "统一初始化完成：小区结果 %d 条，写入 %d 条，需人工 %d 条，平台中断 %d 个，已有入口跳过 %d 个",
         len(results),
         report["written"],
         len(report["no_mapping"]),
         len(platform_errors),
+        len(skipped_existing),
     )
     return 0
 
