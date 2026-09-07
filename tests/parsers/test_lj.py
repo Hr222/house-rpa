@@ -44,8 +44,9 @@ def test_parse_listing_and_deal_records_for_storage():
     records = parse_deal_records(deal_html)
 
     assert len(records) == 1
-    area, date_str, total, price = records[0]
+    area, date_str, total, price, community_name = records[0]
     assert area == 75.14
     assert date_str == "2026-05-06"  # 日期点转横线
     assert total == 558.0
     assert price == 74262.0
+    assert community_name == "绿景虹湾"  # 标题前缀，供采集层归属过滤

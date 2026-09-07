@@ -33,6 +33,7 @@ from app.rpa.platforms.lj import parser as parsers
 from app.rpa.utils.debug_utils import dump_html
 from app.rpa.platforms.base import (
     _human_click,
+    community_name_match,
     has_matching_community_snapshots,
     safe_select_and_click,
     wait_and_reload_after_block,
@@ -204,13 +205,47 @@ async def _collect_deals_by_url(
     community_name: str,
     deal_page_url: str,
     max_pages: int = 50,
-) -> list[dict]:
+) -> tuple[list[dict], str]:
     """直达成交页采集真实成交（全量，键名对齐入库层 {area,date,total_price,price}）。
 
     成交分页优先 URL 直达（原生 pg 链接）；无链接但声明多页时回退点击
-    a[data-page]。与 MVP collect_deals 同源。
+    a[data-page]。每页成交卡标题带小区名，逐页按 community_name_match 做
+    归属过滤（口径与挂牌一致）：首页全不符弃用整个成交段；后续页全不符
+    停止翻页、保留此前已得。翻页空页按 m-noresult 区分"真空态"与"疑似
+    被拦"：疑似时重取一次，仍空则 WARNING + 终止说明（随 reason 透出，
+    不改变 SUCCESS 语义）。与 MVP 同源。
+
+    Returns:
+        (成交明细列表, 终止说明)；无异常终止时说明为空串。
     """
     deals: list[dict] = []
+    notes: list[str] = []
+
+    def _keep(record: tuple) -> bool:
+        # 卡片小区名解析失败时保守保留；归属判定与挂牌同口径
+        return record[4] is None or community_name_match(community_name, record[4])
+
+    def _valid_dict(record: tuple) -> Optional[dict]:
+        if record[0] is None or record[3] is None:
+            return None
+        return {"area": record[0], "date": record[1], "total_price": record[2], "price": record[3]}
+
+    async def _fetch_deal_page(
+        page_url: str, label: str, dump_name: str
+    ) -> tuple[list[tuple], int, str]:
+        """打开单页成交列表 → 风控协议 → 解析并按归属过滤。
+
+        Returns:
+            (归属过滤后的记录, 原始条数, 页面 html)。
+        """
+        await page.get(page_url)
+        await page
+        await asyncio.sleep(2)
+        html = await wait_and_reload_after_block(page, detect_block, label)
+        await _dump(page, dump_name)
+        raw = parsers.parse_deal_records(html)
+        return [record for record in raw if _keep(record)], len(raw), html
+
     await page.get(deal_page_url)
     await page
     await asyncio.sleep(3)
@@ -220,55 +255,101 @@ async def _collect_deals_by_url(
     await _dump(page, "lj_deal_by_url_p1")
 
     raw = parsers.parse_deal_records(first_html)
-    deals = [
-        {"area": r[0], "date": r[1], "total_price": r[2], "price": r[3]}
-        for r in raw if r[0] is not None and r[3] is not None
-    ]
-    log.info("[成交] %s 第 1 页真实成交 %d 条", community_name, len(deals))
+    matched = [record for record in raw if _keep(record)]
+    if raw and not matched:
+        # 对齐挂牌归属语义：首页全不符弃用整个成交段
+        log.warning(
+            "[成交] %s：成交页快照与目标小区不匹配（%d 条全部弃用）",
+            community_name, len(raw),
+        )
+        return [], "成交页归属不符，记录全部弃用"
+    if not raw and not is_no_result(first_html):
+        # 空页且无空态标记：疑似软拦，重取一次复核
+        log.warning("[成交] %s：成交首页无数据且无空态标记，复核重取一次", community_name)
+        matched, raw_count, first_html = await _fetch_deal_page(
+            deal_page_url, f"小区成交页[{community_name}](复核)", "lj_deal_by_url_p1"
+        )
+        if not matched:
+            note = "成交首页无数据且无空态标记，疑似被拦截截断"
+            log.warning("[成交] %s：%s", community_name, note)
+            notes.append(note)
+
+    page_deals = [d for d in (_valid_dict(r) for r in matched) if d]
+    deals.extend(page_deals)
+    log.info("[成交] %s 第 1 页真实成交 %d 条", community_name, len(page_deals))
 
     page_urls = _build_pagination_urls(deal_page_url, first_html, max_pages)
     total_pages = parsers.parse_deal_total_pages(first_html)
     if page_urls:
         log.info("[成交] 另有 %d 页待采（URL 直达）", len(page_urls))
         for page_no, page_url in enumerate(page_urls, start=2):
-            await page.get(page_url)
-            await page
-            await asyncio.sleep(2)
-            page_html = await wait_and_reload_after_block(
-                page, detect_block, f"成交翻页第 {page_no} 页"
+            matched, raw_count, page_html = await _fetch_deal_page(
+                page_url, f"成交翻页第 {page_no} 页", f"lj_deal_by_url_p{page_no}"
             )
-            await _dump(page, f"lj_deal_by_url_p{page_no}")
-            page_raw = parsers.parse_deal_records(page_html)
-            page_deals = [
-                {"area": r[0], "date": r[1], "total_price": r[2], "price": r[3]}
-                for r in page_raw if r[0] is not None and r[3] is not None
-            ]
-            deals.extend(page_deals)
-            if not page_deals:
+            if matched:
+                page_deals = [d for d in (_valid_dict(r) for r in matched) if d]
+                deals.extend(page_deals)
+                log.info("[成交] 第 %d 页解析 %d 条，累计 %d 条", page_no, len(page_deals), len(deals))
+                continue
+            if raw_count > 0:
+                note = f"成交第 {page_no} 页记录与目标小区不符，全部弃用并停止翻页"
+                log.warning("[成交] %s：%s", community_name, note)
+                notes.append(note)
+                break
+            if is_no_result(page_html):
                 log.info("[成交] 第 %d 页无成交记录，停止翻页", page_no)
                 break
-            log.info("[成交] 第 %d 页解析 %d 条，累计 %d 条", page_no, len(page_deals), len(deals))
+            # 疑似软拦：重取一次复核
+            log.warning("[成交] %s：成交第 %d 页无数据且无空态标记，复核重取一次", community_name, page_no)
+            matched, raw_count, page_html = await _fetch_deal_page(
+                page_url, f"成交翻页第 {page_no} 页(复核)", f"lj_deal_by_url_p{page_no}"
+            )
+            if matched:
+                page_deals = [d for d in (_valid_dict(r) for r in matched) if d]
+                deals.extend(page_deals)
+                log.info("[成交] 第 %d 页复核解析 %d 条，累计 %d 条", page_no, len(page_deals), len(deals))
+                continue
+            note = (
+                f"成交第 {page_no} 页无数据且无空态标记"
+                f"（声明共 {total_pages} 页），疑似被拦截截断"
+            )
+            log.warning("[成交] %s：%s", community_name, note)
+            notes.append(note)
+            break
     elif total_pages > 1:
         log.info("[成交] 页面无 URL 分页链接（totalPage=%d），回退点击翻页", total_pages)
         for page_no in range(2, total_pages + 1):
             page_html = await _click_deal_page_number(page, page_no)
             if page_html is None:
-                log.warning("[成交] 第 %d 页无法翻页，停止", page_no)
+                note = f"成交第 {page_no} 页翻页按钮缺失或点击失败，提前停止"
+                log.warning("[成交] %s：%s", community_name, note)
+                notes.append(note)
                 break
             page_html = await wait_and_reload_after_block(
                 page, detect_block, f"成交点击第 {page_no} 页"
             )
             await _dump(page, f"lj_deal_by_url_p{page_no}")
-            page_raw = parsers.parse_deal_records(page_html)
-            page_deals = [
-                {"area": r[0], "date": r[1], "total_price": r[2], "price": r[3]}
-                for r in page_raw if r[0] is not None and r[3] is not None
-            ]
-            deals.extend(page_deals)
-            if not page_deals:
+            raw = parsers.parse_deal_records(page_html)
+            matched = [record for record in raw if _keep(record)]
+            if matched:
+                page_deals = [d for d in (_valid_dict(r) for r in matched) if d]
+                deals.extend(page_deals)
+                log.info("[成交] 第 %d 页解析 %d 条，累计 %d 条", page_no, len(page_deals), len(deals))
+                continue
+            if raw and all(not _keep(record) for record in raw):
+                note = f"成交第 {page_no} 页记录与目标小区不符，全部弃用并停止翻页"
+                log.warning("[成交] %s：%s", community_name, note)
+                notes.append(note)
                 break
+            if is_no_result(page_html):
+                log.info("[成交] 第 %d 页无成交记录，停止翻页", page_no)
+                break
+            note = f"成交第 {page_no} 页无数据且无空态标记（点击翻页），疑似被拦截截断"
+            log.warning("[成交] %s：%s", community_name, note)
+            notes.append(note)
+            break
     log.info("[成交汇总] %s：真实成交 %d 条", community_name, len(deals))
-    return deals
+    return deals, "；".join(notes)
 
 
 async def collect_listing_by_url(
@@ -330,8 +411,9 @@ async def collect_listing_by_url(
                     break
 
         deals: list[dict] = []
+        deal_note = ""
         if deal_page_url:
-            deals = await _collect_deals_by_url(
+            deals, deal_note = await _collect_deals_by_url(
                 page, community_name=community_name,
                 deal_page_url=deal_page_url, max_pages=max_pages,
             )
@@ -350,6 +432,7 @@ async def collect_listing_by_url(
             deal_prices=[],
             deal_records=deals,
             deal_source="成交记录" if deals else "无",
+            reason=deal_note or None,
             request_id=request_id,
             listing_page_url=listing_page_url,
             deal_page_url=deal_page_url,

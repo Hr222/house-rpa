@@ -113,7 +113,8 @@ def parse_deal_records(html: str) -> list:
         <div class="totalPrice"><span class="number">558</span>万</div>
         <div class="unitPrice"><span class="number">74262</span>元/平</div>
 
-    返回 [(面积, 日期, 总价万, 单价), ...]，面积从 title 提取。
+    返回 [(面积, 日期, 总价万, 单价, 小区名), ...]，面积与小区名均从 title
+    提取（小区名为标题前缀，供采集层归属过滤；无法识别时为 None）。
     日期格式统一转为 YYYY-MM-DD（原始是 2026.05.06）。
     """
     records = []
@@ -122,10 +123,16 @@ def parse_deal_records(html: str) -> list:
         if "dealDate" not in chunk:
             continue
 
-        title_m = re.search(r'<div class="title">.*?>(.*?)</a>', chunk, re.S)
+        community_name = None
         area = None
+        title_m = re.search(r'<div class="title">.*?>(.*?)</a>', chunk, re.S)
         if title_m:
-            area_m = re.search(r'([\d.]+)\s*平米', title_m.group(1))
+            title_text = re.sub(r'<[^>]+>', '', title_m.group(1)).strip()
+            # 小区名 = 户型“N室”之前的标题前缀；“3期”“168”等名称内数字不跟“室”，不受影响
+            name_m = re.match(r'^(.*?)\s*\d+\s*室', title_text)
+            if name_m and name_m.group(1):
+                community_name = name_m.group(1)
+            area_m = re.search(r'([\d.]+)\s*平米', title_text)
             if area_m:
                 area = float(area_m.group(1))
 
@@ -141,7 +148,7 @@ def parse_deal_records(html: str) -> list:
         if area is None and unit_price is None:
             continue
 
-        records.append((area, date_str, total_price, unit_price))
+        records.append((area, date_str, total_price, unit_price, community_name))
     return records
 
 
@@ -160,12 +167,13 @@ def filter_deal_records(records: list, area_min: float, area_max: float, months:
     cutoff = datetime.now() - timedelta(days=30 * months)
     cutoff_str = cutoff.strftime("%Y-%m-%d")
     filtered = []
-    for area, date_str, total, price in records:
+    for record in records:
+        area, date_str, total, price = record[0], record[1], record[2], record[3]
         if area is not None and not (area_min <= area <= area_max):
             continue
         if date_str and date_str < cutoff_str:
             continue
-        filtered.append((area, date_str, total, price))
+        filtered.append(record)
     return filtered
 
 
