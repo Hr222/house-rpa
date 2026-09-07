@@ -26,6 +26,10 @@ class InquiryRequest:
     platform_listing_pages: dict = field(default_factory=dict)
     # 平台 code -> 小区成交列表入口（仅采真实成交的平台需要）。
     platform_deal_pages: dict = field(default_factory=dict)
+    # 本次 RPA 需要采集的平台 code 列表；None = 全部注册平台（旧行为/向后
+    # 兼容）。热数据短路时编排层只把"冷"平台放进来；目标全热时为空列表
+    # （合法值：一个平台都不跑，结果全部来自库内合成）。
+    platform_codes: Optional[list] = None
 
 
 @dataclass

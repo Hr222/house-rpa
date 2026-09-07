@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from app.inquiry.models import ConfirmedCommunityContext
@@ -23,6 +23,20 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 INQUIRY_PERSIST_DIR = BASE_DIR / "persist" / "inquiries"
 
 
+def _request_from_dict(request_data: dict) -> InquiryRequest:
+    """从快照 dict 重建采集请求（主请求与附近补采请求共用）。"""
+    return InquiryRequest(
+        community_name=request_data["community_name"],
+        area=float(request_data["area"]),
+        city=request_data.get("city", "深圳"),
+        administrative_district=request_data.get("administrative_district"),
+        request_id=request_data.get("request_id"),
+        platform_listing_pages=request_data.get("platform_listing_pages") or {},
+        platform_deal_pages=request_data.get("platform_deal_pages") or {},
+        platform_codes=request_data.get("platform_codes"),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class InquiryTaskSnapshot:
     """可恢复询价任务的完整编排上下文。"""
@@ -32,6 +46,8 @@ class InquiryTaskSnapshot:
     created_at: float
     request: InquiryRequest
     confirmed_community: ConfirmedCommunityContext
+    # 热数据平台 code：RPA 不采集，完成处理时由编排层用库内数据合成结果。
+    hot_platforms: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         """转换为稳定的磁盘快照结构。"""
@@ -41,6 +57,7 @@ class InquiryTaskSnapshot:
             "created_at": self.created_at,
             "request": asdict(self.request),
             "confirmed_community": asdict(self.confirmed_community),
+            "hot_platforms": list(self.hot_platforms),
         }
 
     @classmethod
@@ -60,15 +77,7 @@ class InquiryTaskSnapshot:
             task_id=task_id,
             community_id=community_id,
             created_at=float(data["created_at"]),
-            request=InquiryRequest(
-                community_name=request_data["community_name"],
-                area=float(request_data["area"]),
-                city=request_data.get("city", "深圳"),
-                administrative_district=request_data.get("administrative_district"),
-                request_id=request_data.get("request_id"),
-                platform_listing_pages=request_data.get("platform_listing_pages") or {},
-                platform_deal_pages=request_data.get("platform_deal_pages") or {},
-            ),
+            request=_request_from_dict(request_data),
             confirmed_community=ConfirmedCommunityContext(
                 community_id=int(context_data["community_id"]),
                 community_group_id=int(context_data["community_group_id"]),
@@ -80,6 +89,7 @@ class InquiryTaskSnapshot:
                 area=float(context_data["area"]),
                 request_id=context_data.get("request_id"),
             ),
+            hot_platforms=tuple(data.get("hot_platforms") or ()),
         )
 
 

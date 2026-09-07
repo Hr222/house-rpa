@@ -490,15 +490,40 @@ class PropertyRecordsDatabase:
         community_id: int,
         *,
         include_deleted: bool = False,
+        source_platform: str | None = None,
     ) -> list[ListingRecord]:
         sql = "SELECT * FROM listing_records WHERE community_id = ?"
         params: list[object] = [community_id]
+        if source_platform is not None:
+            if source_platform not in LISTING_PLATFORMS:
+                raise ValueError(f"挂牌来源平台不支持: {source_platform}")
+            sql += " AND source_platform = ?"
+            params.append(source_platform)
         if not include_deleted:
             sql += " AND is_deleted = 0"
         sql += " ORDER BY source_platform, id"
         with self._connect() as connection:
             rows = connection.execute(sql, params).fetchall()
         return [_listing_from_row(row) for row in rows]
+
+    def get_platform_freshness(self, community_id: int) -> dict[str, str]:
+        """返回各平台最近一次数据更新时间（在架行 MAX(updated_at)）。
+
+        只统计 is_deleted = 0 的行：全部被软删的平台返回空——热路径据此
+        视其为冷（NO_DATA 不算热）。update 时间由落库整批刷新，因此该
+        MAX 即"小区×平台"的上次采集时间。
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source_platform, MAX(updated_at) AS last_update
+                FROM listing_records
+                WHERE community_id = ? AND is_deleted = 0
+                GROUP BY source_platform
+                """,
+                (int(community_id),),
+            ).fetchall()
+        return {row["source_platform"]: row["last_update"] for row in rows}
 
     def list_listing_logs(
         self,

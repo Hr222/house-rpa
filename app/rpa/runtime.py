@@ -390,6 +390,7 @@ class RPARuntime:
                 }
                 collection = await self.service.run_inquiry(
                     record.request,
+                    platform_codes=record.request.platform_codes,
                     before_collection_complete=self._check_platform_risk_before_aggregation,
                 )
                 self._apply_platform_results(collection, platform_versions)
