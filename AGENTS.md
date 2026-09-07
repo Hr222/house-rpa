@@ -3,29 +3,20 @@
 > 本文件仅约束 `jeethink-rpa` Python 工程，与仓库根目录的 `AGENTS.md` 独立。
 > 改动前先阅读本文；当本文、项目文档和用户当次指令冲突时，以用户当次指令为准。
 
-## 1. 项目定位
+## 1. 开始工作前（文档地图）
 
-jeethink-rpa 是二手房找房比价工程。它使用 FastAPI 和 nodriver，面向多平台采集房产数据，并与小区主数据、房源记录模块协作完成比价和数据沉淀。
+- **架构文档：[ARCHITECTURE.md](ARCHITECTURE.md)** —— 模块边界、运行时状态机、
+  并发与风控协议、比价链路与崩溃恢复。**改动代码前必读。**
+- **使用说明：[README.md](README.md)** —— 项目定位、快速开始（启动 / 就绪确认 /
+  批量比价客户端）、业务链路与取值规则。
+- **补充文档：[docs/](docs/)** ——
+  - `docs/平台扩展对接文档.md`：新平台接入步骤与平台目录四文件规范；
+  - `docs/API接口文档.md`：HTTP 接口、字段与状态码；
+  - `docs/小区基础数据模块.md`：小区主数据查询接口与房源记录存储。
 
-当前接入贝壳、安居客、链家、房天下、乐有家。入口服务是 `scripts/api_server.py`。
+本文不重复架构、接口和业务规则，按上面的文档地图取用。
 
-## 2. 开始工作前
-
-先根据任务读取对应文档，不在 `AGENTS.md` 重复架构、接口和业务规则：
-
-| 任务 | 必读文档 |
-|---|---|
-| 了解项目和运行方式 | `README.md` |
-| RPA 分层、状态、并发、风控 | `README.md`（§5 系统架构、§6 运行时状态机、§7 并发与风控协议） |
-| 新平台或平台 HTML 改造 | `docs/平台扩展对接文档.md` |
-| 小区主数据 | `docs/小区基础数据模块.md` |
-| 房源记录和入库 | `docs/房源记录模块.md` |
-| HTTP 接口 | `docs/API接口文档.md` |
-| 当前阶段需求 | `work/` 中与任务对应的文件（目录存在时） |
-
-`work/` 是临时工作文档目录，记录已确认但可能尚未实现的需求；需求完成后会删除。不要把其中内容当作现有代码行为，也不要让永久代码依赖该目录。
-
-## 3. 开发流程与约束
+## 2. 开发流程与约束
 
 新功能、业务流程调整或跨模块改动必须按以下顺序推进，环节不能跳过：
 
@@ -45,34 +36,31 @@ jeethink-rpa 是二手房找房比价工程。它使用 FastAPI 和 nodriver，�
 - Python 文件以 `# -*- coding: utf-8 -*-` 和简短 docstring 开头。日志使用 `logging.getLogger(__name__)`，关键步骤记录上下文，异常使用 warning/error。
 - 代码实现后，再同步已经实现内容的正式文档。
 
-## 4. 测试与验证
+## 3. 测试与验证
 
-测试保持精简，只覆盖当前业务重点。当前保留 15 个测试模块、52 个测试。
+测试按需运行，不做无意义的默认全量执行。当前保留 14 个测试模块、49 个测试（全部离线）。
+
+- 改动哪个模块，就只跑对应的测试：
 
 | 改动范围 | 运行目标 |
 |---|---|
 | `app/community_data/*` | `tests/community_data/test_community_data.py` |
 | `app/inquiry/*` | `tests/inquiry/` |
-| `app/inquiry_analysis/*` | `tests/inquiry_analysis/` |
-| `app/rpa/platforms/ajk/parser.py` | `tests/parsers/test_ajk.py` |
-| `app/rpa/platforms/fang/parser.py` | `tests/parsers/test_fang.py` |
-| `app/rpa/platforms/ke/parser.py` | `tests/parsers/test_ke.py` |
-| `app/rpa/platforms/lj/parser.py` | `tests/parsers/test_lj.py` |
-| `app/rpa/platforms/lyj/parser.py` | `tests/parsers/test_lyj.py` |
+| `app/rpa/platforms/<code>/parser.py` | `tests/parsers/test_<code>.py` |
 | `app/rpa/platforms/base.py` 小区归属 | `tests/platforms/test_base_community.py` |
 | `app/property_records/*` | `tests/property_records/test_property_records.py` |
 
-- 改动后必须运行与改动直接相关的测试，不必默认跑全量。
-- 新能力只添加验证关键业务边界的最小测试，不恢复已删除的低价值测试套件。
-- 平台 HTML 改造先用对应 MVP 脚本验证真实页面，再运行相邻 parser 测试。
-- 全量 `python -m pytest tests/ -v` 仅在改动面大、怀疑广泛回归或发版前执行。
+- 纯文档、注释、docstring 类改动不跑测试。
+- 平台 HTML 改造先用 MVP 脚本对照真实页面 dump 验证，再跑相邻 parser 测试。
+- 全量 `python -m pytest tests/ -q` 仅在用户明确要求或怀疑大范围回归时执行。
+- 测试保持精简：新能力只补验证关键业务边界的最小测试，不恢复已删除的低价值测试套件。
 
-## 5. Git 提交规范
+## 4. Git 提交规范
 
-- 只有用户明确要求时才创建提交。
+- **只有用户明确要求时才创建提交和推送**。改完内容本身不等于授权提交；方案、改动、文档完成都不是 git 动作的理由。
 - 提交前检查 `git status --short`、`git diff` 和暂存区；不得覆盖或夹带用户已有的无关改动、未跟踪脚本、输出和运行产物。
 - 只暂存本次任务相关文件，不使用 `git add .` 扩大范围。
-- 提交前执行 `git diff --cached --check`；代码改动还要运行对应测试。纯文档整理可不跑测试，但必须说明原因。
+- 提交前执行 `git diff --cached --check`；代码改动还要按 §3 的按需口径运行对应测试。
 - 提交信息使用简洁中文，一个提交只处理一个完整工作块。
 - 提交后说明提交哈希、提交内容、验证结果，以及未纳入的用户文件。
-- 禁止使用 `git reset --hard`、`git checkout --` 等破坏性操作覆盖用户改动。
+- 禁止使用 `git reset --hard`、`git checkout --` 等破坏性操作覆盖用户改动；涉及远程历史的重写（force push）必须用户明确授权。

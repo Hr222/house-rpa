@@ -21,7 +21,7 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_DEFAULT_INPUT = _PROJECT_ROOT / "test_data" / "房产评估汇总表_仅广州.xlsx"
+_DEFAULT_INPUT = _PROJECT_ROOT / "example" / "二手房心理预期价格示例.xlsx"
 _DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "results"
 
 # ─── 配置 ──────────────────────────────────────────────
