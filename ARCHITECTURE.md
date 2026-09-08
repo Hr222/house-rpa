@@ -12,7 +12,7 @@
 ### 1.1 目录说明
 
 ```text
-jeethink-rpa/
+house-rpa/
 ├─ app/
 │  ├─ algorithm/             # 估价算法（纯函数，无 IO）
 │  │  ├─ models.py / config.py / area_rules.py / branch_text.py
