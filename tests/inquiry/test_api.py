@@ -67,5 +67,7 @@ def test_create_inquiry_handles_community_resolution_before_enqueue() -> None:
     assert phase_required.json()["data"]["candidates"][0]["canonicalName"] == "示例花园一期"
     assert accepted.status_code == 202
     assert accepted.json()["code"] == "ACCEPTED"
+    assert accepted.json()["data"]["taskId"] == "task-001"
+    assert accepted.json()["data"]["requestId"] == "order-001"
     assert len(task_manager.calls) == 1
     assert task_manager.calls[0].community_id == first.community_id

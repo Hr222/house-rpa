@@ -387,7 +387,8 @@ class PropertyRecordsDatabase:
         """将本次有效列表中未出现的挂牌记录标记为逻辑删除。
 
         ``observed_urls`` 为空时直接拒绝，避免一次空页面把整个小区的挂牌
-        误判为下架。调用方应在确认本次采集页面有效后再调用本方法。
+        误判为下架。仅当记录的 ``last_seen_at`` 不晚于本批次 ``updated_at``
+        时才允许下架，避免延迟到达的旧批次覆盖更新的采集结果。
         """
         if source_platform not in LISTING_PLATFORMS:
             raise ValueError(f"挂牌来源平台不支持: {source_platform}")
@@ -404,8 +405,9 @@ class PropertyRecordsDatabase:
                 SELECT id FROM listing_records
                 WHERE community_id = ? AND source_platform = ?
                   AND is_deleted = 0 AND listing_url NOT IN ({placeholders})
+                  AND last_seen_at <= ?
                 """,
-                (community_id, source_platform, *normalized_urls),
+                (community_id, source_platform, *normalized_urls, now),
             ).fetchall()
             ids = tuple(int(row["id"]) for row in rows)
             if not ids:

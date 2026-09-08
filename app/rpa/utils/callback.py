@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -45,7 +46,7 @@ async def notify_result(
     if not callback_url:
         return False
 
-    target = callback_url.rstrip("/") + f"/{task_id}"
+    target = callback_url.rstrip("/") + f"/{quote(task_id, safe='')}"
     timeout = config.REQUEST_TIMEOUT
     last_error: Optional[str] = None
     make_client = client_factory or (lambda **kw: httpx.AsyncClient(**kw))

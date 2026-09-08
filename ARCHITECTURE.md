@@ -95,7 +95,8 @@ flowchart TD
 
 - `orchestrator.py`：确认小区身份（未找到 / 类型不支持 / 多期需指定 / 唯一命中），
   构造 `ConfirmedCommunityContext`（含 `community_id`）。
-- `task_manager.py`：快照写入成功后才向 Runtime 入队；入队失败删除快照；服务重启后
+- `task_manager.py`：为每次询价生成服务端 UUID `task_id`，客户端 `request_id` 仅作关联标识；
+  快照写入成功后才向 Runtime 入队；入队失败删除快照；服务重启后
   等 RPA 就绪按创建时间恢复残留任务，恢复完成前拒绝新比价；任务终态删除快照。
 - `task_store.py`：`persist/inquiries/{taskId}.json` 原子写入/加载/删除。
 - `aggregation.py`：汇总所有 `SUCCESS` 平台原始数据（面积严格筛选 + 弱参考 + 跨平台
@@ -284,7 +285,8 @@ flowchart LR
 
 **任务持久化**（只有编排层读写，RPA 不接触快照文件）：
 
-- 只有编排层确认唯一小区后才写 `persist/inquiries/{taskId}.json`；快照包含
+- 只有编排层确认唯一小区后才写 `persist/inquiries/{taskId}.json`；`task_id` 由服务端生成 UUID，
+  客户端 `request_id` 只作为关联标识保留；快照包含
   `task_id`、`community_id`、创建时间、`InquiryRequest` 与完整
   `ConfirmedCommunityContext`，两处 `community_id` 必须一致（原子写入）。
 - 快照写入成功后才将不含 `community_id` 的采集请求交给 RPA；入队失败删除快照。

@@ -78,7 +78,8 @@ class FakeTaskManager:
     async def submit(self, context):
         self.calls.append(context)
         return {
-            "taskId": context.request_id or "task-001",
+            "taskId": "task-001",
+            "requestId": context.request_id,
             "status": "排队中",
             "statusCode": "QUEUED",
         }

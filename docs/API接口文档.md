@@ -180,7 +180,7 @@ find_nearby_communities(
 | `administrativeDistrict` | string | ✅ | 行政区（如 `南山区`） |
 | `area` | float | ✅ | 精确面积（㎡），如 `89.5`。系统自动匹配各平台面积档位 |
 | `city` | string | ✅ | 城市名（如 `深圳`、`广州`、`东莞`） |
-| `requestId` | string | | 请求标识，用于幂等；不填则由服务生成 `taskId` |
+| `requestId` | string | | 客户端请求标识，用于关联调用方请求；不填则为 `null`。它不是任务 ID，也不保证幂等 |
 
 **请求示例：**
 
@@ -201,7 +201,8 @@ find_nearby_communities(
   "code": "ACCEPTED",
   "message": "询价任务已受理",
   "data": {
-    "taskId": "order-001",
+    "taskId": "8f4c2e7f5b2d4e4b9f0d1c6a7e8b9c10",
+    "requestId": "order-001",
     "status": "排队中",
     "statusCode": "QUEUED"
   }
@@ -273,6 +274,8 @@ find_nearby_communities(
   "code": "OK",
   "message": "查询成功",
   "data": {
+    "taskId": "8f4c2e7f5b2d4e4b9f0d1c6a7e8b9c10",
+    "requestId": "order-001",
     "quoteAvg": 85635.00,
     "dealAvg": 71086.50,
     "finalPrice": 71086.50,
@@ -308,6 +311,8 @@ find_nearby_communities(
   "code": "OK",
   "message": "查询成功",
   "data": {
+    "taskId": "8f4c2e7f5b2d4e4b9f0d1c6a7e8b9c10",
+    "requestId": "order-001",
     "quoteAvg": null,
     "dealAvg": null,
     "finalPrice": null,
@@ -329,7 +334,8 @@ find_nearby_communities(
   "code": "OK",
   "message": "查询成功",
   "data": {
-    "taskId": "order-001",
+    "taskId": "8f4c2e7f5b2d4e4b9f0d1c6a7e8b9c10",
+    "requestId": "order-001",
     "status": "收集中",
     "statusCode": "RUNNING"
   }
@@ -372,13 +378,16 @@ find_nearby_communities(
 
 配置环境变量 `RPA_CALLBACK_URL` 后，任务完成（成功或失败）时服务主动 `POST` 推送结果到 `{CALLBACK_URL}/{taskId}`。
 
+`taskId` 是服务端生成的 UUID，`requestId` 是客户端提交的原始请求标识；回调 body 同时返回二者。
+
 > 这是**主机制**，客户端无需轮询 `GET /inquiries/{taskId}`。
 
 **成功回调：**
 
 ```json
 {
-  "taskId": "order-001",
+  "taskId": "8f4c2e7f5b2d4e4b9f0d1c6a7e8b9c10",
+  "requestId": "order-001",
   "statusCode": "COMPLETED",
   "status": "已完成",
   "success": true,
@@ -394,7 +403,8 @@ find_nearby_communities(
 
 ```json
 {
-  "taskId": "order-001",
+  "taskId": "8f4c2e7f5b2d4e4b9f0d1c6a7e8b9c10",
+  "requestId": "order-001",
   "statusCode": "FAILED",
   "status": "失败",
   "success": false,

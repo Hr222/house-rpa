@@ -120,8 +120,10 @@ class InquiryTaskManager:
         if not self.recovery_complete:
             raise RuntimeError("INQUIRY_RECOVERY_PENDING")
 
-        task_id = context.request_id or uuid.uuid4().hex
-        task_context = replace(context, request_id=task_id)
+        # request_id 是客户端传入的业务标识；task_id 是服务端内部生命周期标识。
+        # 两者分离后，客户端值不会再参与快照文件名或 Runtime 队列键生成。
+        task_id = uuid.uuid4().hex
+        task_context = context
         listing_pages, deal_pages = self._resolve_platform_entries(task_context.community_id)
         hot_platforms = self._select_hot_platforms(
             task_context.community_id, sorted(listing_pages.keys())
@@ -131,7 +133,7 @@ class InquiryTaskManager:
             area=task_context.area,
             city=task_context.city,
             administrative_district=task_context.administrative_district,
-            request_id=task_id,
+            request_id=task_context.request_id,
             platform_listing_pages=listing_pages,
             platform_deal_pages=deal_pages,
             platform_codes=self._cold_platform_codes(hot_platforms),
@@ -212,6 +214,7 @@ class InquiryTaskManager:
     async def _enqueue_snapshot(self, snapshot: InquiryTaskSnapshot) -> dict:
         return await self.runtime.enqueue_inquiry(
             replace(snapshot.request),
+            task_id=snapshot.task_id,
             completion_handler=self.completion_orchestrator.handler_for(
                 snapshot.confirmed_community,
                 hot_platform_codes=snapshot.hot_platforms,

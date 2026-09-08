@@ -72,7 +72,12 @@ def test_service_returns_raw_collection_without_orchestration_context() -> None:
 
 
 def test_runtime_hands_raw_collection_to_injected_completion_handler() -> None:
-    async def run() -> tuple[RPACollectionResult, dict, list[tuple[str, TaskStatus]]]:
+    async def run() -> tuple[
+        RPACollectionResult,
+        dict,
+        list[tuple[str, TaskStatus]],
+        dict,
+    ]:
         adapter = CapturingPlatformAdapter()
         received: RPACollectionResult | None = None
         terminal_events: list[tuple[str, TaskStatus]] = []
@@ -115,20 +120,31 @@ def test_runtime_hands_raw_collection_to_injected_completion_handler() -> None:
                     community_name="示例花园一期",
                     area=89.5,
                     city="深圳",
+                    request_id="client-collection-001",
                 ),
                 terminal_handler=on_terminal,
             )
             await runtime.queue.join()
             assert received is not None
-            return received, runtime.get_task(task["taskId"]), terminal_events
+            record = runtime.tasks[task["taskId"]]
+            return (
+                received,
+                runtime.get_task(task["taskId"]),
+                terminal_events,
+                runtime._build_callback_payload(record),
+            )
         finally:
             runtime.worker_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await runtime.worker_task
 
-    received, task, terminal_events = asyncio.run(run())
+    received, task, terminal_events, callback = asyncio.run(run())
 
     assert isinstance(received, RPACollectionResult)
     assert task is not None
+    assert task["taskId"] != "client-collection-001"
+    assert task["requestId"] == "client-collection-001"
+    assert callback["taskId"] == task["taskId"]
+    assert callback["requestId"] == "client-collection-001"
     assert task["result"]["branchCode"] == "TEST"
     assert terminal_events == [(task["taskId"], TaskStatus.COMPLETED)]

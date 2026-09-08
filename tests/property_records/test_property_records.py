@@ -106,6 +106,49 @@ def test_listing_batch_never_deletes_when_the_effective_list_is_empty(tmp_path):
     assert len(database.list_listings(community.community_id)) == 2
 
 
+def test_listing_batch_does_not_delete_rows_newer_than_observation(tmp_path):
+    database, community = _databases(tmp_path)
+    common = dict(
+        community_id=community.community_id,
+        city="深圳",
+        administrative_district="罗湖区",
+        source_platform="fang",
+        source_community_name="城市天地",
+        area_sqm=80,
+        total_price=4_000_000,
+        unit_price_yuan=50_000,
+    )
+    listing = database.upsert_listing(
+        listing_url="https://example.com/house/new",
+        seen_at="2026-09-08T10:00:00+00:00",
+        **common,
+    )
+
+    # 较早批次晚到时，不能把较新采集到的挂牌误标为下架。
+    deleted = database.mark_listings_not_seen(
+        community.community_id,
+        "fang",
+        ["https://example.com/house/other"],
+        updated_at="2026-09-08T09:00:00+00:00",
+    )
+
+    assert deleted == []
+    current = database.list_listings(community.community_id, include_deleted=True)
+    assert current == [listing]
+    assert current[0].is_deleted is False
+
+    # 只有不早于该挂牌最后观察时间的批次，才有资格执行下架。
+    deleted = database.mark_listings_not_seen(
+        community.community_id,
+        "fang",
+        ["https://example.com/house/other"],
+        updated_at="2026-09-08T11:00:00+00:00",
+    )
+
+    assert [row.id for row in deleted] == [listing.id]
+    assert deleted[0].is_deleted is True
+
+
 def test_community_platform_page_combines_listing_and_deal_entries(tmp_path):
     database, community = _databases(tmp_path)
 

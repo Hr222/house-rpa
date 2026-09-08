@@ -207,6 +207,7 @@ def create_app(
             "message": "询价任务已受理",
             "data": {
                 "taskId": task["taskId"],
+                "requestId": task.get("requestId"),
                 "status": task["status"],
                 "statusCode": task["statusCode"],
             },
@@ -244,6 +245,8 @@ def create_app(
             # 补状态字段：全平台 NO_DATA 时三个价格都是 None，
             # 若只返回 data 客户端无法判断"已完成但无数据"会死等。
             data = {
+                "taskId": task["taskId"],
+                "requestId": task.get("requestId"),
                 **result["data"],                   # quoteAvg/dealAvg/finalPrice（可能全 None）
                 "success": result["success"],       # 无数据时为 False
                 "statusCode": task["statusCode"],   # COMPLETED
@@ -255,6 +258,7 @@ def create_app(
         else:
             data = {
                 "taskId": task["taskId"],
+                "requestId": task.get("requestId"),
                 "status": task["status"],
                 "statusCode": task["statusCode"],
             }

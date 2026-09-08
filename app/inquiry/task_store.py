@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """询价任务弱持久化。
 
-快照只属于询价编排层：它保存已确认的小区身份和 RPA 采集请求，
+快照只属于询价编排层：它保存已确认的小区身份、客户端 request_id 和 RPA 采集请求，
 用于进程异常后的重入队。RPA 运行时不读取、写入或删除这些文件。
 """
 
@@ -67,10 +67,9 @@ class InquiryTaskSnapshot:
         request_data = data["request"]
         context_data = data["confirmed_community"]
         community_id = int(data["community_id"])
-        if request_data.get("request_id") != task_id:
-            raise ValueError("request_id 与 task_id 不一致")
-        if context_data.get("request_id") != task_id:
-            raise ValueError("confirmed_community.request_id 与 task_id 不一致")
+        request_id = request_data.get("request_id")
+        if context_data.get("request_id") != request_id:
+            raise ValueError("request_id 在采集请求与小区上下文中不一致")
         if int(context_data["community_id"]) != community_id:
             raise ValueError("confirmed_community.community_id 与快照不一致")
         return cls(
@@ -99,7 +98,16 @@ def _persist_dir() -> Path:
 
 
 def _task_file(task_id: str) -> Path:
-    return _persist_dir() / f"{task_id}.json"
+    """返回任务快照路径，并确保路径不会逃逸出询价持久化目录。"""
+    persist_dir = _persist_dir().resolve()
+    task_file = (persist_dir / f"{task_id}.json").resolve()
+    try:
+        task_file.relative_to(persist_dir)
+    except ValueError as exc:
+        raise ValueError("task_id 不能包含路径穿越") from exc
+    if task_file.parent != persist_dir:
+        raise ValueError("task_id 只能映射为询价持久化目录下的文件")
+    return task_file
 
 
 def save_pending_task(snapshot: InquiryTaskSnapshot) -> None:

@@ -279,14 +279,16 @@ class RPARuntime:
         self,
         request: InquiryRequest,
         *,
+        task_id: Optional[str] = None,
         completion_handler: Optional[CollectionCompletionHandler] = None,
         terminal_handler: Optional[TaskTerminalHandler] = None,
     ) -> dict:
         if not self.is_ready():
             raise RuntimeError("SERVICE_NOT_READY")
 
-        task_id = request.request_id or uuid.uuid4().hex
-        request.request_id = task_id
+        task_id = task_id or uuid.uuid4().hex
+        if task_id in self.tasks:
+            raise RuntimeError("TASK_ID_ALREADY_EXISTS")
         record = InquiryTaskRecord(
             task_id=task_id,
             request=request,
@@ -686,6 +688,7 @@ class RPARuntime:
     def _serialize_task(self, record: InquiryTaskRecord) -> dict:
         return {
             "taskId": record.task_id,
+            "requestId": record.request.request_id,
             "statusCode": record.status,
             "status": TASK_STATUS_TEXT.get(record.status, record.status),
             "createdAt": record.created_at,
@@ -728,6 +731,7 @@ class RPARuntime:
         """组装回调 body：任务号 + 状态 + 计算结果。"""
         payload: dict = {
             "taskId": record.task_id,
+            "requestId": record.request.request_id,
             "statusCode": record.status,
             "status": TASK_STATUS_TEXT.get(record.status, record.status),
             "success": False,

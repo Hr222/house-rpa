@@ -202,6 +202,7 @@ python -m scripts.batch_inquiry_evaluation --limit 5
 
 - **回调优先**：配置 `RPA_CALLBACK_URL` 后任务结束主动 `POST {CALLBACK_URL}/{taskId}`
   （失败重试 3 次），无需轮询；GET 仅兜底。
+- `requestId` 是客户端请求标识，`taskId` 是服务端生成的 UUID；两者会在受理响应、查询结果和回调中同时返回。
 - `GET /inquiries/{taskId}` 完成后返回 `quoteAvg/dealAvg/finalPrice/success/
   statusCode/branchCode/branch(/note/candidates/弱参考字段)`；`NO_DATA` 也是
   `COMPLETED`（HTTP 200 + `success=false`）。

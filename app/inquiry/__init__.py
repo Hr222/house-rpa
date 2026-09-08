@@ -2,7 +2,8 @@
 """跨模块的询价业务编排：小区确认、任务生命周期与结果聚合。
 
 负责：小区身份确认并持有 ConfirmedCommunityContext、询价任务的创建
-与弱持久化（persist/inquiries/{taskId}.json）及崩溃恢复、把原始 RPA
+与弱持久化（persist/inquiries/{taskId}.json）及崩溃恢复。taskId 由服务端生成，
+客户端 requestId 作为关联标识随快照保留。原始 RPA
 采集结果交给算法聚合成最终询价结果。
 不负责：浏览器与平台采集（app.rpa）、房源入库
 （app.property_records）、小区主数据维护（app.community_data）。
