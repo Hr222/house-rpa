@@ -169,42 +169,83 @@ class RPARuntime:
         if self.service is not None:
             return
 
+        # stop() 会清理全局人工风控协调器；支持停服后再次启动时重新绑定当前 Runtime。
+        set_manual_verify_lock(self._platform_check_lock)
+        set_manual_verify_state_callback(self._on_manual_verify_state)
         self.status = ServiceStatus.BOOTING
         self.message = "启动浏览器中"
         self._initial_window_layout_done = False
 
-        # 网页平台各自使用独立浏览器；接口型平台使用外部应用会话。
+        try:
+            # 网页平台各自使用独立浏览器；接口型平台使用外部应用会话。
+            self.browsers = {}
+            for adapter in self._browser_adapters():
+                browser = await self.browser_factory()
+                self.browsers[adapter.code] = browser
+                log.info("browser started for %s", adapter.name)
+
+            self.service = RPAInquiryService(self.browsers, self.adapters)
+            sessions = await self.service.start()
+
+            for code, session in sessions.items():
+                adapter = self.adapter_map.get(code)
+                ready_hint = getattr(adapter, "ready_confirmation_hint", None)
+                self.platform_states[code] = PlatformRuntimeState(
+                    code=code,
+                    name=session.name,
+                    start_url=session.start_url,
+                    status=PlatformHealthStatus.WAIT_LOGIN,
+                    message=ready_hint or "等待人工登录后确认",
+                )
+
+            self.status = ServiceStatus.WAIT_LOGIN
+            self.message = "等待人工登录并确认平台就绪"
+            self._focus_browser_window("启动完成，等待登录")
+            self.worker_task = asyncio.create_task(self._worker_loop(), name="rpa-worker")
+            self.keepalive_task = asyncio.create_task(self._keepalive_loop(), name="rpa-keepalive")
+            self.heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="rpa-heartbeat")
+            if self.enable_console_ready_confirmation:
+                self.console_confirmation_task = asyncio.create_task(
+                    self._console_confirmation_loop(),
+                    name="rpa-console-confirmation",
+                )
+        except Exception as exc:
+            await self._rollback_start(exc)
+            raise
+
+    async def _rollback_start(self, exc: BaseException) -> None:
+        """启动阶段失败时释放已创建资源，并保留可重试的干净状态。"""
+        for task in (
+            self.worker_task,
+            self.keepalive_task,
+            self.heartbeat_task,
+            self.console_confirmation_task,
+        ):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+        for code, browser in getattr(self, "browsers", {}).items():
+            try:
+                browser.stop()
+            except Exception as stop_exc:
+                log.warning("启动回滚关闭浏览器失败 code=%s: %s", code, stop_exc)
+
         self.browsers = {}
-        for adapter in self._browser_adapters():
-            browser = await self.browser_factory()
-            self.browsers[adapter.code] = browser
-            log.info("browser started for %s", adapter.name)
-
-        self.service = RPAInquiryService(self.browsers, self.adapters)
-        sessions = await self.service.start()
-
-        for code, session in sessions.items():
-            adapter = self.adapter_map.get(code)
-            ready_hint = getattr(adapter, "ready_confirmation_hint", None)
-            self.platform_states[code] = PlatformRuntimeState(
-                code=code,
-                name=session.name,
-                start_url=session.start_url,
-                status=PlatformHealthStatus.WAIT_LOGIN,
-                message=ready_hint or "等待人工登录后确认",
-            )
-
-        self.status = ServiceStatus.WAIT_LOGIN
-        self.message = "等待人工登录并确认平台就绪"
-        self._focus_browser_window("启动完成，等待登录")
-        self.worker_task = asyncio.create_task(self._worker_loop(), name="rpa-worker")
-        self.keepalive_task = asyncio.create_task(self._keepalive_loop(), name="rpa-keepalive")
-        self.heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="rpa-heartbeat")
-        if self.enable_console_ready_confirmation:
-            self.console_confirmation_task = asyncio.create_task(
-                self._console_confirmation_loop(),
-                name="rpa-console-confirmation",
-            )
+        self.service = None
+        self.platform_states = {}
+        self.worker_task = None
+        self.keepalive_task = None
+        self.heartbeat_task = None
+        self.console_confirmation_task = None
+        self.current_task_id = None
+        self._initial_window_layout_done = False
+        set_manual_verify_lock(self._platform_check_lock)
+        set_manual_verify_state_callback(self._on_manual_verify_state)
+        self.status = ServiceStatus.DEGRADED
+        self.message = f"启动失败，可重试: {exc}"
+        log.error("RPA Runtime 启动失败，已回滚资源: %s", exc)
 
     async def stop(self):
         for task in (self.worker_task, self.keepalive_task, self.heartbeat_task, self.console_confirmation_task):
@@ -466,7 +507,12 @@ class RPARuntime:
                 reason,
                 url,
             )
-            await wait_and_reload_after_block(page, adapter.detect_block, "汇总前")
+            await wait_and_reload_after_block(
+                page,
+                adapter.detect_block,
+                "汇总前",
+                platform_code=code,
+            )
 
     def _on_manual_verify_state(
         self,

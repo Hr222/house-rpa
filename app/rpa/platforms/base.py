@@ -336,10 +336,10 @@ async def human_linger(page, page_no: int, linger_seconds: float = None):
     await asyncio.sleep(secs)
 
 
-def _risk_context(detect_func, label: str) -> str:
+def _risk_context(detect_func, label: str, platform_code: str | None = None) -> str:
     """从平台检测函数推导可读的风控上下文。"""
     owner = getattr(detect_func, "__self__", None)
-    code = getattr(owner, "code", None)
+    code = platform_code or getattr(owner, "code", None)
     if not code:
         module = getattr(detect_func, "__module__", "")
         code = module.rsplit(".", 1)[-1] if module else "unknown"
@@ -706,7 +706,13 @@ def prepare_listing_data(
     return filtered, _quote_prices_from_snapshots(filtered)
 
 
-async def wait_and_reload_after_block(tab, detect_func, label: str = "页面") -> str:
+async def wait_and_reload_after_block(
+    tab,
+    detect_func,
+    label: str = "页面",
+    *,
+    platform_code: str | None = None,
+) -> str:
     """页面被风控时的统一处理：检测 → 等人回车 → 重取，直到恢复。
 
     各 adapter 在打开详情/成交 tab 后调用本函数，替代各自手写的
@@ -719,6 +725,7 @@ async def wait_and_reload_after_block(tab, detect_func, label: str = "页面") -
         tab: 详情/成交标签页（nodriver Tab）。
         detect_func: 平台的 detect_block(url, html) -> (bool, str)。
         label: 日志里的页面名称（如 "详情页" / "成交页"）。
+        platform_code: 平台代码（如 ``ke`` / ``lj``），模块级检测函数必须显式传入。
 
     Returns:
         页面恢复后的 html。风控未解除前不会返回，避免调用方解析风控页面。
@@ -730,7 +737,7 @@ async def wait_and_reload_after_block(tab, detect_func, label: str = "页面") -
         callback = _MANUAL_VERIFY_STATE_CALLBACK
         if callback is None:
             return
-        result = callback(_risk_context(detect_func, label), state, reason)
+        result = callback(_risk_context(detect_func, label, platform_code), state, reason)
         if inspect.isawaitable(result):
             await result
 
@@ -746,7 +753,7 @@ async def wait_and_reload_after_block(tab, detect_func, label: str = "页面") -
 
     await tab
     html = await tab.get_content()
-    context = _risk_context(detect_func, label)
+    context = _risk_context(detect_func, label, platform_code)
 
     async def _is_resolved() -> bool:
         nonlocal html
@@ -829,6 +836,7 @@ async def safe_select_and_click(
     detect_fn,
     block_label: str,
     click_label: str = "",
+    platform_code: str | None = None,
 ):
     """通用的"安全选择+点击"：找不到元素时 dump 现场 + 风控检测 + 恢复后重试 + 点击。
 
@@ -844,6 +852,7 @@ async def safe_select_and_click(
         detect_fn: 各平台的 detect_block(url, html) -> (bool, str)。
         block_label: 日志/风控 label（如 "第 3 页(翻页前-按钮缺失)"）。
         click_label: 点击日志 label（如 "page 3"）。
+        platform_code: 平台代码（如 ``lj``），用于模块级检测函数的风控状态归属。
 
     Returns:
         点击成功的 Element；无法找到或点击失败返回 None（优雅停止信号）。
@@ -856,7 +865,12 @@ async def safe_select_and_click(
     if not element:
         await dump_fn(page, dump_name)
         # 检测风控：被风控会替换 DOM 导致找不到按钮
-        await wait_and_reload_after_block(page, detect_fn, block_label)
+        await wait_and_reload_after_block(
+            page,
+            detect_fn,
+            block_label,
+            platform_code=platform_code,
+        )
         # 恢复后(或未被风控)重试找按钮
         try:
             element = await page.select(selector, timeout=3)

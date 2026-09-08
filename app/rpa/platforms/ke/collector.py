@@ -186,7 +186,7 @@ async def collect_listing_by_url(
         await asyncio.sleep(3)
 
         html = await wait_and_reload_after_block(
-            page, detect_block, f"小区挂牌页[{community_name}]"
+            page, detect_block, f"小区挂牌页[{community_name}]", platform_code="ke"
         )
         await _dump(page, "ke_listing_by_url_p1")
 
@@ -220,7 +220,7 @@ async def collect_listing_by_url(
             await page
             await asyncio.sleep(2)
             page_html = await wait_and_reload_after_block(
-                page, detect_block, f"翻页第 {page_no} 页"
+                page, detect_block, f"翻页第 {page_no} 页", platform_code="ke"
             )
             await _dump(page, f"ke_listing_by_url_p{page_no}")
             page_snapshots = parsers.parse_listing_snapshots(page_html, base_url=page.target.url)

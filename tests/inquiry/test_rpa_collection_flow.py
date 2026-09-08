@@ -17,6 +17,7 @@ from app.rpa.core.models import (
 from app.rpa.core.status import PlatformResultStatus, ServiceStatus, TaskStatus
 from app.rpa.runtime import RPARuntime
 from app.rpa.service import RPAInquiryService
+from app.rpa.platforms.base import _risk_context
 
 
 class CapturingPlatformAdapter:
@@ -148,3 +149,80 @@ def test_runtime_hands_raw_collection_to_injected_completion_handler() -> None:
     assert callback["requestId"] == "client-collection-001"
     assert task["result"]["branchCode"] == "TEST"
     assert terminal_events == [(task["taskId"], TaskStatus.COMPLETED)]
+
+
+def test_runtime_start_rolls_back_browsers_and_can_retry() -> None:
+    class Browser:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    class StartAdapter:
+        code = "start-test"
+        name = "启动测试平台"
+        uses_browser = True
+
+        def __init__(self) -> None:
+            self.open_attempts = 0
+
+        async def open_session(self, browser, new_tab=False) -> PlatformSession:
+            self.open_attempts += 1
+            if self.open_attempts == 1:
+                raise RuntimeError("模拟平台启动失败")
+            return PlatformSession(
+                code=self.code,
+                name=self.name,
+                start_url="https://example.test/",
+                page=None,
+                ready=True,
+            )
+
+        async def collect(self, browser, session, request):
+            raise AssertionError("启动测试不应进入采集")
+
+        def detect_block(self, url, html):
+            return False, ""
+
+    async def run() -> tuple[list[Browser], RPARuntime]:
+        browsers: list[Browser] = []
+        adapter = StartAdapter()
+
+        async def factory() -> Browser:
+            browser = Browser()
+            browsers.append(browser)
+            return browser
+
+        runtime = RPARuntime(adapters=[adapter], browser_factory=factory)
+        try:
+            await runtime.start()
+        except RuntimeError as exc:
+            assert str(exc) == "模拟平台启动失败"
+        else:
+            raise AssertionError("第一次启动应失败")
+
+        assert runtime.service is None
+        assert runtime.browsers == {}
+        assert runtime.platform_states == {}
+        assert runtime.status == ServiceStatus.DEGRADED
+        assert [browser.stopped for browser in browsers] == [True]
+
+        await runtime.start()
+        assert runtime.service is not None
+        assert runtime.status == ServiceStatus.WAIT_LOGIN
+        await runtime.stop()
+        return browsers, runtime
+
+    browsers, runtime = asyncio.run(run())
+    assert [browser.stopped for browser in browsers] == [True, True]
+    assert runtime.service is None
+
+
+def test_risk_context_uses_explicit_platform_code_for_module_function() -> None:
+    def module_detect_block(url, html):
+        return False, ""
+
+    module_detect_block.__module__ = "app.rpa.platforms.ke.collector"
+
+    assert _risk_context(module_detect_block, "挂牌页", "ke") == "贝壳(ke)/挂牌页"

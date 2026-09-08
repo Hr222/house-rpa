@@ -130,6 +130,7 @@ async def _click_deal_page_number(page, page_no: int) -> Optional[str]:
         detect_fn=detect_block,
         block_label=f"成交第 {page_no} 页(翻页前-按钮缺失)",
         click_label=f"deal page {page_no}",
+        platform_code="lj",
     )
     if element is None:
         return None
@@ -241,7 +242,9 @@ async def _collect_deals_by_url(
         await page.get(page_url)
         await page
         await asyncio.sleep(2)
-        html = await wait_and_reload_after_block(page, detect_block, label)
+        html = await wait_and_reload_after_block(
+            page, detect_block, label, platform_code="lj"
+        )
         await _dump(page, dump_name)
         raw = parsers.parse_deal_records(html)
         return [record for record in raw if _keep(record)], len(raw), html
@@ -250,7 +253,7 @@ async def _collect_deals_by_url(
     await page
     await asyncio.sleep(3)
     first_html = await wait_and_reload_after_block(
-        page, detect_block, f"小区成交页[{community_name}]"
+        page, detect_block, f"小区成交页[{community_name}]", platform_code="lj"
     )
     await _dump(page, "lj_deal_by_url_p1")
 
@@ -326,7 +329,7 @@ async def _collect_deals_by_url(
                 notes.append(note)
                 break
             page_html = await wait_and_reload_after_block(
-                page, detect_block, f"成交点击第 {page_no} 页"
+                page, detect_block, f"成交点击第 {page_no} 页", platform_code="lj"
             )
             await _dump(page, f"lj_deal_by_url_p{page_no}")
             raw = parsers.parse_deal_records(page_html)
@@ -374,7 +377,7 @@ async def collect_listing_by_url(
         await page
         await asyncio.sleep(3)
         html = await wait_and_reload_after_block(
-            page, detect_block, f"小区挂牌页[{community_name}]"
+            page, detect_block, f"小区挂牌页[{community_name}]", platform_code="lj"
         )
         await _dump(page, "lj_listing_by_url_p1")
 
@@ -401,7 +404,7 @@ async def collect_listing_by_url(
                 await page
                 await asyncio.sleep(2)
                 page_html = await wait_and_reload_after_block(
-                    page, detect_block, f"在售翻页第 {page_no} 页"
+                    page, detect_block, f"在售翻页第 {page_no} 页", platform_code="lj"
                 )
                 await _dump(page, f"lj_listing_by_url_p{page_no}")
                 page_snapshots = parsers.parse_listing_snapshots(page_html, base_url=page.target.url)

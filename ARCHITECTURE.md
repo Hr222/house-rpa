@@ -109,6 +109,7 @@ flowchart TD
 - 已注册平台的浏览器实例与 `PlatformSession`。
 - 平台健康状态 `platform_states`、比价任务记录 `tasks`、串行队列 `queue`、当前任务。
 - 保活、心跳、控制台人工确认三个后台协程；平台检查互斥锁 `_platform_check_lock`。
+- 启动阶段任一浏览器或平台会话失败时回滚已创建资源，清空半启动状态并允许重试。
 - GET 查询限流（`_last_get_at`）与结果回调推送（`CALLBACK_URL`）。
 
 **Service `app/rpa/service.py`**：管理平台常驻会话；每次接收一个 `InquiryRequest`，
@@ -133,7 +134,7 @@ flowchart TD
 | `wait_for_manual_unblock()` | 风控/登录拦截时等待人工处理 |
 | `detect_common_block(url, html)` / `is_generic_captcha_page(html)` | 统一公共风控兜底检测 |
 | `detect_block_with_common(detect_func, url, html)` | 平台专属规则优先，未命中叠加公共兜底 |
-| `wait_and_reload_after_block(tab, detect_func, label)` | 风控统一处理：检测→等人回车→重取，直到恢复 |
+| `wait_and_reload_after_block(tab, detect_func, label, platform_code=...)` | 风控统一处理：检测→等人回车→重取，直到恢复；模块级检测函数显式传入平台代码 |
 | `_human_click(page, element, label)` | 【回退】真人节奏点击（JS 优先），仅成交翻页按钮兜底路径使用 |
 | `safe_select_and_click(page, selector, ...)` | 【回退】安全选择+点击：找不到元素时 dump + 风控检测 + 恢复后重试（lj 成交翻页兜底） |
 | `community_name_match(request_name, captured_name)` | 结构化小区名匹配；双方带期数且不同时不匹配 |

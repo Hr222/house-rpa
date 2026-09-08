@@ -222,7 +222,7 @@ async def _collect_deals_by_url(
     await page
     await asyncio.sleep(3)
     first_html = await wait_and_reload_after_block(
-        page, detect_block, f"小区成交页[{community_name}]"
+        page, detect_block, f"小区成交页[{community_name}]", platform_code="fang"
     )
     await _dump(page, "fang_deal_by_url_p1")
 
@@ -242,7 +242,7 @@ async def _collect_deals_by_url(
             await page
             await asyncio.sleep(2)
             page_html = await wait_and_reload_after_block(
-                page, detect_block, f"成交翻页第 {page_no} 页"
+                page, detect_block, f"成交翻页第 {page_no} 页", platform_code="fang"
             )
             await _dump(page, f"fang_deal_by_url_p{page_no}")
             page_raw = parsers.parse_deal_records(page_html)
@@ -263,7 +263,7 @@ async def _collect_deals_by_url(
                 log.warning("[成交] 第 %d 页无法翻页，停止", page_no)
                 break
             page_html = await wait_and_reload_after_block(
-                page, detect_block, f"成交点击第 {page_no} 页"
+                page, detect_block, f"成交点击第 {page_no} 页", platform_code="fang"
             )
             await _dump(page, f"fang_deal_by_url_p{page_no}")
             page_raw = parsers.parse_deal_records(page_html)
@@ -307,7 +307,7 @@ async def collect_listing_by_url(
             await page
             await asyncio.sleep(3)
             html = await wait_and_reload_after_block(
-                page, detect_block, f"小区挂牌页[{community_name}]"
+                page, detect_block, f"小区挂牌页[{community_name}]", platform_code="fang"
             )
             try:
                 check_soft_block_elapsed(opened_at, f"挂牌页[{community_name}]")
@@ -359,7 +359,7 @@ async def collect_listing_by_url(
                 await page
                 await asyncio.sleep(2)
                 page_html = await wait_and_reload_after_block(
-                    page, detect_block, f"在售翻页第 {page_no} 页"
+                    page, detect_block, f"在售翻页第 {page_no} 页", platform_code="fang"
                 )
                 await _dump(page, f"fang_listing_by_url_p{page_no}")
                 page_snapshots = parsers.parse_listing_snapshots(page_html, base_url=page.target.url)
