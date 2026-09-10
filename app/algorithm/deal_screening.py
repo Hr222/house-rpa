@@ -5,12 +5,12 @@ RPA 只回传原始成交明细（deal_records: {area, date, total_price, price}
 本模块负责把原始成交按请求面积与平台口径收敛为成交单价列表，供
 aggregation 组装 AlgorithmInput.deal_price_lists。平台差异只在
 "成交面积容差 + 是否筛近半年"两个参数（口径现状：统一严格面积区间，
-贝壳成交少不额外筛日期，链家/房天下加近半年，行舟深房 ±1㎡ + 近半年）。
+贝壳成交少不额外筛日期，链家/房天下加近半年）。
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Iterable, Mapping, Optional
 
 from app.algorithm.area_rules import DEAL_AREA_TOLERANCE
@@ -20,13 +20,23 @@ DEAL_SCREENING_RULES: dict[str, dict] = {
     "贝壳": {"tolerance": DEAL_AREA_TOLERANCE, "months": None},
     "链家": {"tolerance": DEAL_AREA_TOLERANCE, "months": 6},
     "房天下": {"tolerance": DEAL_AREA_TOLERANCE, "months": 6},
-    "行舟深房": {"tolerance": 1.0, "months": 6},
 }
 DEFAULT_RULE = {"tolerance": DEAL_AREA_TOLERANCE, "months": 6}
 
 
 def _cutoff_str(months: int) -> str:
     return (datetime.now() - timedelta(days=30 * months)).strftime("%Y-%m-%d")
+
+
+def _valid_deal_date(value: object) -> Optional[str]:
+    """标准化成交日期；无法识别时返回 None。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError:
+        return None
 
 
 def screen_deal_records(
@@ -63,11 +73,17 @@ def screen_deal_records(
         price = record.get("price")
         if area is None or price is None:
             continue
-        if not (area_min <= float(area) <= area_max):
+        try:
+            area_value = float(area)
+        except (TypeError, ValueError):
+            continue
+        if not (area_min <= area_value <= area_max):
             continue
         date_str = record.get("date")
-        if cutoff is not None and date_str and str(date_str) < cutoff:
-            continue
+        if cutoff is not None:
+            normalized_date = _valid_deal_date(date_str)
+            if normalized_date is None or normalized_date < cutoff:
+                continue
         try:
             value = float(price)
         except (TypeError, ValueError):

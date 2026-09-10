@@ -11,7 +11,7 @@ from app.algorithm.area_rules import LISTING_AREA_TOLERANCE
 from app.algorithm.config import get_weighted_median_discount
 from app.algorithm.listing_dedup import deduplicate_listings
 from app.algorithm.models import AlgorithmInput, PriceCandidate
-from app.algorithm.selection import ListingSelection, listing_area_bounds, select_listings_for_estimation
+from app.algorithm.selection import ListingSelection, select_listings_for_estimation
 from app.algorithm.weighted_median import (
     WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION,
     evaluate_algorithm,

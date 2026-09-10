@@ -3,9 +3,39 @@
 
 from __future__ import annotations
 
+from app.algorithm.deal_screening import screen_deal_records
+from app.algorithm.weighted_median import find_weighted_price_candidates
 from app.inquiry.aggregation import build_inquiry_result
 from app.rpa.core.models import ListingSnapshot, PlatformResult
 from app.rpa.core.status import PlatformResultStatus
+
+
+def test_weighted_candidates_give_each_platform_equal_total_weight() -> None:
+    """平台房源数量不同，不应让房源更多的平台支配价格峰。"""
+    candidates = find_weighted_price_candidates(
+        [[100.0, 100.0, 101.0], [110.0] * 10],
+        quote_discount=1.0,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].quote_price == 105.5
+    assert candidates[0].frequency == 1.0
+
+
+def test_deal_screening_skips_invalid_area_and_dates_when_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.algorithm.deal_screening._cutoff_str",
+        lambda _months: "2026-01-01",
+    )
+    records = [
+        {"area": "not-an-area", "date": "2026-01-02", "price": 90000},
+        {"area": 89.5, "date": None, "price": 100000},
+        {"area": 89.5, "date": "not-a-date", "price": 110000},
+        {"area": 89.5, "date": "2025-12-31", "price": 120000},
+        {"area": 89.5, "date": "2026-01-02", "price": 130000},
+    ]
+
+    assert screen_deal_records(records, 89.5, platform="链家") == [130000.0]
 
 
 def test_aggregation_uses_raw_snapshots_and_returns_final_price(monkeypatch) -> None:

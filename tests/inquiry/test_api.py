@@ -71,3 +71,35 @@ def test_create_inquiry_handles_community_resolution_before_enqueue() -> None:
     assert accepted.json()["data"]["requestId"] == "order-001"
     assert len(task_manager.calls) == 1
     assert task_manager.calls[0].community_id == first.community_id
+
+
+def test_weighted_median_discount_endpoints_read_and_update_value(monkeypatch) -> None:
+    runtime = FakeRuntime()
+    task_manager = FakeTaskManager()
+    app = create_app(
+        runtime=runtime,
+        manage_runtime=False,
+        inquiry_orchestrator=InquiryOrchestrator(
+            task_manager,
+            community_resolver=lambda *_args: [community()],
+        ),
+    )
+    monkeypatch.setattr("app.api.read_weighted_median_discount", lambda: 0.9)
+    monkeypatch.setattr("app.api.is_weighted_median_discount_default", lambda: True)
+    monkeypatch.setattr("app.api.set_weighted_median_discount", lambda value: value)
+
+    with TestClient(app) as client:
+        current = client.get("/admin/algorithm/weighted-median-discount")
+        updated = client.put(
+            "/admin/algorithm/weighted-median-discount",
+            json={"weightedMedianDiscount": 0.85},
+        )
+
+    assert current.status_code == 200
+    assert current.json() == {
+        "code": "OK",
+        "message": "查询成功",
+        "data": {"weightedMedianDiscount": 0.9, "isDefault": True},
+    }
+    assert updated.status_code == 200
+    assert updated.json()["data"]["weightedMedianDiscount"] == 0.85

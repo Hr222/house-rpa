@@ -6,7 +6,6 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from math import isclose
-from statistics import median as statistics_median
 from typing import Iterable, Optional
 
 from app.algorithm.models import (
@@ -81,7 +80,7 @@ def _weighted_median(
 def _build_platform_weighted_prices(
     quote_price_lists: Iterable[Iterable[float]],
 ) -> list[_WeightedPrice]:
-    """每条有效房源计一票；频次是业务信号。"""
+    """平台总权重各计一份，平台内有效房源均分该平台权重。"""
     weighted_prices: list[_WeightedPrice] = []
     for quote_prices in quote_price_lists:
         valid_prices = [
@@ -95,7 +94,7 @@ def _build_platform_weighted_prices(
         weighted_prices.extend(
             _WeightedPrice(
                 price=price,
-                weight=1.0,
+                weight=1.0 / len(valid_prices),
             )
             for price in valid_prices
         )
@@ -107,42 +106,42 @@ def _within_relative_deviation(price: float, center: float, limit: float) -> boo
 
 
 def _mode_members(
-    prices: list[float],
+    prices: list[_WeightedPrice],
     seed: float,
     max_relative_deviation: float,
-) -> tuple[float, list[float]]:
+) -> tuple[float, list[_WeightedPrice]]:
     """查找局部价格众数，并对其中心值进行一次修正。"""
     members = [
-        price
-        for price in prices
-        if _within_relative_deviation(price, seed, max_relative_deviation)
+        item
+        for item in prices
+        if _within_relative_deviation(item.price, seed, max_relative_deviation)
     ]
     if not members:
         return seed, []
-    center = statistics_median(members)
+    center = _weighted_median(members) or seed
     members = [
-        price
-        for price in prices
-        if _within_relative_deviation(price, center, max_relative_deviation)
+        item
+        for item in prices
+        if _within_relative_deviation(item.price, center, max_relative_deviation)
     ]
-    return statistics_median(members) if members else center, members
+    return _weighted_median(members) or center, members
 
 
 def _find_price_modes(
-    prices: list[float],
+    prices: list[_WeightedPrice],
     max_relative_deviation: float = WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION,
-) -> list[tuple[float, list[float]]]:
+) -> list[tuple[float, list[_WeightedPrice]]]:
     """查找频次峰值，不合并彼此分离的价格群体。"""
     if not prices:
         return []
 
-    ranked: list[tuple[int, float]] = []
-    for seed in sorted(set(prices)):
+    ranked: list[tuple[float, float]] = []
+    for seed in sorted({item.price for item in prices}):
         center, members = _mode_members(prices, seed, max_relative_deviation)
         if members:
-            ranked.append((len(members), center))
+            ranked.append((sum(item.weight for item in members), center))
 
-    selected: list[tuple[float, list[float]]] = []
+    selected: list[tuple[float, list[_WeightedPrice]]] = []
     suppression_limit = max_relative_deviation * 2
     for _, center in sorted(ranked, key=lambda item: (-item[0], item[1])):
         if any(
@@ -161,10 +160,12 @@ def _find_price_modes(
 
     # 非极大值抑制会合并相邻的重叠窗口。若被合并的窗口仍包含至少两条未被
     # 已选峰覆盖的报价，它具有独立的密集核心，必须恢复为单独价格峰。
-    selected_member_keys = {tuple(sorted(members)) for _, members in selected}
+    selected_member_keys = {
+        tuple(sorted(item.price for item in members)) for _, members in selected
+    }
     covered_members: Counter[float] = Counter()
     for _, members in selected:
-        covered_members |= Counter(members)
+        covered_members |= Counter(item.price for item in members)
 
     for _, center in sorted(ranked, key=lambda item: (-item[0], item[1])):
         refined_center, members = _mode_members(
@@ -172,7 +173,7 @@ def _find_price_modes(
             center,
             max_relative_deviation,
         )
-        member_key = tuple(sorted(members))
+        member_key = tuple(sorted(item.price for item in members))
         if len(members) <= 1 or member_key in selected_member_keys:
             continue
         if any(
@@ -182,7 +183,9 @@ def _find_price_modes(
             for selected_center, _ in selected
         ):
             continue
-        uncovered_count = sum((Counter(members) - covered_members).values())
+        uncovered_count = sum(
+            (Counter(item.price for item in members) - covered_members).values()
+        )
         if uncovered_count < 2:
             continue
         selected.append((refined_center, members))
@@ -202,14 +205,11 @@ def find_weighted_price_candidates(
     仅剔除未能形成自身价格簇的孤立点；与主峰频次相差较大的密集价格簇仍是独立峰，
     不会仅因频次或数值偏低而被丢弃。
     """
-    prices = [
-        item.price
-        for item in _build_platform_weighted_prices(quote_price_lists)
-    ]
-    if not prices:
+    weighted_prices = _build_platform_weighted_prices(quote_price_lists)
+    if not weighted_prices:
         return []
 
-    modes = _find_price_modes(prices, max_relative_deviation)
+    modes = _find_price_modes(weighted_prices, max_relative_deviation)
     if not modes:
         return []
 
@@ -219,18 +219,23 @@ def find_weighted_price_candidates(
         if len(members) > 1
     ]
     significant = dense_modes or modes
-    total_count = len(prices)
-    return [
-        PriceCandidate(
-            quote_price=statistics_median(members),
-            final_price=statistics_median(members) * quote_discount,
-            count=len(members),
-            frequency=len(members) / total_count,
-            min_price=min(members),
-            max_price=max(members),
+    total_weight = sum(item.weight for item in weighted_prices)
+    candidates: list[PriceCandidate] = []
+    for _, members in significant:
+        quote_price = _weighted_median(members)
+        if quote_price is None:
+            continue
+        candidates.append(
+            PriceCandidate(
+                quote_price=quote_price,
+                final_price=quote_price * quote_discount,
+                count=len(members),
+                frequency=sum(item.weight for item in members) / total_weight,
+                min_price=min(item.price for item in members),
+                max_price=max(item.price for item in members),
+            )
         )
-        for _, members in significant
-    ]
+    return candidates
 
 
 def _find_narrowest_weighted_interval(

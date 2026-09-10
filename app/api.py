@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.algorithm import (
-    get_weighted_median_discount,
+    get_weighted_median_discount as read_weighted_median_discount,
     is_weighted_median_discount_default,
     set_weighted_median_discount,
 )
@@ -265,12 +265,12 @@ def create_app(
         return {"code": "OK", "message": "查询成功", "data": data}
 
     @app.get("/admin/algorithm/weighted-median-discount")
-    async def get_weighted_median_discount():
+    async def get_weighted_median_discount_config():
         return {
             "code": "OK",
             "message": "查询成功",
             "data": {
-                "weightedMedianDiscount": get_weighted_median_discount(),
+                "weightedMedianDiscount": read_weighted_median_discount(),
                 "isDefault": is_weighted_median_discount_default(),
             },
         }
