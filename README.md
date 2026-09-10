@@ -228,7 +228,7 @@ python -m scripts.batch_inquiry_evaluation --limit 5
 | 回车后平台状态不一致 | `runtime.py` 确认循环、保活日志、`/admin/status` |
 | 验证码被识别为登录失效 | 平台 `detect_block` marker（基于真实 dump 校准）、`PlatformHealthEvent` |
 | 任务异常但平台被降级 | `_apply_platform_results()` 版本保护 |
-| 平台有数据但返回无数据 | 小区匹配、入口白名单、`prepare_listing_data()` |
+| 平台有数据但返回无数据 | 小区归属匹配、入口白名单、平台 collector 的逐页过滤 |
 | 价格偏差异常 | `app/algorithm/` 与平台原始结果明细 |
 
 ```powershell

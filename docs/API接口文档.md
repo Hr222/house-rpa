@@ -370,7 +370,7 @@ find_nearby_communities(
 | `quotePrice` | 该价格峰的房源落点中位数（元/㎡） |
 | `finalPrice` | 单峰为按在售折扣计算后的价格；多峰为该峰中位数直接返回的价格（元/㎡） |
 | `count` | 落入该价格峰的房源数量 |
-| `frequency` | 该峰占全部有效房源的比例 |
+| `frequency` | 该峰占全部有效房源权重的比例（平台总权重相等，平台内房源均分） |
 | `minPrice` / `maxPrice` | 该价格峰的落点范围 |
 
 多峰时服务会直接选择最低价格峰的中位数作为 `quoteAvg` 和 `finalPrice`，不再打折；`candidates` 仍保留全部价格峰供审计展示。客户端不应再次平均或强行合并候选。
