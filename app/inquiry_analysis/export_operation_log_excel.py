@@ -7,7 +7,6 @@ import argparse
 import ast
 from copy import copy
 import re
-import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,12 +15,6 @@ from typing import Optional
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-
-# 支持 `python app/inquiry_analysis/export_operation_log_excel.py ...` 直接执行。
-# 否则 sys.path 只有 app/inquiry_analysis，可能误导入虚拟环境中的同名第三方 app 包。
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.algorithm.area_rules import deal_area_bounds
 from app.algorithm.branch_text import BRANCH_TEXT

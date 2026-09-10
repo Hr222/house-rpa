@@ -143,7 +143,6 @@ def _candidate_from_block(block: str, result_url: str, community_name: str) -> O
         re.I | re.S,
     )
     for link in links:
-        attrs = link.group("attrs")
         captured_name = _visible_text(link.group("body"))
         if not community_name_match(community_name, captured_name):
             continue

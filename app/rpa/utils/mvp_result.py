@@ -4,9 +4,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
-from app.rpa.core.price_utils import format_price, round_price
+from app.rpa.core.price_utils import format_price
 
 log = logging.getLogger("mvp-result")
 

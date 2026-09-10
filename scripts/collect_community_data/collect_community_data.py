@@ -29,15 +29,11 @@ import json
 import logging
 from dataclasses import asdict
 from pathlib import Path
-import sqlite3
 import sys
 import time
+from typing import Optional
 
 import nodriver as uc
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.algorithm.branch_text import BRANCH_TEXT
 from app.community_data import resolve_communities
@@ -51,6 +47,7 @@ from app.rpa.utils.logging_utils import setup_logging
 from scripts.collect_community_data.models import CommunityCollection
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 setup_logging()
 log = logging.getLogger(__name__)
 
