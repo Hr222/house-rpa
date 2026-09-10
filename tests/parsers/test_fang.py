@@ -44,6 +44,20 @@ def test_parse_listing_and_deal_records_for_storage():
     assert price == 74262.0
 
 
+def test_community_page_mvp_uses_shared_soft_block_protocol():
+    """独立房天下初始化脚本应复用正式采集链路的软风控协议。"""
+    from app.rpa.platforms.fang.collector import (
+        FangSoftBlockError,
+        check_soft_block_elapsed,
+    )
+    from scripts.initialize_community_page.community_page import (
+        fang_community_page_mvp,
+    )
+
+    assert fang_community_page_mvp.FangSoftBlockError is FangSoftBlockError
+    assert fang_community_page_mvp.check_soft_block_elapsed is check_soft_block_elapsed
+
+
 # ============================================================
 # 空态/单条边界（基于真实 dump 校准，见 debug/20260903_1805_fang_listing_*）
 # marker：空态页主体 shop_no 容器 + "很抱歉，没有找到…相符的房源"；

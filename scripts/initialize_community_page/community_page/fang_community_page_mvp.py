@@ -41,6 +41,7 @@ import nodriver as uc
 from app.community_data import resolve_communities
 from app.rpa.core import config
 from app.rpa.platforms.fang import collector as fang_adapter
+from app.rpa.platforms.fang.collector import FangSoftBlockError, check_soft_block_elapsed
 from app.rpa.platforms.fang import parser as fang_parsers
 from app.rpa.platforms.fang.constants import FANG_SOFT_BLOCK_SECONDS
 from app.rpa.platforms.base import community_name_match, has_matching_community_snapshots
@@ -493,7 +494,7 @@ async def main(
                         FANG_SOFT_BLOCK_SECONDS,
                         len(summaries),
                     )
-                    print(f"\n[停止] 连续新会话仍触发风控，请人工介入后重跑剩余小区")
+                    print("\n[停止] 连续新会话仍触发风控，请人工介入后重跑剩余小区")
                     break
                 log.warning(
                     "判定触发软风控（%s），关闭浏览器重开新会话，重试小区[%s]（第 %d 次重开）",
