@@ -78,6 +78,9 @@ pip install -r requirements.txt
 python -m scripts.api_server --debug --manual-login
 ```
 
+服务地址和端口可在项目根目录 `.env` 中通过 `API_HOST`、`API_PORT` 配置；命令行
+`--port` 只覆盖本次启动的端口。
+
 | 参数 | 作用 |
 |---|---|
 | `--debug`（兼容旧名 `--excel`） | 开启 RPA 调试模式，导出关键页面 HTML 到 `debug/` 目录 |

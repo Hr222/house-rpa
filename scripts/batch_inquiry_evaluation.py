@@ -11,21 +11,25 @@
 """
 
 import argparse
-import time
-import sys
-import requests
 from datetime import datetime
 from pathlib import Path
+import sys
+import time
+
+import requests
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+from app.rpa.core import config
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_INPUT = _PROJECT_ROOT / "example" / "二手房心理预期价格示例.xlsx"
 _DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "results"
 
 # ─── 配置 ──────────────────────────────────────────────
-BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = f"http://{config.API_HOST}:{config.API_PORT}"
 POLL_INTERVAL = 6       # 轮询间隔秒数（>5 避免连续 429）
 MAX_WAIT = 600          # 单任务软等待阈值；超过后只报警，不判失败，继续阻塞等待
 REQUEST_TIMEOUT = 15    # 单次 HTTP 请求超时
@@ -511,7 +515,6 @@ for i, r in enumerate(results):
     _put(row, "备注", r.get("备注") or "", wrap=True)
 
 # 列宽
-from openpyxl.utils import get_column_letter
 width_map = {
     "询价单价": 14, "差距比例%": 14, "偏差评级": 16,
     "在售均价": 14, "成交均价": 14, "决策分支": 26,

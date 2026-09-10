@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from pathlib import Path
 
@@ -56,11 +57,47 @@ DEBUG_DIR = BASE_DIR / "debug"
 #日志输出文件夹
 LOG_DIR = BASE_DIR / "logs"
 # ===== 浏览器 =====
-BROWSER_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+DEFAULT_BROWSER_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+
+
+def _browser_path_from_env() -> str:
+    """读取 Chrome 可执行文件路径；未配置时使用默认路径。"""
+    return os.getenv("BROWSER_PATH", DEFAULT_BROWSER_PATH).strip() or DEFAULT_BROWSER_PATH
+
+
+BROWSER_PATH = _browser_path_from_env()
 
 # ===== API =====
-API_HOST = "127.0.0.1"
-API_PORT = 8000
+DEFAULT_API_HOST = "127.0.0.1"
+DEFAULT_API_PORT = 8000
+
+
+def _api_port_from_env() -> int:
+    """读取 API 端口；配置非法时回退默认值。"""
+    raw_value = os.getenv("API_PORT")
+    if raw_value is None:
+        return DEFAULT_API_PORT
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        log.warning(
+            "环境配置 API_PORT=%r 不是有效整数，使用默认值 %d",
+            raw_value,
+            DEFAULT_API_PORT,
+        )
+        return DEFAULT_API_PORT
+    if not 1 <= value <= 65535:
+        log.warning(
+            "环境配置 API_PORT=%r 必须在 1~65535 范围内，使用默认值 %d",
+            raw_value,
+            DEFAULT_API_PORT,
+        )
+        return DEFAULT_API_PORT
+    return value
+
+
+API_HOST = os.getenv("API_HOST", DEFAULT_API_HOST).strip() or DEFAULT_API_HOST
+API_PORT = _api_port_from_env()
 
 # ===== 结果回调（采集完成后主动 POST 推送给客户端，客户端不轮询）=====
 # 格式：POST {CALLBACK_URL}/{task_id}，body 为询价结果 JSON。
@@ -70,7 +107,34 @@ CALLBACK_URL = os.getenv("RPA_CALLBACK_URL") or None
 # ===== GET 查询限流（防止客户端高强度轮询）=====
 # 同一 taskId 两次 GET /inquiries/{taskId} 的最小间隔秒数。
 # 客户端主要靠回调拿结果，GET 只是偶发兜底，故设下限。
-GET_INQUIRY_MIN_INTERVAL = float(os.getenv("RPA_GET_MIN_INTERVAL", "10"))
+DEFAULT_GET_INQUIRY_MIN_INTERVAL = 10.0
+
+
+def _get_inquiry_min_interval_from_env() -> float:
+    """读取 GET 查询间隔；非法配置时回退默认值。"""
+    raw_value = os.getenv("RPA_GET_MIN_INTERVAL")
+    if raw_value is None:
+        return DEFAULT_GET_INQUIRY_MIN_INTERVAL
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        log.warning(
+            "环境配置 RPA_GET_MIN_INTERVAL=%r 不是有效数字，使用默认值 %.1f",
+            raw_value,
+            DEFAULT_GET_INQUIRY_MIN_INTERVAL,
+        )
+        return DEFAULT_GET_INQUIRY_MIN_INTERVAL
+    if not math.isfinite(value) or value < 0:
+        log.warning(
+            "环境配置 RPA_GET_MIN_INTERVAL=%r 必须是非负有限数字，使用默认值 %.1f",
+            raw_value,
+            DEFAULT_GET_INQUIRY_MIN_INTERVAL,
+        )
+        return DEFAULT_GET_INQUIRY_MIN_INTERVAL
+    return value
+
+
+GET_INQUIRY_MIN_INTERVAL = _get_inquiry_min_interval_from_env()
 
 # ===== 钉钉机器人通知 =====
 # 群机器人 webhook 地址（完整 URL），未配置则不发送通知。
