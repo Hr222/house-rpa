@@ -12,18 +12,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import Awaitable, Callable, Optional
 
-# 说明（算法层剥离，2026-09-04）：URL 白名单直达/全量抓取暂不做面积筛选，
-# 面积口径由算法层（app.algorithm）统一处理；下述面积区间工具仅服务历史
-# 搜索式采集的"面积无数据"判定，代码保留不删除（随旧采集链路一并清理时移除）。
-from app.algorithm.area_rules import (
-    LISTING_AREA_TOLERANCE,
-    deal_area_bounds,
-    listing_area_bounds,
-)
-from app.rpa.core import config
 from app.rpa.core.models import (
     InquiryRequest,
-    ListingSnapshot,
     PlatformResult,
     PlatformSession,
 )
@@ -38,7 +28,6 @@ _PLATFORM_NAMES = {
     "ke": "贝壳",
     "lj": "链家",
     "lyj": "乐有家",
-    "xzsfbj": "行舟深房",
 }
 
 
@@ -328,14 +317,6 @@ class PlatformAdapter(ABC):
         raise NotImplementedError(f"平台[{self.code}] 未实现 parse_deal_records 能力")
 
 
-async def human_linger(page, page_no: int, linger_seconds: float = None):
-    """翻页后模拟停留，所有平台共用。"""
-    from app.rpa.core import config
-    secs = linger_seconds if linger_seconds is not None else config.PAGE_LINGER_SECONDS
-    log.info("lingering on result page %s for %.1fs", page_no, secs)
-    await asyncio.sleep(secs)
-
-
 def _risk_context(detect_func, label: str, platform_code: str | None = None) -> str:
     """从平台检测函数推导可读的风控上下文。"""
     owner = getattr(detect_func, "__self__", None)
@@ -611,101 +592,6 @@ def filter_snapshots_by_community(snapshots: list, community_name: str) -> list:
         if community_name_match(community_name, s.community_name or "")
     ]
 
-
-    # [遗留] 旧搜索式采集链路配套；URL 白名单直达不再使用（保留不删除，待统一清理批次移除）。
-def filter_snapshots_by_area(
-    snapshots: list[ListingSnapshot],
-    area: float,
-    tolerance: float = LISTING_AREA_TOLERANCE,
-) -> list[ListingSnapshot]:
-    """按房源实际面积过滤，默认命中请求面积 ±1㎡，面积缺失不命中。"""
-    area_min, area_max = listing_area_bounds(area, tolerance)
-    return [
-        snapshot
-        for snapshot in snapshots
-        if snapshot.area is not None and area_min <= snapshot.area <= area_max
-    ]
-
-
-def _quote_prices_from_snapshots(snapshots: list[ListingSnapshot]) -> list[float]:
-    return [
-        snapshot.unit_price
-        for snapshot in snapshots
-        if snapshot.unit_price is not None and snapshot.unit_price > 0
-    ]
-
-
-    # [遗留] 旧搜索式采集链路配套；URL 白名单直达不再使用（保留不删除，待统一清理批次移除）。
-def listing_filter_summary(
-    snapshots: list[ListingSnapshot],
-    community_name: str,
-    area: float,
-    tolerance: float = LISTING_AREA_TOLERANCE,
-) -> str:
-    """生成在售房源过滤日志，区分小区命中和面积命中。"""
-    community_snapshots = filter_snapshots_by_community(snapshots, community_name)
-    area_snapshots = filter_snapshots_by_area(
-        community_snapshots,
-        area,
-        tolerance,
-    )
-    area_min, area_max = listing_area_bounds(area, tolerance)
-    missing_area_count = sum(item.area is None for item in community_snapshots)
-    return (
-        f"原始 {len(snapshots)} 条 -> 命中小区 {len(community_snapshots)} 条 -> "
-        f"命中面积 {len(area_snapshots)} 条 "
-        f"(请求面积 {area:.2f}㎡, 范围 {area_min:.2f}~{area_max:.2f}㎡, "
-        f"匹配容差±{tolerance:g}㎡, "
-        f"面积缺失 {missing_area_count} 条)"
-    )
-
-
-    # [遗留] 旧搜索式采集链路配套；URL 白名单直达不再使用（保留不删除，待统一清理批次移除）。
-def listing_no_data_reason(
-    snapshots: list[ListingSnapshot],
-    community_name: str,
-    area: float,
-    tolerance: float = LISTING_AREA_TOLERANCE,
-) -> str:
-    """生成面积精确过滤后的无数据原因。"""
-    community_snapshots = filter_snapshots_by_community(snapshots, community_name)
-    if not community_snapshots:
-        return f"面积筛选后未匹配到小区: {community_name}"
-
-    area_min, area_max = listing_area_bounds(area, tolerance)
-    return (
-        f"命中小区但无请求面积±{tolerance:g}㎡房源: "
-        f"请求面积={area:.2f}㎡, 范围={area_min:.2f}~{area_max:.2f}㎡, "
-        f"小区房源={len(community_snapshots)}条"
-    )
-
-
-    # [遗留] 旧搜索式采集链路配套；URL 白名单直达不再使用（保留不删除，待统一清理批次移除）。
-def listing_no_data_status(
-    snapshots: list[ListingSnapshot],
-    community_name: str,
-    area: float,
-    tolerance: float = LISTING_AREA_TOLERANCE,
-) -> str:
-    """区分普通无数据与命中小区但面积不匹配。"""
-    community_snapshots = filter_snapshots_by_community(snapshots, community_name)
-    if community_snapshots and not filter_snapshots_by_area(
-        community_snapshots, area, tolerance
-    ):
-        return PlatformResultStatus.NO_MATCHING_AREA
-    return PlatformResultStatus.NO_DATA
-
-
-    # [遗留] 旧搜索式采集链路配套；URL 白名单直达不再使用（保留不删除，待统一清理批次移除）。
-def prepare_listing_data(
-    snapshots: list[ListingSnapshot],
-    community_name: str,
-) -> tuple[list[ListingSnapshot], list[float]]:
-    """按小区归属返回原始快照和其单价镜像，不做算法筛选。"""
-    filtered = filter_snapshots_by_community(snapshots, community_name)
-    return filtered, _quote_prices_from_snapshots(filtered)
-
-
 async def wait_and_reload_after_block(
     tab,
     detect_func,
@@ -885,140 +771,3 @@ async def safe_select_and_click(
         return None
 
     return element
-
-
-# 连续空页阈值：达到此值则提前停止翻页，避免无效翻页浪费时间
-MAX_CONSECUTIVE_EMPTY_PAGES = 2
-
-
-    # [遗留] 旧搜索式采集链路配套；URL 白名单直达不再使用（保留不删除，待统一清理批次移除）。
-def check_empty_listing_page(
-    page_no: int,
-    page_count: int,
-    consecutive_empty: int,
-    total_pages: int,
-    platform: str = "",
-) -> tuple[bool, int]:
-    """翻页采集时的空页检测（所有翻页平台共用）。
-
-    解决"total_pages 是旧计数但实际无房源"导致程序静默翻 N 页空数据
-    且无任何 warning/error 的问题。
-
-    判定逻辑：
-    - 有数据 → 重置计数器为 0，不停止。
-    - 首页空且 total_pages > 0 → log.error + 立即停止。
-      （total_pages 来自翻页器的旧计数，实际列表区为空 <!-- 无搜索结果 -->，
-       翻下去全是空的，对应贝壳"福鑫苑"场景。）
-    - 非首页空 → log.warning，计数器 +1。
-    - 连续空页 >= MAX_CONSECUTIVE_EMPTY_PAGES → log.warning + 停止。
-
-    Args:
-        page_no: 当前页码（从 1 开始）。
-        page_count: 当前页解析到的房源条数。
-        consecutive_empty: 进入本页前已连续出现的空页数。
-        total_pages: 翻页器显示的总页数。
-        platform: 平台代码，用于日志标识。
-
-    Returns:
-        (should_stop, updated_consecutive_empty)。
-    """
-    if page_count > 0:
-        return False, 0
-
-    # --- 空页 ---
-    if page_no == 1 and total_pages > 0:
-        log.error(
-            "[%s] 第 1 页 0 条房源但 total_pages=%d，"
-            "total_pages 可能是旧计数，实际无结果，停止翻页",
-            platform, total_pages,
-        )
-        return True, 1
-
-    consecutive_empty += 1
-    log.warning(
-        "[%s] 第 %d 页 0 条房源（连续空页 %d/%d）",
-        platform, page_no, consecutive_empty, MAX_CONSECUTIVE_EMPTY_PAGES,
-    )
-    if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES:
-        log.warning(
-            "[%s] 连续 %d 页空数据，停止翻页避免浪费时间",
-            platform, consecutive_empty,
-        )
-        return True, consecutive_empty
-
-    return False, consecutive_empty
-
-
-async def click_area_segment(
-    page, area: float, parse_func, platform_code: str
-) -> Optional[tuple[float, float]]:
-    """从结果页面积筛选区动态读取档位，点击匹配 area 的档位链接（所有平台共用）。
-
-    档位因城市而异，不能硬编码，必须从 HTML 实时读取。
-    匹配规则：左闭右开（area >= min 且 area < max）。
-    各平台档位都是 <a> 链接，点击即筛选，不需要填输入框或点确定。
-
-    Args:
-        page: 结果页
-        area: 精确面积（必填）。
-        parse_func: 平台 parser 的 parse_area_segments 函数
-        platform_code: 平台代码，用于日志
-
-    Returns:
-        匹配到的面积区间 (min, max)，可用于后续成交记录筛选。
-        返回 None 表示未能读取到档位（页面结构变化等异常）。
-    """
-    html = await page.get_content()
-    segments = parse_func(html)
-    if not segments:
-        log.warning("[%s] 未从页面读到面积档位，跳过面积筛选", platform_code)
-        return None
-
-    log.info("[%s] 读到面积档位: %s", platform_code,
-             [(t, lo, hi) for t, lo, hi in segments])
-
-    # 左闭右开匹配
-    target = None
-    matched_lo = matched_hi = 0.0
-    for text, lo, hi in segments:
-        if lo <= area < hi:
-            target = text
-            matched_lo, matched_hi = lo, hi
-            break
-
-    if target is None:
-        target = segments[-1][0]
-        matched_lo, matched_hi = segments[-1][1], segments[-1][2]
-        log.info("[%s] 面积 %.1f 超出档位范围，取末档 %s (%.0f~%.0f)",
-                 platform_code, area, target, matched_lo, matched_hi)
-    else:
-        log.info("[%s] 面积 %.1f 匹配档位 %s (%.0f~%.0f)",
-                 platform_code, area, target, matched_lo, matched_hi)
-
-    # 点击对应的档位链接（通过文本定位）
-    try:
-        el = await page.find(target, timeout=4)
-    except Exception:
-        el = None
-    if el is None:
-        log.warning("[%s] 未找到面积档位按钮: %s", platform_code, target)
-        return None
-
-    # 检查档位是否禁用（乐有家: class=disabled; 房天下: style=color:#999 / href=javascript:void(0)）
-    try:
-        el_class = (await el.get_attribute("class")) or ""
-        el_style = (await el.get_attribute("style")) or ""
-        el_href = (await el.get_attribute("href")) or ""
-        if "disabled" in el_class or "color:#999" in el_style or "javascript:void(0)" in el_href:
-            log.info("[%s] 面积档位 %s 已禁用（该区间无房源），返回空", platform_code, target)
-            return None
-    except Exception:
-        pass
-
-    clicked = await _human_click(page, el, f"面积档位 {target}")
-    if clicked:
-        await page
-        await asyncio.sleep(3)
-    else:
-        log.warning("[%s] 面积档位点击失败: %s", platform_code, target)
-    return (matched_lo, matched_hi)

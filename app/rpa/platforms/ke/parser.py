@@ -100,38 +100,12 @@ def _parse_embedded_sold_records(html: str) -> List[DealRecord]:
         _append_record(records, seen, area_value, unit_price_value)
 
     return records
-
-
 def _select_listing_items(soup: "BeautifulSoup"):
     """只抓主结果列表，过滤猜你喜欢等推荐区块。"""
     items = soup.select('ul.sellListContent[log-mod="list"] > li')
     if items:
         return items
     return soup.select("ul.sellListContent > li")
-
-
-def parse_listing_records(html: str) -> List[tuple[str, float]]:
-    """解析搜索结果页主结果列表中的房源 ID 和单价。"""
-    if _HAS_BS4:
-        soup = BeautifulSoup(html, "html.parser")
-        records: List[tuple[str, float]] = []
-        for li in _select_listing_items(soup):
-            cls = " ".join(li.get("class", []))
-            if "goodhouse" in cls:
-                continue
-
-            unit_el = li.select_one("div.unitPrice")
-            if not unit_el:
-                continue
-
-            house_id = unit_el.get("data-hid")
-            price_text = unit_el.get_text(" ", strip=True)
-            price = _to_float(price_text)
-            if house_id and price:
-                records.append((house_id, price))
-        return records
-
-    return _parse_listing_records_regex(html)
 
 
 def parse_listing_snapshots(html: str, base_url: Optional[str] = None) -> List[ListingSnapshot]:
@@ -199,36 +173,6 @@ def parse_listing_snapshots(html: str, base_url: Optional[str] = None) -> List[L
     return []
 
 
-def _parse_listing_records_regex(html: str) -> List[tuple[str, float]]:
-    container_match = re.search(
-        r'<ul[^>]*class="[^"]*sellListContent[^"]*"[^>]*log-mod="list"[^>]*>([\s\S]*?)</ul>',
-        html,
-        re.S,
-    )
-    container = container_match.group(1) if container_match else html
-
-    records: List[tuple[str, float]] = []
-    for m in re.finditer(r'<li[^>]*class="[^"]*clear[^"]*"[^>]*>(.*?)</li>', container, re.S):
-        block = m.group(0)
-        if "goodhouse" in block:
-            continue
-
-        unit = re.search(
-            r'<div class="unitPrice"[^>]*data-hid="([^"]+)"[^>]*>\s*<span>([^<]*)</span>',
-            block,
-        )
-        if not unit:
-            continue
-
-        price = _to_float(unit.group(2))
-        if price:
-            records.append((unit.group(1), price))
-    return records
-
-
-def parse_listing_prices(html: str) -> List[float]:
-    """解析搜索结果页主结果列表中的在售单价。"""
-    return [price for _, price in parse_listing_records(html)]
 
 
 def find_detail_link(html: str) -> Optional[str]:
@@ -315,94 +259,3 @@ def parse_deal_records(html: str) -> List[DealRecord]:
         _append_record(records, seen, record.area, record.unit_price)
 
     return records
-
-
-def parse_deal_prices(html: str) -> List[float]:
-    return [record.unit_price for record in parse_deal_records(html)]
-
-
-def filter_deal_prices_by_area(
-    records: List[DealRecord],
-    area_min: float,
-    area_max: float,
-) -> List[float]:
-    """按请求面积严格区间过滤成交单价（与链家/房天下统一口径）。"""
-    return [
-        record.unit_price
-        for record in records
-        if record.area is not None and area_min <= record.area <= area_max
-    ]
-
-
-def parse_area_segments(html: str) -> List[tuple]:
-    """从结果页面积筛选区动态读取面积档位。
-
-    贝壳面积筛选区 DOM：
-      <dl class="hide hasmore">
-        <dt title="深圳建筑面积在售二手房">建筑面积</dt>
-        <dd>
-          <a href=".../a1/"><span class="checkbox"></span><span class="name">50㎡以下</span></a>
-          <a href=".../a3/"><span class="checkbox"></span><span class="name">70-90㎡</span></a>
-          <a href=".../a8/"><span class="checkbox"></span><span class="name">200㎡以上</span></a>
-          <span class="customFilter" data-role="area">...</span>  ← 自定义输入框，面积区结束标志
-
-    档位因城市而异（深圳 8 档、佛山 7 档，数值不同），必须从 HTML 动态读取。
-
-    Returns:
-        [(text, min, max), ...]，按页面顺序。
-        - "50㎡以下"  → (0, 50)
-        - "70-90㎡"   → (70, 90)
-        - "200㎡以上" → (200, inf)
-        自定义输入框跳过。
-    """
-    # 贝壳面积区以 data-role="area" 的 customFilter 结束
-    end_marker = re.search(r'data-role=["\']area["\']', html)
-    if not end_marker:
-        return []
-    end = end_marker.start()
-    # 从结束标志往前找"建筑面积"标题，确定面积区起点
-    title_match = re.search(r'建筑面积', html[:end])
-    if not title_match:
-        return []
-    start = title_match.end()
-    chunk = html[start:end]
-
-    segments = []
-    # 匹配 <a><span class="name">XX㎡</span></a>
-    for m in re.finditer(
-        r'<a[^>]*>.*?<span[^>]*class="[^"]*name[^"]*"[^>]*>([^<]*㎡[^<]*)</span>',
-        chunk, re.S,
-    ):
-        text = m.group(1).strip()
-        parsed = _parse_segment_text(text)
-        if parsed is not None:
-            segments.append((text, parsed[0], parsed[1]))
-    return segments
-
-
-def _parse_segment_text(text: str):
-    """解析单个面积档位文本 → (min, max)。
-
-    贝壳用"㎡"单位：
-    - "50㎡以下"  → (0, 50)
-    - "70-90㎡"   → (70, 90)
-    - "200㎡以上" → (200, inf)
-    """
-    text = text.strip()
-
-    # XX㎡以下
-    m = re.match(r'(\d+)\s*㎡?\s*以下', text)
-    if m:
-        return (0.0, float(m.group(1)))
-
-    # 面积区间形如 XX-YY㎡
-    m = re.match(r'(\d+)\s*[-~]\s*(\d+)\s*㎡?', text)
-    if m:
-        return (float(m.group(1)), float(m.group(2)))
-
-    # XX㎡以上
-    m = re.match(r'(\d+)\s*㎡?\s*以上', text)
-    if m:
-        return (float(m.group(1)), float('inf'))
-
-    return None

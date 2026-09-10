@@ -58,7 +58,6 @@ CREATE TABLE IF NOT EXISTS community_platform_pages (
     community_id INTEGER NOT NULL,
 
     -- 网页平台代码：ke=贝壳，ajk=安居客，fang=房天下，lj=链家，lyj=乐有家。
-    -- 行舟深房为接口平台，不使用网页入口。
     source_platform TEXT NOT NULL
         CHECK (source_platform IN ('ke', 'ajk', 'fang', 'lj', 'lyj')),
 

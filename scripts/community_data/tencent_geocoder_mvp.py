@@ -16,8 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 GEOCODER_URL = "https://apis.map.qq.com/ws/geocoder/v1/"
 API_KEY_ENV = "TENCENT_MAP_API_KEY"
 API_SK_ENV = "TENCENT_MAP_API_SK"
-XQ_DATA_ENV = "XZSFBJ_XQ_DATA_PATH"
-LEGACY_XQ_DATA_ENV = "XQ_DATA_PATH"
+XQ_DATA_ENV = "XQ_DATA_PATH"
 MINI_PROGRAM_APP_ID = "wxd49effb77288061d"
 DEFAULT_ADDRESS = "深圳市罗湖区城市天地广场"
 SIGN_PATH = "/ws/geocoder/v1/"
@@ -40,7 +39,7 @@ def _load_project_env() -> None:
 
 def resolve_xq_data_file() -> Path:
     """定位本机微信小程序 xqData.json；也支持环境变量显式指定。"""
-    configured = os.getenv(XQ_DATA_ENV) or os.getenv(LEGACY_XQ_DATA_ENV)
+    configured = os.getenv(XQ_DATA_ENV)
     if configured:
         return Path(configured).expanduser().resolve()
 

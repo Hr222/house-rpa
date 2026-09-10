@@ -2,11 +2,10 @@
 """房天下平台 HTML 解析器。
 
 从结果页提取在售房源快照、从成交页表格提取成交记录。
-成交筛选用严格面积区间 + 近半年（贝壳用 ±20% 容差，两者口径不同，不混用）。
+成交筛选由编排层按统一算法口径处理，解析器只返回原始记录。
 """
 
 import re
-from datetime import datetime, timedelta
 from html import unescape
 from typing import Optional
 from urllib.parse import urljoin
@@ -167,101 +166,3 @@ def parse_deal_records(html: str) -> list:
         except ValueError:
             continue
     return records
-
-
-def filter_deal_records(records: list, area_min: float, area_max: float, months: int = 6) -> list:
-    """过滤成交记录：严格面积区间 + 近 months 个月。
-
-    房天下规则：严格面积区间 area_min~area_max，日期 >= 今天往前 months 个月。
-    贝壳/链家/房天下已统一为严格面积区间口径。
-    """
-    cutoff = datetime.now() - timedelta(days=30 * months)
-    cutoff_str = cutoff.strftime("%Y-%m-%d")
-    filtered = []
-    for area, date_str, total, price in records:
-        if not (area_min <= area <= area_max):
-            continue
-        if date_str < cutoff_str:
-            continue
-        filtered.append((area, date_str, total, price))
-    return filtered
-
-
-def parse_area_segments(html: str) -> list:
-    """从结果页面积筛选区动态读取面积档位。
-
-    房天下面积筛选区 DOM：
-      <li class="clearfix screen_list">
-        <span class="screen_title">面积</span>
-        <ul class="clearfix choose_screen">
-          <li><label><span class="icon_check"></span><a href=".../j20-k250/">50平米以下</a></label></li>
-          <li><label><span class="icon_check"></span><a href=".../j270-k290/">70-90平米</a></label></li>
-          <li><label><span class="icon_check"></span><a href=".../j2300-k20/">300平米以上</a></label></li>
-          <li class="text_inp" name="customarea">...</li>  ← 自定义输入框，跳过
-
-    档位因城市而异（深圳 9 档、汕尾 8 档），必须从 HTML 动态读取。
-    注意：房天下用"平米"不是"㎡"。
-
-    Returns:
-        [(text, min, max), ...]，按页面顺序。
-        - "50平米以下"  → (0, 50)
-        - "70-90平米"   → (70, 90)
-        - "300平米以上" → (300, inf)
-        自定义输入框跳过。
-    """
-    # 定位面积筛选区：screen_title">面积 到下一个 screen_list
-    title_match = re.search(r'screen_title[^>]*>面积', html)
-    if not title_match:
-        return []
-    start = title_match.end()
-    # 找下一个 screen_list（特色/朝向等），截断面积区
-    next_section = re.search(r'screen_title', html[start:])
-    end = start + next_section.start() if next_section else start + 5000
-    chunk = html[start:end]
-
-    segments = []
-    # 匹配 li（排除 text_inp 自定义输入框）
-    for m in re.finditer(
-        r'<li[^>]*(?!class="text_inp")[^>]*>(.*?)</li>',
-        chunk, re.S,
-    ):
-        inner = m.group(1)
-        if "customarea" in inner or "cminArea" in inner:
-            continue
-        # 提取 <a> 的文本
-        text_m = re.search(r'<a[^>]*>([^<]*平米[^<]*)</a>', inner)
-        if not text_m:
-            continue
-        text = text_m.group(1).strip()
-        parsed = _parse_segment_text(text)
-        if parsed is not None:
-            segments.append((text, parsed[0], parsed[1]))
-    return segments
-
-
-def _parse_segment_text(text: str):
-    """解析单个面积档位文本 → (min, max)。
-
-    房天下用"平米"单位：
-    - "50平米以下"  → (0, 50)
-    - "70-90平米"   → (70, 90)
-    - "300平米以上" → (300, inf)
-    """
-    text = text.strip()
-
-    # XX平米以下
-    m = re.match(r'(\d+)\s*平米?\s*以下', text)
-    if m:
-        return (0.0, float(m.group(1)))
-
-    # XX-YY平米
-    m = re.match(r'(\d+)\s*[-~]\s*(\d+)\s*平米?', text)
-    if m:
-        return (float(m.group(1)), float(m.group(2)))
-
-    # XX平米以上
-    m = re.match(r'(\d+)\s*平米?\s*以上', text)
-    if m:
-        return (float(m.group(1)), float('inf'))
-
-    return None

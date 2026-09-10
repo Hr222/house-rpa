@@ -8,7 +8,6 @@ from app.rpa.platforms import (
     LjPlatformAdapter,
     LyjPlatformAdapter,
     PlatformAdapter,
-    XzsfbjPlatformAdapter,
 )
 
 
@@ -20,5 +19,4 @@ def build_default_adapters() -> list[PlatformAdapter]:
         FangPlatformAdapter(),
         LjPlatformAdapter(),
         LyjPlatformAdapter(),
-        # XzsfbjPlatformAdapter(),
     ]

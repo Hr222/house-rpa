@@ -2,11 +2,10 @@
 """链家平台 HTML 解析器。
 
 链家是贝壳子公司，DOM 与贝壳高度一致（同代码库），解析逻辑相似但独立实现。
-成交筛选用严格面积区间 + 近半年（贝壳用 ±20% 容差，两者口径不同，不混用）。
+成交筛选由编排层按统一算法口径处理，解析器只返回原始记录。
 """
 
 import re
-from datetime import datetime, timedelta
 from html import unescape
 from typing import Optional
 from urllib.parse import urljoin
@@ -156,88 +155,3 @@ def parse_deal_total_pages(html: str) -> int:
     """从成交页分页区解析总页数。"""
     m = re.search(r'totalPage&quot;:(\d+)', html or "")
     return int(m.group(1)) if m else 1
-
-
-def filter_deal_records(records: list, area_min: float, area_max: float, months: int = 6) -> list:
-    """过滤成交记录：严格面积区间 + 近 months 个月。
-
-    链家规则：严格面积区间，日期 >= 今天往前 months 个月。
-    贝壳/链家/房天下已统一为严格面积区间口径（贝壳成交少，不额外筛日期）。
-    """
-    cutoff = datetime.now() - timedelta(days=30 * months)
-    cutoff_str = cutoff.strftime("%Y-%m-%d")
-    filtered = []
-    for record in records:
-        area, date_str, total, price = record[0], record[1], record[2], record[3]
-        if area is not None and not (area_min <= area <= area_max):
-            continue
-        if date_str and date_str < cutoff_str:
-            continue
-        filtered.append(record)
-    return filtered
-
-
-def parse_area_segments(html: str) -> list:
-    """从结果页面积筛选区动态读取面积档位。
-
-    链家 DOM 与贝壳一致（同代码库），唯一差异：标题是"面积"（贝壳是"建筑面积"）。
-      <dl class="hide hasmore">
-        <dt>面积</dt>
-        <dd>
-          <a href=".../a1/"><span class="checkbox"></span><span class="name">50㎡以下</span></a>
-          <a href=".../a3/"><span class="checkbox"></span><span class="name">70-90㎡</span></a>
-          <span class="customFilter" data-role="area">...</span>  ← 面积区结束标志
-
-    档位因城市而异（深圳 8 档、佛山 7 档），必须从 HTML 动态读取。
-
-    Returns:
-        [(text, min, max), ...]
-    """
-    # 以 data-role="area" 的 customFilter 为面积区结束标志
-    end_marker = re.search(r'data-role=["\']area["\']', html)
-    if not end_marker:
-        return []
-    end = end_marker.start()
-    # 链家面积标题是"面积"，从结束标志往前找
-    title_match = None
-    for m in re.finditer(r'>面积<', html[:end]):
-        title_match = m  # 取最后一个匹配（确保是最近的面积标题）
-    if not title_match:
-        return []
-    start = title_match.end()
-    chunk = html[start:end]
-
-    segments = []
-    for m in re.finditer(
-        r'<a[^>]*>.*?<span[^>]*class="[^"]*name[^"]*"[^>]*>([^<]*㎡[^<]*)</span>',
-        chunk, re.S,
-    ):
-        text = m.group(1).strip()
-        parsed = _parse_segment_text(text)
-        if parsed is not None:
-            segments.append((text, parsed[0], parsed[1]))
-    return segments
-
-
-def _parse_segment_text(text: str):
-    """解析单个面积档位文本 → (min, max)。
-
-    - "50㎡以下"  → (0, 50)
-    - "70-90㎡"   → (70, 90)
-    - "200㎡以上" → (200, inf)
-    """
-    text = text.strip()
-
-    m = re.match(r'(\d+)\s*㎡?\s*以下', text)
-    if m:
-        return (0.0, float(m.group(1)))
-
-    m = re.match(r'(\d+)\s*[-~]\s*(\d+)\s*㎡?', text)
-    if m:
-        return (float(m.group(1)), float(m.group(2)))
-
-    m = re.match(r'(\d+)\s*㎡?\s*以上', text)
-    if m:
-        return (float(m.group(1)), float('inf'))
-
-    return None

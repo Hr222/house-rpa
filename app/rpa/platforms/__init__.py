@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""平台适配器集合：贝壳、安居客、链家、房天下、乐有家、行舟深房。
+"""平台适配器集合：贝壳、安居客、链家、房天下、乐有家。
 
 每个平台一个聚合目录 platforms/<code>/：shell.py 平台薄壳（城市导航
 与流程委托）、collector.py 采集适配、parser.py 纯函数解析、
@@ -15,8 +15,6 @@ from app.rpa.platforms.fang.shell import FangPlatformAdapter
 from app.rpa.platforms.ke.shell import KePlatformAdapter
 from app.rpa.platforms.lj.shell import LjPlatformAdapter
 from app.rpa.platforms.lyj.shell import LyjPlatformAdapter
-from app.rpa.platforms.xzsfbj.shell import XzsfbjPlatformAdapter
-
 __all__ = [
     "PlatformAdapter",
     "KePlatformAdapter",
@@ -24,5 +22,4 @@ __all__ = [
     "FangPlatformAdapter",
     "LjPlatformAdapter",
     "LyjPlatformAdapter",
-    "XzsfbjPlatformAdapter",
 ]

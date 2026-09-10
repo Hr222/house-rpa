@@ -32,7 +32,6 @@ from app.rpa.core.models import PlatformResult
 from app.rpa.platforms.lj import parser as parsers
 from app.rpa.utils.debug_utils import dump_html
 from app.rpa.platforms.base import (
-    _human_click,
     community_name_match,
     has_matching_community_snapshots,
     safe_select_and_click,

@@ -138,10 +138,7 @@ flowchart TD
 | `_human_click(page, element, label)` | 【回退】真人节奏点击（JS 优先），仅成交翻页按钮兜底路径使用 |
 | `safe_select_and_click(page, selector, ...)` | 【回退】安全选择+点击：找不到元素时 dump + 风控检测 + 恢复后重试（lj 成交翻页兜底） |
 | `community_name_match(request_name, captured_name)` | 结构化小区名匹配；双方带期数且不同时不匹配 |
-| `has_matching_community_snapshots` / `filter_snapshots_by_community` / `prepare_listing_data` | 归属校验与同源过滤 |
-| `human_linger(page, page_no)` | 【遗留】旧搜索式链路的翻页停留，现行链路无调用方 |
-| `check_empty_listing_page(...)` | 【遗留】旧搜索式链路的翻页空页检测 |
-| `click_area_segment(...)` | 【遗留】旧搜索式链路的面积档位点击，URL 直达形态不再使用 |
+| `has_matching_community_snapshots` / `filter_snapshots_by_community` | 归属校验与逐页/返回前防御过滤 |
 
 **城市映射 `app/rpa/platforms/city_map.py`**：`CITY_MAP[code][city] = url_prefix`
 显式登记（命名规则不统一，不能推导）；`get_start_url` / `is_city_supported` /
