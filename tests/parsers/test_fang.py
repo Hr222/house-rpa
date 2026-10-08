@@ -44,18 +44,101 @@ def test_parse_listing_and_deal_records_for_storage():
     assert price == 74262.0
 
 
-def test_community_page_mvp_uses_shared_soft_block_protocol():
-    """独立房天下初始化脚本应复用正式采集链路的软风控协议。"""
-    from app.rpa.platforms.fang.collector import (
-        FangSoftBlockError,
-        check_soft_block_elapsed,
-    )
-    from scripts.initialize_community_page.community_page import (
-        fang_community_page_mvp,
+# ============================================================
+# 小区入口初始化脚本（匿名联想 API 版）的载荷解析契约
+#
+# 背景：2026-09-30 实测房天下风控是**路径级**——/house/kw 搜索页、
+# /house-xm 挂牌页、/loupan 成交页均返回滑块验证码页，而联想接口
+# /asynclist/searchsuggestion/suggestionList 匿名可用。旧浏览器版把该接口
+# 当兜底却用 json.loads 解析 `fangcb({'hit':...})`（JS 对象字面量，key 单引号），
+# 431 次调用 0 次命中——兜底从未生效。以下用例锁定该回归。
+# ============================================================
+
+
+def test_parse_suggest_payload_accepts_js_object_literal():
+    """响应是 JS 对象字面量（单引号 key），必须能解析（旧实现 json.loads 必然抛错）。"""
+    from scripts.initialize_community_page.community_page.fang_community_page_mvp import (
+        parse_suggest_payload,
     )
 
-    assert fang_community_page_mvp.FangSoftBlockError is FangSoftBlockError
-    assert fang_community_page_mvp.check_soft_block_elapsed is check_soft_block_elapsed
+    raw = (
+        "fangcb({'hit':[{\"ywtype\":\"出售\",\"wordtype\":\"楼盘\",\"id\":\"2810258062\","
+        "\"projname\":\"泰华花园\",\"district\":\"宝安\",\"comerce\":\"新安\","
+        "\"projaliasnames\":\"泰华花园 泰华\",\"esfcount\":\"0\"},"
+        "{\"wordtype\":\"小区\",\"id\":\"999\"}],\"history\":[]})"
+    )
+    entries = parse_suggest_payload(raw)
+
+    assert len(entries) == 1  # wordtype != 楼盘 的条目被丢弃
+    entry = entries[0]
+    assert entry.community_id == "2810258062"
+    assert entry.projname == "泰华花园"
+    assert entry.district == "宝安"
+    assert entry.area == "新安"
+    assert entry.aliases == ("泰华花园", "泰华")
+    assert entry.on_sale_count == 0  # 计数是字符串 "0"
+
+
+def test_parse_suggest_payload_empty_hit_is_valid_not_failure():
+    """合法空结果（hit 为空数组）是“查无此名”，不是接口失效。"""
+    from scripts.initialize_community_page.community_page.fang_community_page_mvp import (
+        parse_suggest_payload,
+    )
+
+    assert parse_suggest_payload("fangcb({'hit':[],\"history\":[]})") == []
+
+
+def test_parse_suggest_payload_raises_on_slider_captcha():
+    """滑块验证码页必须判定为契约失效并抛错，绝不能静默返回空列表。
+
+    静默返回空会把拦截图成“小区不存在”——2026-09-29 宝安 461 条假失败即源于此。
+    """
+    from scripts.initialize_community_page.community_page.fang_community_page_mvp import (
+        FangSuggestBlockedError,
+        parse_suggest_payload,
+    )
+    import pytest
+
+    captcha = (
+        '<!DOCTYPE html><html><head><meta charset="utf-8"><title></title>'
+        '<link rel="stylesheet" href="https://js.soufunimg.com/fangue/libs/check/css.css">'
+        '<script src="https://js.soufunimg.com/fangue/libs/check/checkyzm.min.js"></script>'
+        '</head><body><p style="text-align:center">请完成下列验证后继续：</p>'
+        '<div class="slider"></div></body></html>'
+    )
+    with pytest.raises(FangSuggestBlockedError):
+        parse_suggest_payload(captcha)
+
+    with pytest.raises(FangSuggestBlockedError):
+        parse_suggest_payload("")
+
+
+def test_http_client_absorbs_and_injects_cookies_for_manual_rescue():
+    """风控救援靠 cookie 回灌：Set-Cookie 合并 + 人工过验证后回灌都要生效。
+
+    回灌必须同时把会话标为“未预热”，否则不会用新 cookie 重新预热。
+    """
+    from scripts.initialize_community_page.community_page.fang_community_page_mvp import (
+        _FangHttpClient,
+    )
+
+    client = _FangHttpClient("https://sz.esf.fang.com")
+    client._warmed = True
+
+    client._absorb_cookies(
+        ["szesf_fang=abc123; Path=/; Domain=.sz.esf.fang.com", "flag=1; HttpOnly"]
+    )
+    assert client._cookies == {"szesf_fang": "abc123", "flag": "1"}
+
+    client.inject_cookies({"__jsl_clearance_s": "clear456"})
+    assert client._cookies["__jsl_clearance_s"] == "clear456"
+    assert client._cookies["szesf_fang"] == "abc123"  # 原有 cookie 不被冲掉
+    assert client._warmed is False  # 回灌后强制重新预热
+
+    client._warmed = True
+    client.inject_cookies({})  # 空回灌不得破坏会话状态
+    assert client._warmed is True
+    assert client._cookies["szesf_fang"] == "abc123"
 
 
 # ============================================================

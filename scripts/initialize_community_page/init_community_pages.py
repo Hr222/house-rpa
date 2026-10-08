@@ -39,7 +39,7 @@ aliases 为主数据核对信息，搜索兜底仍由各 MVP 内部查主数据�
 边界：本脚本是运行入口壳，不做页面解析；浏览器、登录态与风控协议全部
 留在各 MVP 模块内（独立浏览器、固定 profile、拦截时人工回车确认）。
 例外：lj 平台自 2026-09-29 起指向匿名 headerSearch API 版 MVP
-（lj_community_page_api_mvp），无浏览器与登录态，manual-login 参数被忽略；
+（lj_community_page_mvp），无浏览器与登录态，manual-login 参数被忽略；
 ke 平台不单独初始化，由 lj 入口经 derive_ke_from_lj.py 直接派生。
 主数据只读；本入口不直接依赖 app 落库能力，数据库更新统一经同目录的
 save_community_platform_pages.py 对接。
@@ -74,10 +74,10 @@ PLATFORM_MODULES = {
     # 路径级：/house/kw 搜索页与 /house-xm、/loupan 内容页返回滑块验证码，
     # 而 /asynclist/searchsuggestion/suggestionList 匿名可用，故 v2 只走该接口。
     # 旧浏览器版 fang_community_page_mvp 已删除（不留兜底）。
-    "fang": "scripts.initialize_community_page.community_page.fang_community_page_http_mvp",
+    "fang": "scripts.initialize_community_page.community_page.fang_community_page_mvp",
     # lj 走匿名 headerSearch API 版（无浏览器/无登录；2026-09-29 因账号封禁风险切换）。
     # 旧浏览器版 lj_community_page_mvp 已删除（不留兜底）。
-    "lj": "scripts.initialize_community_page.community_page.lj_community_page_api_mvp",
+    "lj": "scripts.initialize_community_page.community_page.lj_community_page_mvp",
     "lyj": "scripts.initialize_community_page.community_page.lyj_community_page_mvp",
 }
 # 成交页只有链家与房天下；房天下主流程无片区辅助参数。

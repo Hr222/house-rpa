@@ -3,7 +3,7 @@
 
 背景：浏览器+账号版 ``lj_community_page_mvp`` 在批量初始化中频繁触发风控并已
 发生账号封禁（该脚本 2026-09-30 已删除，不留兜底），链家小区入口初始化统一走
-本模块。解析核心在 ``lianjia_suggest``（lj/ke 共用）：链家 headerSearch 联想接口
+本模块。解析核心在 ``lj_community_page_suggest``（lj/ke 共用）：链家 headerSearch 联想接口
 匿名调用，返回候选小区的 communityId / title / region / 别名，无需登录即可完成
 “小区名→xiaoqu_id”解析；本模块只负责按链家域名派生入口 URL 并批量编排。
 
@@ -14,7 +14,7 @@
 “挂牌/成交/小区详情共用 id”的链家惯例派生，格式与库内既有数据一致。
 
 用法（独立运行，参数与浏览器版一致）：
-  python -m scripts.initialize_community_page.community_page.lj_community_page_api_mvp \
+  python -m scripts.initialize_community_page.community_page.lj_community_page_mvp \
       --city "深圳" --administrative-district "福田区" --community "绿景虹湾" "香蜜湖一号"
 """
 
@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 
 from app.rpa.platforms.city_map import get_start_url
 from app.rpa.utils.logging_utils import setup_logging
-from scripts.initialize_community_page.community_page.lianjia_suggest import (
+from scripts.initialize_community_page.community_page.lj_community_page_suggest import (
     CITY_IDS,
     resolve_community,
 )

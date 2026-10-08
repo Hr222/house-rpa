@@ -51,7 +51,7 @@
 归属信心由“行政区核对 + 名称/别名精确匹配 + id 唯一”提供。
 
 用法（独立运行，签名与统一入口一致）：
-  python -m scripts.initialize_community_page.community_page.fang_community_page_http_mvp \
+  python -m scripts.initialize_community_page.community_page.fang_community_page_mvp \
       --city "深圳" --administrative-district "宝安区" --community "泰华花园" "桃源居"
 """
 

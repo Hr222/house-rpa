@@ -17,7 +17,7 @@ communityId / title / region / 在售数，且 region 括号内携带别名。�
   下一个候选名；全部候选名失败才判定该小区失败，错误信息附候选明细供人工裁决
   （桃源居综合楼、领航城三期这类需人工映射的条目会在此显式暴露）。
 
-调用方：``lj_community_page_api_mvp``（lj 入口初始化）。
+调用方：``lj_community_page_mvp``（lj 入口初始化）。
 旧的浏览器版 MVP（lj/ke_community_page_mvp）已于 2026-09-30 删除，不留兜底。
 """
 
