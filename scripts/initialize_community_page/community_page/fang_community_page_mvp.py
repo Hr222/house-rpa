@@ -575,6 +575,45 @@ _STRIP_SUFFIXES = (
 _DISTRICT_TOKENS = ("宝安", "龙岗", "南山", "罗湖", "福田", "龙华", "盐田", "光明", "坪山", "大鹏")
 
 
+# 补漏**查询词**专用：激进后缀（含单字），只为扩大搜索引擎召回，**不参与核对**。
+# 2026-10-08 实测：只用清单原名搜 Bing 命中 ~12%，放进单字后缀（苑/府/园/大院）
+# 后升到 ~50%（旭飞华天苑→旭飞华天、幸福华府→幸福华、航运大院→航运）。
+_QUERY_STRIP_SUFFIXES = (
+    "山庄", "大院", "别墅", "大厦", "公寓", "花园", "新村", "宿舍楼", "宿舍",
+    "广场", "中心", "大楼", "综合楼", "住宅楼", "家园", "小区", "公馆",
+    "苑", "阁", "庭", "轩", "居", "邨", "村", "城", "园", "府", "坊", "里",
+    "台", "湾", "岛", "岸",
+    "一期", "二期", "三期", "四期", "五期", "六期", "七期", "八期",
+    "A区", "B区", "C区", "D区",
+)
+RECOVER_MAX_QUERY_WORDS = 3      # 清单名 + 最多 2 个主干词，控制请求量
+
+
+def _recover_query_words(names: list[str]) -> list[str]:
+    """补漏的候选查询词：清单名优先，其后是主干词（剥后缀/按分隔符切主名/去行政区字样）。
+
+    只影响「拿什么词去搜」，核对仍走 _recover_stems + 行政区 + 页面标题，不放松。
+    """
+    words: list[str] = []
+    for base in names[:1]:
+        cleaned = re.sub(r"\s+", "", str(base or ""))
+        if cleaned:
+            words.append(cleaned)
+    for base in names:
+        cleaned = re.sub(r"\s+", "", str(base or ""))
+        if not cleaned:
+            continue
+        parts = [item for item in re.split(r"[-–—·、,，()（）/|;；]+", cleaned) if len(item) >= 2]
+        for item in [cleaned, *parts]:
+            for suffix in _QUERY_STRIP_SUFFIXES:
+                if item.endswith(suffix) and len(item) - len(suffix) >= 2:
+                    words.append(item[: -len(suffix)])
+            for token in _DISTRICT_TOKENS:
+                if token in item and len(item) > len(token) + 1:
+                    words.append(item.replace(token, ""))
+    return [word for word in dict.fromkeys(words) if len(word) >= 2][:RECOVER_MAX_QUERY_WORDS]
+
+
 def _recover_stems(names: list[str]) -> list[str]:
     """由候选名（清单名 + 主数据正式名 + 别名）派生主干词集合。"""
     stems: set[str] = set()
@@ -671,7 +710,10 @@ def verify_recover_candidate(
     return {"fang_name": fang_name, "title": title}
 
 
-async def _recover_search_ids(community_name: str) -> dict[str, str]:
+async def _recover_search_ids(
+    community_name: str,
+    templates: tuple[str, ...] = RECOVER_ENGINE_TEMPLATES,
+) -> dict[str, str]:
     """真浏览器搜 Bing，返回 {fang_id: 来源url}；多个查询词按序尝试，命中即停。"""
     import nodriver as uc
 
@@ -684,7 +726,7 @@ async def _recover_search_ids(community_name: str) -> dict[str, str]:
     )
     try:
         found: dict[str, str] = {}
-        for template in RECOVER_ENGINE_TEMPLATES:
+        for template in templates:
             query = template.format(n=community_name)
             page = await browser.get(RECOVER_ENGINE_ORIGIN + quote(query, safe=""))
             await page
@@ -713,11 +755,18 @@ async def recover_by_search(
 ) -> Optional[dict]:
     """补漏：搜索引擎找 id → 手机站逐条核对。返回与 resolve_community 同构的结果。"""
     names = build_candidate_names(city, administrative_district, community_name)
-    try:
-        found = await _recover_search_ids(names[0])
-    except Exception as exc:
-        log.warning("补漏搜索[%s]异常：%s", community_name, exc)
-        return None
+    # 清单名先试全部问法；主干词只试首个问法（控制请求量）。
+    found: dict[str, str] = {}
+    for index, word in enumerate(_recover_query_words(names)):
+        templates = RECOVER_ENGINE_TEMPLATES if index == 0 else RECOVER_ENGINE_TEMPLATES[:1]
+        try:
+            found = await _recover_search_ids(word, templates)
+        except Exception as exc:
+            log.warning("补漏搜索[%s]异常：%s", word, exc)
+            found = {}
+        if found:
+            log.info("补漏：小区[%s] 用查询词「%s」搜到 %d 个候选", community_name, word, len(found))
+            break
     if not found:
         log.info("补漏：小区[%s] 搜索引擎无深圳房天下结果", community_name)
         return None

@@ -78,6 +78,47 @@ def name_key(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", value or "").lower()
 
 
+# ── 主干词换问法（提高联想接口召回；命中会标记为 *_stem 便于审计）──
+_TYPE_SUFFIXES = (
+    "大厦", "公寓", "花园", "新村", "宿舍楼", "宿舍", "广场", "中心", "大楼",
+    "综合楼", "住宅楼", "家园", "小区", "公馆", "别墅",
+    "一期", "二期", "三期", "四期", "五期", "六期", "七期", "八期",
+    "A区", "B区", "C区", "D区",
+)
+_STEM_QUERY_SUFFIXES = (
+    "山庄", "大院", "别墅", "大厦", "公寓", "花园", "新村", "宿舍楼", "宿舍",
+    "广场", "中心", "大楼", "综合楼", "住宅楼", "家园", "小区", "公馆",
+    "苑", "阁", "庭", "轩", "居", "邨", "村", "城", "园", "府", "坊", "里",
+    "台", "湾", "岛", "岸",
+    "一期", "二期", "三期", "四期", "五期", "六期", "七期", "八期",
+    "A区", "B区", "C区", "D区",
+)
+
+_REGION_TOKENS = ("宝安", "龙岗", "南山", "罗湖", "福田", "盐田", "龙华",
+                  "光明", "坪山", "大鹏", "深圳")
+
+
+def stem_variants(value: str) -> list[str]:
+    """由名称派生主干词：先按分隔符切出主名，再剥期数/类型后缀与内嵌行政区字样。
+
+    实测「怡景花园-景庭苑」原名搜不到，用主干词「怡景花园」能命中母小区页
+    （同页映射），与 fang / lyj 侧处置一致。返回值**不含原名自身**。
+    """
+    base = re.sub(r"\s+", "", str(value or ""))
+    if not base:
+        return []
+    parts = [item for item in re.split(r"[-–—·、,，()（）/|;；]+", base) if len(item) >= 2]
+    out: list[str] = list(parts[:2])
+    for item in [base, *parts]:
+        for suffix in _STEM_QUERY_SUFFIXES:
+            if item.endswith(suffix) and len(item) - len(suffix) >= 2:
+                out.append(item[: -len(suffix)])
+        for token in _REGION_TOKENS:
+            if token in item and len(item) > len(token) + 1:
+                out.append(item.replace(token, ""))
+    return [item for item in dict.fromkeys(out) if len(item) >= 2 and item != base]
+
+
 @dataclass(frozen=True)
 class SuggestEntry:
     """headerSearch 返回的单条小区联想项。"""
@@ -229,6 +270,11 @@ def build_candidate_names(city: str, administrative_district: str, community_nam
         normalized = re.sub(r"\s+", "", str(candidate or ""))
         if normalized and normalized not in names:
             names.append(normalized)
+    # 主干词兜底（剥期数/后缀/行政区字样），排最后、精确度最低
+    for base in list(names):
+        for stem in stem_variants(base):
+            if stem not in names:
+                names.append(stem)
     log.info("小区[%s]候选搜索名：%s", community_name, names)
     return names
 
@@ -250,6 +296,8 @@ async def resolve_community(
     失败同样抛 RuntimeError。
     """
     names = build_candidate_names(city, administrative_district, community_name)
+    # 主干词集合：用于把「跨粒度命中」标记成 *_stem，便于事后审计
+    stem_set = {stem for base in names for stem in stem_variants(base)}
     candidates_seen: dict[str, str] = {}
     for name in names:
         entries = await fetch_suggest(name, origin=origin, city_id=city_id, debug=debug)
@@ -275,6 +323,8 @@ async def resolve_community(
                 else "alias"
             )
         if chosen is not None:
+            if name in stem_set:
+                match_via = f"{match_via}_stem"      # 主干词命中（跨粒度映射）
             log.info(
                 "候选名[%s]唯一命中 xiaoqu_id=%s 平台名=%s（%s）",
                 name, chosen.community_id, chosen.title, match_via,
