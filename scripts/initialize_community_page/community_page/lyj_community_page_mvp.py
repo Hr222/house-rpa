@@ -1,420 +1,441 @@
 # -*- coding: utf-8 -*-
-"""乐有家小区挂牌页 URL 初始化 MVP（批量，支持主数据别名兜底）。
+"""乐有家小区挂牌页 URL 初始化 MVP——匿名联想接口版（无浏览器、无登录）。
 
-流程：打开城市二手房页 → 按候选名逐个搜索 → 从结构化挂牌卡确认小区 ID →
-按小区 ID 拼接挂牌列表入口，并实际复核页面仍命中目标小区。
+数据源：乐有家 ``POST /esf/queryConditionAndContext``（body ``keyword=<小区名>``，
+**匿名可调，无需登录态**）。给**完整小区名**时返回小区条目，含
+``id / areaName(行政区) / placeName(片区) / sellCount(在售)``；给模糊词时返回的是
+筛选条件（城区/片区/地铁，``type`` 为 1/2/4），本模块按小区条目（``type`` 为 0）解析。
 
-挂牌卡路径失败时（典型为在售 0 套小区，搜索结果无房源卡）走搜索联想接口
-POST /esf/queryConditionAndContext 兜底：候选名完全匹配且唯一命中才采纳，
-行政区作辅助核对；0 挂牌复核退化为页面可见文本含小区名。
+URL 派生（社区页初始化**只落入口**，成交不做）：
+- 入口：``{origin}/esf?b={id}``（与库内既有 lyj 数据格式一致，``/esf`` 后无斜杠）。
+  该页需登录才能浏览，但本模块**只派生不打开**，故无需登录态。
+- 详情：``{origin}/xq/detail/{id}.html``（纯 HTTP 可访问，仅作输出辅助，不落库）。
+- 成交：**不做**。乐有家不对外展示成交（``app/rpa/platforms/lyj/collector.py`` 既定口径：
+  成交是登录/扫码后的弹层，无独立 URL），故本平台不落 ``deal_page_url``。
 
-给定名未匹配到目标小区时，查询小区主数据（只读）换正式名与其余别名重试；
-全部候选名失败才判定该小区失败。单个小区失败只记录并继续，不关闭浏览器；
-浏览器仅在全部小区处理完并经人工确认后才退出。
+为什么是这条接口（2026-10-08 实测）：PC 站无 ``/chengjiao/`` 路径；入口页 ``?b=`` 需登录；
+而该联想接口匿名可用，且返回的小区 id 与库内既有 lyj 入口的 ``b=`` 参数同源。
 
-本脚本只用于独立验证，不写入数据库，也不接入正式 RPA 编排链路。
+匹配规则（宁可缺不错配）：
+- 候选名依次尝试：给定名 → 主数据正式名 → 其余别名；
+- 单个候选名的命中条件：``areaName`` 行政区与主数据一致，且名称命中——
+  归一化全等、**后缀差异**（如 ``飞扬时代大厦`` ↔ 乐有家 ``飞扬时代``）、
+  或**汉字数字与阿拉伯数字差异**（如 ``桃源居十四区`` ↔ ``桃源居14区``）；
+- 采纳：全等命中唯一 → 直接采纳；否则要求命中收敛到唯一 id，多个即记歧义并换下一个候选名；
+  全部候选名失败才判定失败，错误信息附候选明细供人工裁决。
 
-用法：
-  python -m scripts.initialize_community_page.community_page.lyj_community_page_mvp --manual-login \
-      --city "深圳" --administrative-district "福田区" \
-      --community "绿景虹湾" "香蜜湖一号"
+签名与结果字段与统一入口 ``init_community_pages`` 的 ``PLATFORM_MODULES["lyj"]``
+落库链路（save_community_platform_pages）对齐：落库只依赖 ``success`` 与 ``listing_page_url``。
+
+用法（独立运行，签名与统一入口一致）：
+  python -m scripts.initialize_community_page.community_page.lyj_community_page_mvp \
+      --city "深圳" --administrative-district "宝安区" --community "凤凰领寓" "宝雅苑"
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 from dataclasses import dataclass
-from html import unescape
+import gzip
+import json
 import logging
-from pathlib import Path
 import re
+import time
 from typing import Optional
-from urllib.parse import quote, urljoin, urlparse
-
-import nodriver as uc
+from urllib.error import URLError
+from urllib.parse import urlencode, urlparse
+from urllib.request import Request, urlopen
 
 from app.community_data import resolve_communities
-from app.rpa.core import config
-from app.rpa.platforms.lyj import collector as lyj_adapter
-from app.rpa.platforms.lyj import parser as lyj_parsers
-from app.rpa.platforms.base import community_name_match, has_matching_community_snapshots
-from app.rpa.platforms.base import wait_and_reload_after_block
 from app.rpa.platforms.city_map import get_start_url
-from app.rpa.utils.debug_utils import dump_html as shared_dump_html
-from app.rpa.utils.debug_utils import set_debug_mode
-from app.rpa.utils.logging_utils import setup_logging
 
-
-setup_logging()
 log = logging.getLogger(__name__)
 
+REQUEST_INTERVAL_SECONDS = 0.4
+REQUEST_TIMEOUT_SECONDS = 15
+MAX_ATTEMPTS = 3
+# 连续失败到此数即判定被风控拦截并中止本批（剩余小区不记为失败）。
+MAX_CONSECUTIVE_FAILURES = 5
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+# 联想接口路径（相对城市站根）；入口/详情页由 id 派生。
+SUGGEST_PATH = "/esf/queryConditionAndContext"
+ENTRY_URL_TEMPLATE = "{origin}/esf?b={xiaoqu_id}"
+DETAIL_URL_TEMPLATE = "{origin}/xq/detail/{xiaoqu_id}.html"
+# 小区条目的 type 值（1=城区 2=片区 4=地铁 0=小区），只收 0。
+COMMUNITY_TYPE = "0"
 
-@dataclass(frozen=True)
-class CommunityCandidate:
-    """挂牌卡中发现的小区详情链接，仅作为初始化阶段辅助信息。"""
+# 名称变体容错用：类型尾缀（乐有家会省略，如「飞扬时代大厦」→「飞扬时代」）
+_TYPE_SUFFIXES = (
+    "大厦", "公寓", "花园", "新村", "宿舍楼", "宿舍", "广场", "中心", "大楼",
+    "综合楼", "住宅楼", "家园", "小区", "公馆", "别墅", "一期", "二期", "三期", "四期", "五期",
+    "六期", "七期", "八期", "A区", "B区", "C区", "D区",
+)
+_CN_DIGITS = {"零": "0", "一": "1", "二": "2", "三": "3", "四": "4",
+              "五": "5", "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"}
 
-    community_name: str
-    detail_url: str
-    community_id: str
+
+# 主干词用：内嵌行政区字样（如「宝安34区」→「34区」）
+_STEM_QUERY_SUFFIXES = (
+    "山庄", "大院", "别墅", "大厦", "公寓", "花园", "新村", "宿舍楼", "宿舍",
+    "广场", "中心", "大楼", "综合楼", "住宅楼", "家园", "小区", "公馆",
+    "苑", "阁", "庭", "轩", "居", "邨", "村", "城", "园", "府", "坊", "里",
+    "台", "湾", "岛", "岸",
+    "一期", "二期", "三期", "四期", "五期", "六期", "七期", "八期",
+    "A区", "B区", "C区", "D区",
+)
+
+_REGION_TOKENS = ("宝安", "龙岗", "南山", "罗湖", "福田", "盐田", "龙华",
+                  "光明", "坪山", "大鹏", "深圳")
+
+
+def stem_variants(value: str) -> list[str]:
+    """由名称派生主干词：先按分隔符切出主名，再剥期数/类型后缀与内嵌行政区字样。
+
+    目的：提高联想接口召回。实测「怡景花园-景庭苑」原名搜不到，用主干词
+    「怡景花园」能命中母小区页（同页映射），与 fang 侧的处置一致。
+    返回值**不含原名自身**。
+    """
+    base = re.sub(r"\s+", "", str(value or ""))
+    if not base:
+        return []
+    parts = [p for p in re.split(r"[-–—·、,，()（）/|;；]+", base) if len(p) >= 2]
+    out: list[str] = list(parts[:2])          # 分隔符前的主名（怡景花园-景庭苑 → 怡景花园）
+    for item in [base, *parts]:
+        for suffix in _STEM_QUERY_SUFFIXES:
+            if item.endswith(suffix) and len(item) - len(suffix) >= 2:
+                out.append(item[: -len(suffix)])
+        for token in _REGION_TOKENS:
+            if token in item and len(item) > len(token) + 1:
+                out.append(item.replace(token, ""))
+    return [item for item in dict.fromkeys(out) if len(item) >= 2 and item != base]
+
+
+def normalize_district(value: str) -> str:
+    """统一“福田”和“福田区”等行政区写法。"""
+    text = re.sub(r"\s+", "", str(value or ""))
+    for suffix in ("行政区", "新区", "区"):
+        if text.endswith(suffix):
+            return text[: -len(suffix)]
+    return text
+
+
+def name_key(value: str) -> str:
+    """名称归一化键：仅保留字母/数字/汉字并转小写。"""
+    return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", value or "").lower()
+
+
+def _cn_digits_to_arabic(value: str) -> str:
+    """把汉字数字换成阿拉伯数字（「桃源居十四区」→「桃源居14区」）。
+
+    「十四」这类先整体替换，避免被逐字拆成「104」。仅处理常见 1~10，
+    更复杂的数字不做猜测——宁可匹配不上，也不错配。
+    """
+    text = value
+    for cn, ar in (("十一", "11"), ("十二", "12"), ("十三", "13"), ("十四", "14"),
+                   ("十五", "15"), ("十六", "16"), ("十七", "17"), ("十八", "18"),
+                   ("十九", "19"), ("十", "10")):
+        text = text.replace(cn, ar)
+    for cn, ar in _CN_DIGITS.items():
+        if cn != "十":
+            text = text.replace(cn, ar)
+    return text
+
+
+def name_variants(value: str) -> set[str]:
+    """名称的全部容错键：原样、汉字数字转写、以及各自的类型尾缀剥离版。"""
+    base = name_key(value)
+    if not base:
+        return set()
+    variants = {base, name_key(_cn_digits_to_arabic(base))}
+    for candidate in set(variants):
+        for suffix in _TYPE_SUFFIXES:
+            if candidate.endswith(suffix) and len(candidate) - len(suffix) >= 2:
+                variants.add(candidate[: -len(suffix)])
+    return {v for v in variants if len(v) >= 2}
 
 
 def _visible_text(fragment: str) -> str:
-    """提取 HTML 片段可见文本。"""
-    fragment = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", " ", fragment, flags=re.I | re.S)
-    fragment = re.sub(r"<[^>]+>", " ", fragment)
-    return re.sub(r"\s+", " ", unescape(fragment)).strip()
+    """去掉接口返回的高亮标记（``<font color="red">…</font>``）。"""
+    return re.sub(r"<[^>]+>", "", str(fragment or "")).strip()
 
 
-def _expected_host(start_url: str) -> str:
-    return (urlparse(start_url).hostname or "").lower()
+@dataclass(frozen=True)
+class SuggestEntry:
+    """queryConditionAndContext 返回的单条小区联想项。"""
 
-
-def _safe_file_token(value: str) -> str:
-    """把小区名转成可用于导出文件名的安全片段。"""
-    return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", value or "").strip("_") or "unnamed"
-
-
-async def ensure_accessible(page, *, label: str, expected_host: str) -> str:
-    """风控恢复走工程协议（检测→等人工回车→重取，直到恢复），恢复后校验城市域名。
-
-    风控判定=lyj 工程 detect_block + base 公共兜底（wait_and_reload_after_block
-    内部统一叠加 detect_block_with_common）。城市漂移（期望域名不符）是 MVP
-    导航层职责，不属于风控 marker，恢复后在此单独校验。
-    """
-    html = await wait_and_reload_after_block(page, lyj_adapter.detect_block, label)
-    actual_host = (urlparse(page.target.url or "").hostname or "").lower()
-    if actual_host != expected_host:
-        raise RuntimeError(
-            f"{label}城市漂移：期望 {expected_host}，实际 {actual_host or '空'}"
-        )
-    return html
-
-
-async def dump_html(page, name: str) -> Optional[Path]:
-    """在开启 --debug 时导出当前页面 HTML。"""
-    return await shared_dump_html(page, name, logger=log)
-
-
-async def wait_for_manual_login() -> None:
-    """搜索前固定等待人工完成登录/验证。"""
-    await asyncio.to_thread(
-        input,
-        "\n请先在浏览器完成乐有家登录/验证，完成后回到终端按回车开始搜索小区...\n",
-    )
-
-
-def extract_community_candidates(result_html: str, result_url: str, community_name: str) -> list[CommunityCandidate]:
-    """从真实挂牌卡提取目标小区详情链接，避免把搜索词当作命中依据。"""
-    candidates: dict[str, CommunityCandidate] = {}
-    for block in re.finditer(r'<li\b[^>]*class="[^" ]*item[^" ]*[^>]*>(?P<body>.*?)</li>', result_html or "", re.I | re.S):
-        body = block.group("body")
-        link_match = re.search(
-            r'<a\b[^>]*href=["\'](?P<href>[^"\']*/xq/detail/(?P<community_id>\d+)[^"\']*)["\'][^>]*>(?P<name>.*?)</a>',
-            body,
-            re.I | re.S,
-        )
-        if not link_match:
-            continue
-        captured_name = _visible_text(link_match.group("name"))
-        if not community_name_match(community_name, captured_name):
-            continue
-        detail_url = urljoin(result_url, unescape(link_match.group("href")))
-        candidates.setdefault(
-            link_match.group("community_id"),
-            CommunityCandidate(
-                community_name=captured_name,
-                detail_url=detail_url,
-                community_id=link_match.group("community_id"),
-            ),
-        )
-    return list(candidates.values())
-
-
-def select_unique_candidate(candidates: list[CommunityCandidate], community_name: str) -> CommunityCandidate:
-    """要求目标名称最终只对应一个小区详情 ID。"""
-    matched = [item for item in candidates if community_name_match(community_name, item.community_name)]
-    if not matched:
-        raise RuntimeError(f"挂牌卡未找到目标小区：{community_name}")
-    if len(matched) > 1:
-        raise RuntimeError(
-            f"目标小区对应多个乐有家详情 ID，拒绝自动选择："
-            f"{[(item.community_id, item.community_name) for item in matched]}"
-        )
-    return matched[0]
-
-
-def build_candidate_names(city: str, administrative_district: str, community_name: str) -> list[str]:
-    """查询小区主数据构造搜索候选名：给定名优先，正式名与其余别名兜底。"""
-    names = [community_name]
-    try:
-        records = resolve_communities(city, administrative_district, community_name)
-    except Exception as exc:
-        log.warning("查询小区主数据失败，仅使用给定名搜索：%s（%s）", community_name, exc)
-        return names
-    if len(records) != 1:
-        log.info("主数据未唯一命中（%d 条），仅使用给定名搜索：%s", len(records), community_name)
-        return names
-    for candidate in [records[0].name, *(records[0].aliases or ())]:
-        normalized = re.sub(r"\s+", "", str(candidate or ""))
-        if normalized and normalized not in names:
-            names.append(normalized)
-    log.info("小区[%s]候选搜索名：%s", community_name, names)
-    return names
+    community_id: str
+    name: str
+    area: str          # areaName：行政区
+    place: str         # placeName：片区
+    on_sale_count: Optional[int]
+    alias: str = ""
 
 
 def parse_suggest_entries(payload_text: str) -> list[dict]:
-    """解析搜索联想接口返回（纯函数）；name 去掉高亮标记后输出。"""
+    """解析联想接口返回（纯函数）：只收小区条目；name 去掉高亮标记。
+
+    判别依据（2026-10-08 实测真实响应）：**小区条目看外层 row 的 ``type`` 是否为 0，
+    且 ``data`` 里有 ``id``**；筛选条件（城区/片区/地铁）的 ``data.type`` 是 1/2/4
+    且**没有 id**。注意小区条目的 ``data`` 里**不存在 type 字段**——早期误按
+    ``data.type == "0"`` 判断，会把全部小区条目滤掉。
+    """
     try:
         payload = json.loads(payload_text or "")
     except (json.JSONDecodeError, TypeError):
         return []
     entries: list[dict] = []
     for row in (payload or {}).get("searchArray") or []:
+        row_type = row.get("type")
+        if row_type is not None and str(row_type) != COMMUNITY_TYPE:
+            continue
         data = row.get("data") or {}
+        community_id = str(data.get("id") or "").strip()
+        if not community_id:
+            continue
+        count = data.get("sellCount")
         entries.append(
             {
-                "community_id": str(data.get("id") or ""),
-                "name": _visible_text(str(data.get("name") or "")),
+                "community_id": community_id,
+                "name": _visible_text(data.get("name")),
                 "area": str(data.get("areaName") or ""),
                 "place": str(data.get("placeName") or ""),
-                "sell_count": data.get("sellCount"),
+                "on_sale_count": int(count) if isinstance(count, (int, float)) else None,
+                "alias": str(data.get("alias") or ""),
             }
         )
     return entries
 
 
-async def search_suggest_candidate(
-    page,
-    *,
-    start_url: str,
-    candidate_name: str,
-    administrative_district: str,
-) -> Optional[CommunityCandidate]:
-    """搜索联想接口兜底：候选名完全匹配且唯一命中才采纳，服务在售 0 套小区。
+async def fetch_suggest(keyword: str, *, origin: str, debug: bool = False) -> list[dict]:
+    """匿名调用联想接口，返回小区候选列表（带限速与重试）。
 
-    接口 POST /esf/queryConditionAndContext（keyword=<名称>，无需登录态），
-    返回 searchArray[].data 内含 id/areaName/placeName/sellCount。ID 即挂牌
-    入口 b= 参数值；完全匹配 0 个或多个时一律放弃，延续“拒绝自动选择”。
+    注意 ``Accept-Encoding`` **是必需头**：2026-10-08 逐组隔离实测，不带它一律 403
+    （只带 UA/Referer/Accept/X-Requested-With/Origin 也照样 403），带上即 200。
+    该站风控把它当判据，故此处必须显式声明并自行解压。
     """
-    expr = (
-        "fetch('/esf/queryConditionAndContext',{method:'POST',credentials:'include',"
-        "headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},"
-        "body:'keyword=' + encodeURIComponent(%s)})"
-        ".then(function(r){return r.text()})"
-        ".catch(function(e){return 'ERR ' + e})" % json.dumps(candidate_name)
-    )
-    try:
-        raw = await page.evaluate(expr, await_promise=True)
-    except Exception as exc:
-        log.warning("搜索名[%s]联想接口调用失败：%s", candidate_name, exc)
-        return None
-    if not isinstance(raw, str) or raw.startswith("ERR "):
-        log.warning("搜索名[%s]联想接口返回异常：%s", candidate_name, str(raw)[:200])
-        return None
-    entries = parse_suggest_entries(raw)
-    if not entries:
-        log.info("搜索名[%s]联想接口无候选", candidate_name)
-        return None
-    exact = [
-        entry
-        for entry in entries
-        if entry["name"] == candidate_name
-        and (
-            not entry["area"]
-            or entry["area"] in administrative_district
-            or administrative_district.startswith(entry["area"])
-        )
-    ]
-    if not exact:
-        log.info(
-            "搜索名[%s]联想候选无完全匹配：%s",
-            candidate_name,
-            [(entry["name"], entry["area"], entry["sell_count"]) for entry in entries][:5],
-        )
-        return None
-    ids = {entry["community_id"] for entry in exact}
-    if len(ids) > 1:
-        log.warning(
-            "搜索名[%s]联想命中多个小区 ID，拒绝自动选择：%s",
-            candidate_name,
-            [(entry["community_id"], entry["name"], entry["area"]) for entry in exact],
-        )
-        return None
-    chosen = exact[0]
-    log.info(
-        "搜索名[%s]联想唯一命中：id=%s（%s %s，在售 %s 套）",
-        candidate_name,
-        chosen["community_id"],
-        chosen["area"],
-        chosen["place"],
-        chosen["sell_count"],
-    )
-    # 联想接口不提供详情链接，详情 URL 留空；入口以 listing_page_url 为准。
-    return CommunityCandidate(community_name=chosen["name"], detail_url="", community_id=chosen["community_id"])
+    url = origin + SUGGEST_PATH
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Referer": origin + "/esf/",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+        "Origin": origin,
+        "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not A(Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+    }
+    body = urlencode({"keyword": keyword}).encode("utf-8")
 
+    def _request() -> str:
+        with urlopen(Request(url, headers=headers, data=body),
+                     timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            raw = response.read()
+            if "gzip" in (response.headers.get("Content-Encoding") or ""):
+                raw = gzip.decompress(raw)
+            return raw.decode("utf-8", "ignore")
 
-async def wait_for_manual_close() -> None:
-    """在结束前保留浏览器，方便核验实际页面。"""
-    await asyncio.to_thread(
-        input, "\n全部小区已处理完成。你确认无误后按回车结束脚本（浏览器将关闭）...\n"
-    )
-
-
-async def search_and_extract_candidate(
-    page,
-    *,
-    start_url: str,
-    expected_host: str,
-    candidate_name: str,
-) -> Optional[CommunityCandidate]:
-    """按单个候选名搜索并提取唯一小区候选；未命中返回 None。"""
-    search_url = f"{start_url}?c={quote(candidate_name)}"
-    log.info("搜索 URL：%s", search_url)
-    await page.get(search_url)
-    await page
-    await asyncio.sleep(3)
-    result_html = await ensure_accessible(
-        page,
-        label=f"小区挂牌搜索页[{candidate_name}]",
-        expected_host=expected_host,
-    )
-    await dump_html(page, f"lyj_community_page_search_{_safe_file_token(candidate_name)}")
-
-    try:
-        snapshots = lyj_parsers.parse_listing_snapshots(result_html)
-        if not has_matching_community_snapshots(snapshots, candidate_name):
-            log.info(
-                "搜索名[%s]挂牌搜索结果房源未匹配目标小区：结构化房源=%d 条",
-                candidate_name,
-                len(snapshots),
+    last_error: Optional[Exception] = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        await asyncio.sleep(REQUEST_INTERVAL_SECONDS)
+        try:
+            payload_text = await asyncio.to_thread(_request)
+            entries = parse_suggest_entries(payload_text)
+            if debug:
+                log.info("[debug] keyword=%s 原始响应前 300 字：%s", keyword, payload_text[:300])
+            return entries
+        except (URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            log.warning(
+                "联想接口第 %d/%d 次调用失败（keyword=%s）：%s",
+                attempt, MAX_ATTEMPTS, keyword, exc,
             )
-            return None
-
-        actual_search_url = page.target.url or search_url
-        return select_unique_candidate(
-            extract_community_candidates(result_html, actual_search_url, candidate_name),
-            candidate_name,
-        )
-    except RuntimeError as exc:
-        log.info("搜索名[%s]未提取到目标小区唯一候选：%s", candidate_name, exc)
-        return None
+            await asyncio.sleep(2 * attempt)
+    raise RuntimeError(f"联想接口连续 {MAX_ATTEMPTS} 次调用失败：{last_error}")
 
 
-async def open_and_verify_listing(
-    page,
+def build_candidate_names(city: str, administrative_district: str, community_name: str) -> list[str]:
+    """构造搜索候选名：给定名 → 主数据正式名/别名 → **主干词**兜底。
+
+    主干词排在最后（精确度最低），只在前面都搜不到时才启用；命中会标记为
+    ``*_stem``，便于事后审计哪些是跨粒度映射来的。
+    """
+    names = [community_name]
+    try:
+        records = resolve_communities(city, administrative_district, community_name)
+    except Exception as exc:
+        log.warning("查询小区主数据失败，仅使用给定名搜索：%s（%s）", community_name, exc)
+        records = []
+    if records and len(records) != 1:
+        log.info("主数据未唯一命中（%d 条），仅使用给定名搜索：%s", len(records), community_name)
+        records = []
+    if records:
+        for candidate in [records[0].name, *(records[0].aliases or ())]:
+            normalized = re.sub(r"\s+", "", str(candidate or ""))
+            if normalized and normalized not in names:
+                names.append(normalized)
+    # 主干词兜底（剥期数/后缀/行政区字样）
+    for base in list(names):
+        for stem in stem_variants(base):
+            if stem not in names:
+                names.append(stem)
+    log.info("小区[%s]候选搜索名：%s", community_name, names)
+    return names
+
+
+def entry_aliases(entry: dict) -> set[str]:
+    """取条目别名（``alias`` 字段可能含多个、且带高亮标记）。"""
+    raw = _visible_text(entry.get("alias") or "")
+    return {part for part in re.split(r"[\s,，、/|;；]+", raw) if part}
+
+
+def entry_name_variants(entry: dict) -> set[str]:
+    """条目的全部容错名称键：正式名 + 别名的各种变体。
+
+    别名的意义：接口用 ``alias`` 承载搜索同义词——实测搜「山海津」返回的条目
+    正式名是「龙瑞佳园」、别名才是「山海津」，故别名必须参与匹配。
+    """
+    variants = name_variants(entry.get("name") or "")
+    for alias in entry_aliases(entry):
+        variants |= name_variants(alias)
+    return variants
+
+
+def match_entries(entries: list[dict], keyword: str, administrative_district: str) -> list[dict]:
+    """按行政区 + 名称（正式名/别名，含变体容错）筛出命中项。"""
+    expected = normalize_district(administrative_district)
+    keyword_variants = name_variants(keyword)
+    hits: list[dict] = []
+    for entry in entries:
+        if normalize_district(entry["area"]) != expected:
+            continue
+        if keyword_variants & entry_name_variants(entry):
+            hits.append(entry)
+    return hits
+
+
+async def resolve_community(
     *,
-    start_url: str,
-    expected_host: str,
+    city: str,
+    administrative_district: str,
     community_name: str,
-    candidate: CommunityCandidate,
-    matched_name: str,
-) -> tuple[str, int]:
-    """打开 b= 入口并复核归属；成功返回 (实际入口 URL, 结构化房源数)，失败抛 RuntimeError。"""
-    listing_page_url = f"{start_url}?b={candidate.community_id}"
-    await page.get(listing_page_url)
-    await page
-    await asyncio.sleep(2)
-    listing_html = await ensure_accessible(
-        page,
-        label="小区挂牌页",
-        expected_host=expected_host,
-    )
-    await dump_html(page, f"lyj_community_page_listing_{_safe_file_token(community_name)}")
-    listing_snapshots = lyj_parsers.parse_listing_snapshots(listing_html)
-    page_text = _visible_text(listing_html)
-    # 0 挂牌页会用其它小区的房源做推荐，房源卡不能作为归属依据；
-    # 以页面自身的小区信息（标题/选中条件/小区卡）为准，房源卡命中视为加强信号。
-    if listing_snapshots and has_matching_community_snapshots(listing_snapshots, matched_name):
-        pass
-    elif any(t and t in page_text for t in (matched_name, candidate.community_name)):
-        log.info("小区[%s]按页面小区信息完成复核（房源卡未命中，在售可能为 0 或为推荐房源）", matched_name)
-    else:
-        raise RuntimeError(
-            f"挂牌页复核未匹配目标小区：{matched_name}，入口 {listing_page_url}"
-        )
-    actual_listing_url = page.target.url or listing_page_url
-    actual_community_id = re.search(r"(?:[?&])b=(\d+)", actual_listing_url)
-    if not actual_community_id or actual_community_id.group(1) != candidate.community_id:
-        raise RuntimeError(
-            f"挂牌页小区 ID 校验失败：期望 {candidate.community_id}，实际 URL={actual_listing_url}"
-        )
-    return actual_listing_url, len(listing_snapshots)
+    origin: str,
+    debug: bool = False,
+) -> dict:
+    """解析单个小区：候选名逐个走联想接口，返回平台无关的解析结果。
+
+    返回字段：matched_search_name / platform_name / platform_district /
+    platform_area / xiaoqu_id / match_via / on_sale_count。
+    全部候选名失败抛 RuntimeError（附候选明细供人工裁决）。
+    """
+    names = build_candidate_names(city, administrative_district, community_name)
+    # 主干词集合：用于把「跨粒度命中」标记成 *_stem，便于事后审计
+    stem_set = {stem for base in names for stem in stem_variants(base)}
+    candidates_seen: dict[str, str] = {}
+    for name in names:
+        entries = await fetch_suggest(name, origin=origin, debug=debug)
+        hits = match_entries(entries, name, administrative_district)
+        for entry in hits:
+            on_sale = entry["on_sale_count"] if entry["on_sale_count"] is not None else "未知"
+            candidates_seen.setdefault(
+                entry["community_id"],
+                f"{entry['name']}（{entry['area']}/{entry['place']}，在售{on_sale}）",
+            )
+        chosen: Optional[dict] = None
+        match_via = ""
+        # 优先级一：**正式名**归一化全等命中唯一 → 直接采纳。
+        # 必须与"别名全等"分开：实测搜「上善梧桐苑」时，正主 48932 的正式名就是它，
+        # 而 48094 只是把「上善梧桐苑」列为别名——若两档混在一起会凑成两个 id 而误判歧义。
+        name_exact_hits = [e for e in hits if name_key(e["name"]) == name_key(name)]
+        alias_exact_hits = [
+            e for e in hits
+            if name_key(e["name"]) != name_key(name)
+            and any(name_key(a) == name_key(name) for a in entry_aliases(e))
+        ]
+        if name_exact_hits and len({e["community_id"] for e in name_exact_hits}) == 1:
+            chosen = name_exact_hits[0]
+            match_via = "name_exact"
+        # 优先级二：别名全等命中唯一 → 采纳（如搜「山海津」返回的正式名是「龙瑞佳园」）。
+        elif alias_exact_hits and len({e["community_id"] for e in alias_exact_hits}) == 1:
+            chosen = alias_exact_hits[0]
+            match_via = "alias_exact"
+        # 优先级三：其余命中必须收敛到唯一 id，多个即歧义，留人工。
+        elif hits and len({entry["community_id"] for entry in hits}) == 1:
+            chosen = hits[0]
+            match_via = "name_variant"
+        if chosen is not None:
+            if name in stem_set:
+                match_via = f"{match_via}_stem"      # 主干词命中（跨粒度映射）
+            log.info(
+                "候选名[%s]唯一命中 xiaoqu_id=%s 平台名=%s（%s %s，%s）",
+                name, chosen["community_id"], chosen["name"],
+                chosen["area"], chosen["place"], match_via,
+            )
+            return {
+                "matched_search_name": name,
+                "platform_name": chosen["name"],
+                "platform_district": chosen["area"] or "未识别",
+                "platform_area": chosen["place"] or "未识别",
+                "xiaoqu_id": chosen["community_id"],
+                "match_via": match_via,
+                "on_sale_count": chosen["on_sale_count"],
+            }
+        if hits:
+            log.warning(
+                "候选名[%s]命中 %d 个小区，拒绝自动选择：%s",
+                name, len({entry["community_id"] for entry in hits}),
+                sorted({entry["community_id"] for entry in hits}),
+            )
+    detail = "；".join(f"{cid}: {desc}" for cid, desc in list(candidates_seen.items())[:10])
+    suffix = "（仅列前 10 条）" if len(candidates_seen) > 10 else ""
+    raise RuntimeError(f"候选名 {names} 均未唯一命中目标小区；候选明细：{detail or '无'}{suffix}")
 
 
 async def collect_community(
-    page,
     *,
-    start_url: str,
-    expected_host: str,
+    origin: str,
     city: str,
     administrative_district: str,
     community_district: str,
     community_name: str,
+    debug: bool,
 ) -> dict:
-    """处理单个小区：候选名逐个搜索/联想 → 逐个入口复核 → 全部失败才判定失败。"""
-    names = build_candidate_names(city, administrative_district, community_name)
-    matched_name = ""
-    resolved_via = ""
-    candidate: Optional[CommunityCandidate] = None
-    actual_listing_url = ""
-    structured_count = 0
-    review_errors: list[str] = []
-    for name in names:
-        card_candidate = await search_and_extract_candidate(
-            page,
-            start_url=start_url,
-            expected_host=expected_host,
-            candidate_name=name,
-        )
-        candidates: list[tuple[str, CommunityCandidate]] = []
-        if card_candidate is not None:
-            candidates.append(("listing_card", card_candidate))
-        else:
-            # 挂牌卡路径失败（含在售 0 套小区）：搜索联想接口兜底。
-            suggest_candidate = await search_suggest_candidate(
-                page,
-                start_url=start_url,
-                candidate_name=name,
-                administrative_district=administrative_district,
-            )
-            if suggest_candidate is not None:
-                candidates.append(("search_suggest", suggest_candidate))
-        for via, item in candidates:
-            try:
-                actual_listing_url, structured_count = await open_and_verify_listing(
-                    page,
-                    start_url=start_url,
-                    expected_host=expected_host,
-                    community_name=community_name,
-                    candidate=item,
-                    matched_name=name,
-                )
-            except RuntimeError as exc:
-                # 入口复核不通过不直接判失败：换下一个候选来源/候选名继续兜底。
-                log.info("小区[%s]候选[%s|%s]复核未通过：%s", community_name, name, via, exc)
-                review_errors.append(f"{name}({via})")
-                continue
-            candidate, matched_name, resolved_via = item, name, via
-            break
-        if candidate is not None:
-            break
-    if candidate is None:
-        detail = f"；已试入口复核失败：{'、'.join(review_errors[-3:])}" if review_errors else ""
-        raise RuntimeError(f"候选名 {names} 均未提取到目标小区唯一候选，拒绝自动选择{detail}")
+    """处理单个小区：解析出 xiaoqu_id 后按乐有家惯例派生入口 URL。
 
+    社区页初始化**只落入口**（``listing_page_url``）；详情 URL 仅作输出辅助。
+    成交不落（乐有家不对外展示成交）。
+    """
+    resolved = await resolve_community(
+        city=city,
+        administrative_district=administrative_district,
+        community_name=community_name,
+        origin=origin,
+        debug=debug,
+    )
+    xiaoqu_id = resolved["xiaoqu_id"]
     return {
         "city": city,
         "administrative_district": administrative_district,
         "community_district": community_district,
         "community_name": community_name,
-        "matched_search_name": matched_name,
-        "resolve_via": resolved_via,
-        "platform_name": candidate.community_name,
-        "community_detail_url": candidate.detail_url,
-        "listing_page_url": actual_listing_url,
-        "structured_listing_count": structured_count,
+        "matched_search_name": resolved["matched_search_name"],
+        "platform_name": resolved["platform_name"],
+        "platform_district": resolved["platform_district"],
+        "platform_area": resolved["platform_area"],
+        "xiaoqu_id": xiaoqu_id,
+        "community_detail_url": DETAIL_URL_TEMPLATE.format(origin=origin, xiaoqu_id=xiaoqu_id),
+        "listing_page_url": ENTRY_URL_TEMPLATE.format(origin=origin, xiaoqu_id=xiaoqu_id),
+        "match_via": resolved["match_via"],
+        "on_sale_count": resolved["on_sale_count"],
     }
 
 
@@ -422,100 +443,95 @@ async def main(
     city: str,
     administrative_district: str,
     community_names: list[str],
-    community_district: str,
-    manual_login: bool,
-    debug: bool,
+    community_district: str = "",
+    manual_login: bool = False,
+    debug: bool = False,
     manual_close: bool = True,
 ) -> list[dict]:
-    """批量执行乐有家小区挂牌页 URL 初始化，单小区失败不中断。
+    """批量执行乐有家小区入口初始化（匿名联想接口版），单小区失败不中断。
 
-    返回逐小区结果摘要（含 success 标记）；manual_close=False 时跳过结束前的
-    人工确认回车，供统一初始化入口 scripts/initialize_community_page/init_community_pages.py 复用。
+    签名与统一入口 ``init_community_pages`` 一致：manual_login / manual_close 为
+    兼容参数（接口版无浏览器与登录态，自动忽略）。返回逐小区结果摘要（含 success
+    标记），字段与落库契约一致（落库只读 ``success`` 与 ``listing_page_url``）。
     """
-    if debug:
-        set_debug_mode(True)
-
+    if manual_login:
+        log.info("接口版无登录态，忽略 manual_login 参数")
     start_url = get_start_url("lyj", city)
-    expected_host = _expected_host(start_url)
-    browser = await uc.start(
-        headless=False,
-        browser_executable_path=config.BROWSER_PATH,
-        lang="zh-CN",
-    )
-    try:
-        page = await browser.get(start_url)
-        await page
-        await asyncio.sleep(3)
-        await ensure_accessible(page, label="首页", expected_host=expected_host)
-        await dump_html(page, "lyj_community_page_home")
+    parsed = urlparse(start_url)
+    origin = f"{parsed.scheme}://{(parsed.hostname or '').lower()}"
 
-        # 乐有家搜索需要已登录会话；人工登录确认必须发生在搜索之前。
-        if manual_login:
-            await wait_for_manual_login()
-            await page.get(start_url)
-            await page
-            await asyncio.sleep(3)
-            await ensure_accessible(page, label="登录后首页", expected_host=expected_host)
-
-        summaries: list[dict] = []
-        for community_name in community_names:
-            try:
-                summary = await collect_community(
-                    page,
-                    start_url=start_url,
-                    expected_host=expected_host,
-                    city=city,
-                    administrative_district=administrative_district,
-                    community_district=community_district,
-                    community_name=community_name,
-                )
-                summary["success"] = True
-                summaries.append(summary)
-                print(f"\n[成功] {community_name}")
-                print(f"城市：{summary['city']}")
-                print(f"行政区：{summary['administrative_district']}")
-                print(f"片区（辅助）：{summary['community_district'] or '未提供'}")
-                print(f"命中搜索名：{summary['matched_search_name']}")
-                print(f"平台小区名称：{summary['platform_name']}")
-                print(f"community_detail_url（辅助）：{summary['community_detail_url']}")
-                print(f"listing_page_url：{summary['listing_page_url']}")
-                print(f"挂牌页结构化房源：{summary['structured_listing_count']} 条")
-            except Exception as exc:
-                log.error("小区[%s]处理失败，继续下一个：%s", community_name, exc)
-                summaries.append(
-                    {"community_name": community_name, "success": False, "error": str(exc)}
-                )
-                print(f"\n[失败] {community_name} → {exc}")
-
-        print("\n===== 批量结果汇总 =====")
-        for item in summaries:
-            if item["success"]:
+    summaries: list[dict] = []
+    consecutive_failures = 0
+    for community_name in community_names:
+        try:
+            summary = await collect_community(
+                origin=origin,
+                city=city,
+                administrative_district=administrative_district,
+                community_district=community_district,
+                community_name=community_name,
+                debug=debug,
+            )
+            summary["success"] = True
+            consecutive_failures = 0
+            summaries.append(summary)
+            print(f"\n[成功] {community_name}")
+            print(f"城市：{summary['city']}")
+            print(f"行政区：{summary['administrative_district']}")
+            print(f"片区（辅助）：{summary['community_district'] or '未提供'}")
+            print(f"命中搜索名：{summary['matched_search_name']}")
+            print(f"平台小区名称：{summary['platform_name']}（{summary['match_via']}命中，"
+                  f"在售{summary['on_sale_count'] if summary['on_sale_count'] is not None else '未知'}）")
+            print(f"平台行政区：{summary['platform_district']}")
+            print(f"平台片区：{summary['platform_area']}")
+            print(f"xiaoqu_id：{summary['xiaoqu_id']}")
+            print(f"community_detail_url（辅助，不落库）：{summary['community_detail_url']}")
+            print(f"listing_page_url：{summary['listing_page_url']}")
+        except Exception as exc:
+            log.error("小区[%s]处理失败，继续下一个：%s", community_name, exc)
+            summaries.append(
+                {"community_name": community_name, "success": False, "error": str(exc)}
+            )
+            print(f"\n[失败] {community_name} → {exc}")
+            # 风控停止闸：只对**传输层失败**（403 / 接口连续调用失败）累加，
+            # 「候选名均未唯一命中」是正常业务结果（该小区平台上就没有），必须归零——
+            # 否则一批里连着几个查不到的小区就会误判成被拦而中止整批。
+            blocked_like = any(
+                marker in str(exc)
+                for marker in ("联想接口连续", "403", "Forbidden", "Timed out", "Timeout")
+            )
+            consecutive_failures = consecutive_failures + 1 if blocked_like else 0
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                 print(
-                    f"[成功] {item['community_name']}：命中搜索名={item['matched_search_name']}，"
-                    f"listing={item['listing_page_url']}"
+                    f"\n[停止] 连续 {consecutive_failures} 次接口层失败，疑似被乐有家风控拦截，本批中止。\n"
+                    f"       剩余小区**未被判定为失败**；稍后重跑本批即可（已落库的会自动跳过）。"
                 )
-            else:
-                print(f"[失败] {item['community_name']}：{item['error']}")
-        log.info(
-            "批量处理完成：共 %d 个，成功 %d 个",
-            len(summaries),
-            sum(1 for item in summaries if item["success"]),
-        )
-        if manual_close:
-            await wait_for_manual_close()
-    finally:
-        browser.stop()
+                break
 
+    print("\n===== 批量结果汇总 =====")
+    for item in summaries:
+        if item["success"]:
+            print(
+                f"[成功] {item['community_name']}：平台名={item['platform_name']}，"
+                f"xiaoqu_id={item['xiaoqu_id']}，listing={item['listing_page_url']}"
+            )
+        else:
+            print(f"[失败] {item['community_name']}：{item['error']}")
+    log.info(
+        "批量处理完成：共 %d 个，成功 %d 个",
+        len(summaries),
+        sum(1 for item in summaries if item["success"]),
+    )
     return summaries
 
 
 def cli() -> None:
     """解析命令行参数并启动脚本。"""
     parser = argparse.ArgumentParser(
-        description="乐有家小区挂牌页 URL 初始化 MVP（批量，支持别名兜底）"
+        description="乐有家小区挂牌页 URL 初始化 MVP（匿名联想接口版，无浏览器无登录）"
     )
     parser.add_argument("--city", default="深圳", help="城市名称")
-    parser.add_argument("--administrative-district", required=True, help="主数据行政区，仅作输出上下文")
+    parser.add_argument("--administrative-district", required=True, help="主数据行政区")
     parser.add_argument("--community-district", default="", help="主数据片区，仅作辅助输出")
     parser.add_argument(
         "--community",
@@ -523,10 +539,10 @@ def cli() -> None:
         nargs="+",
         help="目标小区名称（可多个），支持主数据别名，未命中时自动按正式名/别名兜底重试",
     )
-    parser.add_argument("--manual-login", action="store_true", help="验证码/登录拦截时等待人工处理")
-    parser.add_argument("--debug", action="store_true", help="导出首页和挂牌页 HTML")
+    parser.add_argument("--manual-login", action="store_true", help="兼容参数：接口版无需登录，忽略")
+    parser.add_argument("--debug", action="store_true", help="打印联想接口原始响应片段")
     args = parser.parse_args()
-    uc.loop().run_until_complete(
+    asyncio.run(
         main(
             city=args.city,
             administrative_district=args.administrative_district,
