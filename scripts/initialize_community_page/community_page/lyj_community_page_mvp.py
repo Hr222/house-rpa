@@ -4,6 +4,10 @@
 流程：打开城市二手房页 → 按候选名逐个搜索 → 从结构化挂牌卡确认小区 ID →
 按小区 ID 拼接挂牌列表入口，并实际复核页面仍命中目标小区。
 
+挂牌卡路径失败时（典型为在售 0 套小区，搜索结果无房源卡）走搜索联想接口
+POST /esf/queryConditionAndContext 兜底：候选名完全匹配且唯一命中才采纳，
+行政区作辅助核对；0 挂牌复核退化为页面可见文本含小区名。
+
 给定名未匹配到目标小区时，查询小区主数据（只读）换正式名与其余别名重试；
 全部候选名失败才判定该小区失败。单个小区失败只记录并继续，不关闭浏览器；
 浏览器仅在全部小区处理完并经人工确认后才退出。
@@ -20,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from dataclasses import dataclass
 from html import unescape
 import logging
@@ -159,6 +164,97 @@ def build_candidate_names(city: str, administrative_district: str, community_nam
     return names
 
 
+def parse_suggest_entries(payload_text: str) -> list[dict]:
+    """解析搜索联想接口返回（纯函数）；name 去掉高亮标记后输出。"""
+    try:
+        payload = json.loads(payload_text or "")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    entries: list[dict] = []
+    for row in (payload or {}).get("searchArray") or []:
+        data = row.get("data") or {}
+        entries.append(
+            {
+                "community_id": str(data.get("id") or ""),
+                "name": _visible_text(str(data.get("name") or "")),
+                "area": str(data.get("areaName") or ""),
+                "place": str(data.get("placeName") or ""),
+                "sell_count": data.get("sellCount"),
+            }
+        )
+    return entries
+
+
+async def search_suggest_candidate(
+    page,
+    *,
+    start_url: str,
+    candidate_name: str,
+    administrative_district: str,
+) -> Optional[CommunityCandidate]:
+    """搜索联想接口兜底：候选名完全匹配且唯一命中才采纳，服务在售 0 套小区。
+
+    接口 POST /esf/queryConditionAndContext（keyword=<名称>，无需登录态），
+    返回 searchArray[].data 内含 id/areaName/placeName/sellCount。ID 即挂牌
+    入口 b= 参数值；完全匹配 0 个或多个时一律放弃，延续“拒绝自动选择”。
+    """
+    expr = (
+        "fetch('/esf/queryConditionAndContext',{method:'POST',credentials:'include',"
+        "headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},"
+        "body:'keyword=' + encodeURIComponent(%s)})"
+        ".then(function(r){return r.text()})"
+        ".catch(function(e){return 'ERR ' + e})" % json.dumps(candidate_name)
+    )
+    try:
+        raw = await page.evaluate(expr, await_promise=True)
+    except Exception as exc:
+        log.warning("搜索名[%s]联想接口调用失败：%s", candidate_name, exc)
+        return None
+    if not isinstance(raw, str) or raw.startswith("ERR "):
+        log.warning("搜索名[%s]联想接口返回异常：%s", candidate_name, str(raw)[:200])
+        return None
+    entries = parse_suggest_entries(raw)
+    if not entries:
+        log.info("搜索名[%s]联想接口无候选", candidate_name)
+        return None
+    exact = [
+        entry
+        for entry in entries
+        if entry["name"] == candidate_name
+        and (
+            not entry["area"]
+            or entry["area"] in administrative_district
+            or administrative_district.startswith(entry["area"])
+        )
+    ]
+    if not exact:
+        log.info(
+            "搜索名[%s]联想候选无完全匹配：%s",
+            candidate_name,
+            [(entry["name"], entry["area"], entry["sell_count"]) for entry in entries][:5],
+        )
+        return None
+    ids = {entry["community_id"] for entry in exact}
+    if len(ids) > 1:
+        log.warning(
+            "搜索名[%s]联想命中多个小区 ID，拒绝自动选择：%s",
+            candidate_name,
+            [(entry["community_id"], entry["name"], entry["area"]) for entry in exact],
+        )
+        return None
+    chosen = exact[0]
+    log.info(
+        "搜索名[%s]联想唯一命中：id=%s（%s %s，在售 %s 套）",
+        candidate_name,
+        chosen["community_id"],
+        chosen["area"],
+        chosen["place"],
+        chosen["sell_count"],
+    )
+    # 联想接口不提供详情链接，详情 URL 留空；入口以 listing_page_url 为准。
+    return CommunityCandidate(community_name=chosen["name"], detail_url="", community_id=chosen["community_id"])
+
+
 async def wait_for_manual_close() -> None:
     """在结束前保留浏览器，方便核验实际页面。"""
     await asyncio.to_thread(
@@ -206,34 +302,16 @@ async def search_and_extract_candidate(
         return None
 
 
-async def collect_community(
+async def open_and_verify_listing(
     page,
     *,
     start_url: str,
     expected_host: str,
-    city: str,
-    administrative_district: str,
-    community_district: str,
     community_name: str,
-) -> dict:
-    """处理单个小区：候选名兜底搜索 → 拼接挂牌列表入口并复核 → 返回结果摘要。"""
-    names = build_candidate_names(city, administrative_district, community_name)
-    candidate: Optional[CommunityCandidate] = None
-    matched_name = ""
-    for name in names:
-        candidate = await search_and_extract_candidate(
-            page,
-            start_url=start_url,
-            expected_host=expected_host,
-            candidate_name=name,
-        )
-        if candidate is not None:
-            matched_name = name
-            break
-    if candidate is None:
-        raise RuntimeError(f"候选名 {names} 均未提取到目标小区唯一候选，拒绝自动选择")
-
-    # c=名称只是搜索入口；b=小区 ID 才是乐有家的小区挂牌列表入口。
+    candidate: CommunityCandidate,
+    matched_name: str,
+) -> tuple[str, int]:
+    """打开 b= 入口并复核归属；成功返回 (实际入口 URL, 结构化房源数)，失败抛 RuntimeError。"""
     listing_page_url = f"{start_url}?b={candidate.community_id}"
     await page.get(listing_page_url)
     await page
@@ -245,14 +323,86 @@ async def collect_community(
     )
     await dump_html(page, f"lyj_community_page_listing_{_safe_file_token(community_name)}")
     listing_snapshots = lyj_parsers.parse_listing_snapshots(listing_html)
-    if not has_matching_community_snapshots(listing_snapshots, matched_name):
-        raise RuntimeError(f"挂牌页复核未匹配目标小区：{matched_name}")
+    page_text = _visible_text(listing_html)
+    # 0 挂牌页会用其它小区的房源做推荐，房源卡不能作为归属依据；
+    # 以页面自身的小区信息（标题/选中条件/小区卡）为准，房源卡命中视为加强信号。
+    if listing_snapshots and has_matching_community_snapshots(listing_snapshots, matched_name):
+        pass
+    elif any(t and t in page_text for t in (matched_name, candidate.community_name)):
+        log.info("小区[%s]按页面小区信息完成复核（房源卡未命中，在售可能为 0 或为推荐房源）", matched_name)
+    else:
+        raise RuntimeError(
+            f"挂牌页复核未匹配目标小区：{matched_name}，入口 {listing_page_url}"
+        )
     actual_listing_url = page.target.url or listing_page_url
     actual_community_id = re.search(r"(?:[?&])b=(\d+)", actual_listing_url)
     if not actual_community_id or actual_community_id.group(1) != candidate.community_id:
         raise RuntimeError(
             f"挂牌页小区 ID 校验失败：期望 {candidate.community_id}，实际 URL={actual_listing_url}"
         )
+    return actual_listing_url, len(listing_snapshots)
+
+
+async def collect_community(
+    page,
+    *,
+    start_url: str,
+    expected_host: str,
+    city: str,
+    administrative_district: str,
+    community_district: str,
+    community_name: str,
+) -> dict:
+    """处理单个小区：候选名逐个搜索/联想 → 逐个入口复核 → 全部失败才判定失败。"""
+    names = build_candidate_names(city, administrative_district, community_name)
+    matched_name = ""
+    resolved_via = ""
+    candidate: Optional[CommunityCandidate] = None
+    actual_listing_url = ""
+    structured_count = 0
+    review_errors: list[str] = []
+    for name in names:
+        card_candidate = await search_and_extract_candidate(
+            page,
+            start_url=start_url,
+            expected_host=expected_host,
+            candidate_name=name,
+        )
+        candidates: list[tuple[str, CommunityCandidate]] = []
+        if card_candidate is not None:
+            candidates.append(("listing_card", card_candidate))
+        else:
+            # 挂牌卡路径失败（含在售 0 套小区）：搜索联想接口兜底。
+            suggest_candidate = await search_suggest_candidate(
+                page,
+                start_url=start_url,
+                candidate_name=name,
+                administrative_district=administrative_district,
+            )
+            if suggest_candidate is not None:
+                candidates.append(("search_suggest", suggest_candidate))
+        for via, item in candidates:
+            try:
+                actual_listing_url, structured_count = await open_and_verify_listing(
+                    page,
+                    start_url=start_url,
+                    expected_host=expected_host,
+                    community_name=community_name,
+                    candidate=item,
+                    matched_name=name,
+                )
+            except RuntimeError as exc:
+                # 入口复核不通过不直接判失败：换下一个候选来源/候选名继续兜底。
+                log.info("小区[%s]候选[%s|%s]复核未通过：%s", community_name, name, via, exc)
+                review_errors.append(f"{name}({via})")
+                continue
+            candidate, matched_name, resolved_via = item, name, via
+            break
+        if candidate is not None:
+            break
+    if candidate is None:
+        detail = f"；已试入口复核失败：{'、'.join(review_errors[-3:])}" if review_errors else ""
+        raise RuntimeError(f"候选名 {names} 均未提取到目标小区唯一候选，拒绝自动选择{detail}")
 
     return {
         "city": city,
@@ -260,10 +410,11 @@ async def collect_community(
         "community_district": community_district,
         "community_name": community_name,
         "matched_search_name": matched_name,
+        "resolve_via": resolved_via,
         "platform_name": candidate.community_name,
         "community_detail_url": candidate.detail_url,
         "listing_page_url": actual_listing_url,
-        "structured_listing_count": len(listing_snapshots),
+        "structured_listing_count": structured_count,
     }
 
 

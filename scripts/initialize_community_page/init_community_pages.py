@@ -34,10 +34,13 @@ aliases 为主数据核对信息，搜索兜底仍由各 MVP 内部查主数据�
 校验，多平台全量验证走 api_server 正式链路）：
   python -m scripts.initialize_community_page.init_community_pages \
       --input test_data/community_init_list.json \
-      --platforms ke [--manual-login] [--dry-run] [--debug]
+      --platforms fang [--dry-run] [--debug]
 
 边界：本脚本是运行入口壳，不做页面解析；浏览器、登录态与风控协议全部
 留在各 MVP 模块内（独立浏览器、固定 profile、拦截时人工回车确认）。
+例外：lj 平台自 2026-09-29 起指向匿名 headerSearch API 版 MVP
+（lj_community_page_api_mvp），无浏览器与登录态，manual-login 参数被忽略；
+ke 平台不单独初始化，由 lj 入口经 derive_ke_from_lj.py 直接派生。
 主数据只读；本入口不直接依赖 app 落库能力，数据库更新统一经同目录的
 save_community_platform_pages.py 对接。
 """
@@ -64,14 +67,25 @@ log = logging.getLogger(__name__)
 
 PLATFORM_MODULES = {
     "ajk": "scripts.initialize_community_page.community_page.ajk_community_page_mvp",
-    "ke": "scripts.initialize_community_page.community_page.ke_community_page_mvp",
-    "fang": "scripts.initialize_community_page.community_page.fang_community_page_mvp",
-    "lj": "scripts.initialize_community_page.community_page.lj_community_page_mvp",
+    # ke 无独立初始化通道：贝壳与链家小区 communityId 一致，由 lj 入口经
+    # derive_ke_from_lj.py 直接派生，故本表不登记 ke。
+    # 浏览器版 ke_community_page_mvp 已于 2026-10-08 删除（不留兜底）。
+    # fang 走匿名搜索联想 API 版（无浏览器/无登录）。2026-09-30 实测房天下风控是
+    # 路径级：/house/kw 搜索页与 /house-xm、/loupan 内容页返回滑块验证码，
+    # 而 /asynclist/searchsuggestion/suggestionList 匿名可用，故 v2 只走该接口。
+    # 旧浏览器版 fang_community_page_mvp 已删除（不留兜底）。
+    "fang": "scripts.initialize_community_page.community_page.fang_community_page_http_mvp",
+    # lj 走匿名 headerSearch API 版（无浏览器/无登录；2026-09-29 因账号封禁风险切换）。
+    # 旧浏览器版 lj_community_page_mvp 已删除（不留兜底）。
+    "lj": "scripts.initialize_community_page.community_page.lj_community_page_api_mvp",
     "lyj": "scripts.initialize_community_page.community_page.lyj_community_page_mvp",
 }
 # 成交页只有链家与房天下；房天下主流程无片区辅助参数。
 SUPPORTS_DEAL = {"lj", "fang"}
-SUPPORTS_COMMUNITY_DISTRICT = {"ajk", "ke", "lj", "lyj"}
+SUPPORTS_COMMUNITY_DISTRICT = {"ajk", "lj", "lyj"}
+# 支持"补漏通道"（主链路未命中时用真浏览器搜索兜底）的平台；目前仅 fang 实现。
+# 未在表内的平台不会收到 recover 参数，避免 main 签名不匹配。
+RECOVER_PLATFORMS = {"fang"}
 
 
 def load_instruction_list(path: Path) -> dict:
@@ -233,6 +247,9 @@ async def run_platforms(instruction: dict, args: argparse.Namespace) -> tuple[li
                 kwargs["community_district"] = ""
             if platform in SUPPORTS_DEAL:
                 kwargs["include_deal"] = True
+            # 补漏通道目前只有 fang 实现（真浏览器搜索兜底），故按平台白名单透传。
+            if args.recover and platform in RECOVER_PLATFORMS:
+                kwargs["recover"] = True
 
             log.info(
                 "===== 平台[%s] 行政区[%s] 开始入口初始化（共 %d 个小区）=====",
@@ -260,7 +277,7 @@ async def run_platforms(instruction: dict, args: argparse.Namespace) -> tuple[li
             results.extend(summaries)
             success = sum(1 for item in summaries if item.get("success"))
             log.info("平台[%s] 行政区[%s] 完成：成功 %d / 共 %d", platform, district, success, len(summaries))
-    return results, platform_errors
+    return results, platform_errors, skipped_existing
 
 
 def update_database(results: list[dict], dry_run: bool) -> dict:
@@ -376,6 +393,11 @@ def main() -> int:
     )
     parser.add_argument("--manual-login", action="store_true", help="验证码/登录拦截时置前浏览器等待人工处理")
     parser.add_argument("--debug", action="store_true", help="各平台导出关键页面 HTML")
+    parser.add_argument(
+        "--recover",
+        action="store_true",
+        help="启用补漏通道（当前仅 fang 支持）：主链路未命中时用真浏览器搜索兜底，默认关闭",
+    )
     parser.add_argument("--dry-run", action="store_true", help="只采集与映射预览，不写 community_platform_pages")
     parser.add_argument(
         "--result-file",
