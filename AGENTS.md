@@ -38,22 +38,14 @@
 
 ## 3. 测试与验证
 
-测试按需运行，不做无意义的默认全量执行。当前保留 14 个测试模块、49 个测试（全部离线）。
+自动化测试已全部移除（2026-10-08）：原有测试面向一次性的小区数据初始化与入口落库，
+数据建完、入口落库后该流程不再重复执行，用例没有长期回归价值，故整体删除（git 历史可查）。
 
-- 改动哪个模块，就只跑对应的测试：
-
-| 改动范围 | 运行目标 |
-|---|---|
-| `app/community_data/*` | `tests/community_data/test_community_data.py` |
-| `app/inquiry/*` | `tests/inquiry/` |
-| `app/rpa/platforms/<code>/parser.py` | `tests/parsers/test_<code>.py` |
-| `app/rpa/platforms/base.py` 小区归属 | `tests/platforms/test_base_community.py` |
-| `app/property_records/*` | `tests/property_records/test_property_records.py` |
-
-- 纯文档、注释、docstring 类改动不跑测试。
-- 平台 HTML 改造先用 MVP 脚本对照真实页面 dump 验证，再跑相邻 parser 测试。
-- 全量 `python -m pytest tests/ -q` 仅在用户明确要求或怀疑大范围回归时执行。
-- 测试保持精简：新能力只补验证关键业务边界的最小测试，不恢复已删除的低价值测试套件。
+- 改动验证口径：Python 改动至少通过 `python -m py_compile`；能实际运行的走真实链路抽验
+  （如小区入口初始化取已知小区比对落库 id）。
+- 纯文档、注释、docstring 类改动不做运行验证。
+- 平台 HTML 改造先用 MVP 脚本对照真实页面 dump 验证，再落代码。
+- 不恢复已删除的测试套件；确需新增测试时先说明目的，只补验证关键业务边界的最小用例。
 
 ## 4. Git 提交规范
 

@@ -44,3 +44,4 @@ debug/
 
 # 运行产物导出目录
 outputs/
+.mimosa/

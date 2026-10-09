@@ -6,9 +6,16 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from app.algorithm.branch_text import BRANCH_TEXT
-from app.inquiry.aggregation import build_inquiry_result, log_inquiry_result
+from app.algorithm.models import NearbyCommunityInput
+from app.inquiry.aggregation import (
+    build_inquiry_result,
+    collect_deal_samples,
+    log_inquiry_result,
+)
 from app.inquiry.models import (
     ConfirmedCommunityContext,
     InquiryCompletionPayload,
@@ -28,6 +35,10 @@ from app.rpa.core.status import PlatformResultStatus, TASK_STATUS_TEXT, TaskStat
 
 
 log = logging.getLogger(__name__)
+
+# 可比市场算法（DEFAULT）的周边小区数量上限：与需求"周边 3 个小区"一致，
+# find_nearby_communities 实际命中不足时按返回数量装配。
+NEARBY_COMMUNITY_LIMIT = 3
 
 def _camelize(value):
     if isinstance(value, dict):
@@ -97,8 +108,12 @@ class InquiryCompletionOrchestrator:
     下次重采即补齐）；需要强保证时可在停服前调用 wait_background。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, collection_runner=None) -> None:
         self._background_tasks: set[asyncio.Task] = set()
+        # 周边小区冷采集入口：async (InquiryRequest) -> RPACollectionResult。
+        # 由 api.py 注入 runtime.service.run_inquiry；为 None（测试/离线）
+        # 时冷小区跳过采集，仅读库内热数据，不影响主链路。
+        self.collection_runner = collection_runner
 
     async def wait_background(self) -> None:
         """等待尚未完成的后台落库任务（停服前调用可保证落库不丢）。"""
@@ -276,6 +291,245 @@ class InquiryCompletionOrchestrator:
                 )
         return results
 
+    # ===== 可比市场算法：周边小区数据装配（case3/4 输入） =====
+
+    @staticmethod
+    def _community_is_hot(community_id: int) -> bool:
+        """任一平台在热窗口内更新过数据即视为热（整小区直接读库）。
+
+        与主任务热短路（hot_data.select_hot_platforms，要求 ≥3 平台）
+        的差别：周边小区是辅助数据，任一平台新鲜即可复用，避免邻区
+        冷启动放大任务时长。查询失败一律按冷处理（宁慢不错）。
+        """
+        from app.inquiry.hot_data import get_hot_data_max_age_hours
+        from app.property_records.database import PropertyRecordsDatabase
+
+        try:
+            freshness = PropertyRecordsDatabase().get_platform_freshness(community_id)
+        except Exception:
+            log.warning(
+                "[周边小区] 热度查询失败，按冷处理：community_id=%s",
+                community_id,
+                exc_info=True,
+            )
+            return False
+        window = timedelta(hours=get_hot_data_max_age_hours())
+        now = datetime.now(timezone.utc)
+        for raw in freshness.values():
+            try:
+                last_update = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            if last_update.tzinfo is None:
+                last_update = last_update.replace(tzinfo=timezone.utc)
+            if now - last_update <= window:
+                return True
+        return False
+
+    @staticmethod
+    def _read_community_comparables(
+        community_id: int,
+        request_area: float,
+    ) -> tuple[tuple[float, ...], list[list[float]]]:
+        """从房源记录库读一个小区的可比数据（热/冷两条路的统一出口）。
+
+        返回 (deal_prices, quote_price_lists)：
+        - 成交：库内跨平台去重（list_deals deduplicate=True）后，再经
+          prepare_deal_samples 按与目标小区完全相同的口径（面积 ±10% +
+          近半年）筛选，保证可比性口径全链路一致；
+        - 挂牌：在架行按请求面积 ±1㎡ 严格筛 + 跨平台去重后按平台分组，
+          供该小区找自己的报价频率最高价（case4）。
+        单位换算：库存元，采集契约总价用"万"（与热数据合成保持一致）。
+        """
+        from app.algorithm.area_rules import listing_area_bounds
+        from app.algorithm.listing_dedup import deduplicate_listings
+        from app.algorithm.market_comparison import prepare_deal_samples
+        from app.property_records.database import PropertyRecordsDatabase
+
+        database = PropertyRecordsDatabase()
+        deal_records = [
+            {
+                "area": row.area_sqm,
+                "date": row.deal_date,
+                "total_price": (
+                    row.total_price_yuan / 10000
+                    if row.total_price_yuan is not None
+                    else None
+                ),
+                "price": row.unit_price_yuan,
+            }
+            for row in database.list_deals(community_id, deduplicate=True)
+        ]
+        deal_prices = prepare_deal_samples([("库内", deal_records)], request_area)
+
+        area_min, area_max = listing_area_bounds(request_area)
+        dedup_items = []
+        for row in database.list_listings(community_id):
+            if row.area_sqm is None or not (area_min <= row.area_sqm <= area_max):
+                continue
+            if row.unit_price_yuan is None or row.unit_price_yuan <= 0:
+                continue
+            dedup_items.append(
+                # 按 listing_dedup 的字段契约适配库内行（平台用 code 区分）。
+                SimpleNamespace(
+                    platform=row.source_platform,
+                    house_id=str(row.id) if row.id is not None else "",
+                    community_name=row.source_community_name,
+                    title=row.title,
+                    area=row.area_sqm,
+                    layout=row.layout,
+                    unit_price=float(row.unit_price_yuan),
+                    total_price=(
+                        row.total_price_yuan / 10000
+                        if row.total_price_yuan is not None
+                        else None
+                    ),
+                )
+            )
+        prices_by_platform: dict[str, list[float]] = {}
+        for item in deduplicate_listings(dedup_items).items:
+            prices_by_platform.setdefault(item.platform, []).append(item.unit_price)
+        return deal_prices, list(prices_by_platform.values())
+
+    async def _collect_nearby_community(
+        self,
+        record,
+        request: InquiryRequest,
+    ) -> None:
+        """对冷小区做一次全量采集（挂牌+成交，入口平台并行）并同步入库。
+
+        周边数据的用途就是"存库 + 读回"（为后续询价沉淀热数据），因此
+        这里必须先落库再读库，不能像主链路那样把落库丢到后台。
+        """
+        from app.inquiry.platform_entries import load_platform_entries
+
+        listing_pages, deal_pages = load_platform_entries(record.community_id)
+        if not listing_pages:
+            # 入口白名单未初始化：无从采集，读库自然为空（设计行为）。
+            log.info(
+                "[周边小区] %s(%s) 无平台入口，跳过采集",
+                record.name,
+                record.community_id,
+            )
+            return
+        nearby_request = InquiryRequest(
+            community_name=record.name,
+            area=request.area,
+            city=record.city,
+            administrative_district=record.administrative_district,
+            request_id=request.request_id,
+            platform_listing_pages=listing_pages,
+            platform_deal_pages=deal_pages,
+        )
+        collection = await self.collection_runner(nearby_request)
+        nearby_context = ConfirmedCommunityContext.from_community_record(
+            record,
+            area=request.area,
+            request_id=request.request_id,
+        )
+        await asyncio.to_thread(
+            self._record_collection, nearby_context, collection, ()
+        )
+
+    async def _community_comparables(
+        self,
+        record,
+        request: InquiryRequest,
+    ) -> tuple[tuple[float, ...], list[list[float]]]:
+        """取一个周边小区的可比数据：热小区直接读库，冷小区先采后读。"""
+        if not self._community_is_hot(record.community_id):
+            if self.collection_runner is None:
+                log.info(
+                    "[周边小区] %s(%s) 为冷数据且无采集通道，仅读库",
+                    record.name,
+                    record.community_id,
+                )
+            else:
+                await self._collect_nearby_community(record, request)
+        return await asyncio.to_thread(
+            self._read_community_comparables, record.community_id, request.area
+        )
+
+    async def _assemble_nearby_communities(
+        self,
+        context: ConfirmedCommunityContext,
+        request: InquiryRequest,
+        platform_results: list[PlatformResult],
+    ) -> tuple:
+        """目标小区无成交时装配周边小区数据（可比市场算法 case3/4）。
+
+        流程：判定目标可比成交样本数（与算法输入同源）→ 为 0 时取
+        find_nearby_communities 前 3 个邻近小区 → 逐个"热读库 / 冷采集
+        入库后读库"。任何一步失败只降级为"该小区不参与"，绝不反噬
+        主询价链路；目标有成交（case1/2）时本方法零开销直接返回。
+        """
+        from app.community_data import find_nearby_communities
+
+        successful = [
+            result
+            for result in platform_results
+            if result.status == PlatformResultStatus.SUCCESS
+        ]
+        try:
+            target_samples = collect_deal_samples(successful, request.area)
+        except Exception:
+            log.warning("[周边小区] 目标成交样本判定失败，跳过周边装配", exc_info=True)
+            return ()
+        if target_samples:
+            return ()
+
+        try:
+            nearby_records = find_nearby_communities(
+                context.city,
+                context.administrative_district,
+                context.canonical_name,
+                limit=NEARBY_COMMUNITY_LIMIT,
+            )
+        except Exception:
+            log.warning(
+                "[周边小区] 邻近小区查询失败: %s(%s)",
+                context.canonical_name,
+                context.community_id,
+                exc_info=True,
+            )
+            return ()
+        if not nearby_records:
+            log.info(
+                "[周边小区] %s(%s) 无可用邻近小区，case3/4 退化为仅目标小区",
+                context.canonical_name,
+                context.community_id,
+            )
+            return ()
+
+        nearby_inputs = []
+        for record in nearby_records[:NEARBY_COMMUNITY_LIMIT]:
+            try:
+                deal_prices, quote_price_lists = await self._community_comparables(
+                    record, request
+                )
+            except Exception:
+                log.warning(
+                    "[周边小区] %s(%s) 数据装配失败，该小区不参与",
+                    record.name,
+                    record.community_id,
+                    exc_info=True,
+                )
+                continue
+            nearby_inputs.append(
+                NearbyCommunityInput(
+                    community_id=record.community_id,
+                    canonical_name=record.name,
+                    deal_prices=deal_prices,
+                    quote_price_lists=quote_price_lists,
+                )
+            )
+        log.info(
+            "[周边小区] 装配完成：%d/%d 个小区参与（目标小区无成交样本）",
+            len(nearby_inputs),
+            len(nearby_records[:NEARBY_COMMUNITY_LIMIT]),
+        )
+        return tuple(nearby_inputs)
+
     def handler_for(
         self,
         context: ConfirmedCommunityContext | None,
@@ -301,9 +555,17 @@ class InquiryCompletionOrchestrator:
                     len(hot_results),
                 )
                 platform_results = hot_results + platform_results
+            # 可比市场算法（DEFAULT）：目标小区无成交时装配周边小区数据。
+            # 有成交（case1/2）时内部零开销直接返回，主链路行为不变。
+            nearby_communities: tuple = ()
+            if context is not None and request.area is not None:
+                nearby_communities = await self._assemble_nearby_communities(
+                    context, request, platform_results
+                )
             result = build_inquiry_result(
                 platform_results,
                 request_area=request.area,
+                nearby_communities=nearby_communities,
             )
             log_inquiry_result(result)
             task_result = _task_result_payload(result)

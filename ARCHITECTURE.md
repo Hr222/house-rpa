@@ -23,7 +23,7 @@ house-rpa/
 │  │  └─ config.py / service.py
 │  ├─ inquiry/               # 比价编排层（小区确认 / 任务快照 / 结果聚合）
 │  │  ├─ models.py / orchestrator.py / task_manager.py / task_store.py
-│  │  └─ aggregation.py / completion.py
+│  │  └─ aggregation.py / completion.py / hot_data.py   # hot_data 热数据短路判定
 │  ├─ inquiry_analysis/      # 历史日志离线分析与 Excel 导出
 │  │  ├─ export_operation_log_excel.py / presentation.py
 │  ├─ property_records/      # 房源成交/挂牌记录入库
@@ -42,7 +42,6 @@ house-rpa/
 │  ├─ collect_community_data/     # 小区数据抓取编排 + 五平台 MVP
 │  ├─ community_data/             # 小区主数据初始化/维护脚本
 │  └─ initialize_community_page/  # 平台入口初始化 + 入口发现 MVP
-├─ tests/                    # 单元测试（14 个模块 / 49 个测试，全部离线）
 ├─ docs/                     # 专项文档
 ├─ sql/                      # 两库 schema 基线（应用启动时幂等执行）
 ├─ third_party/              # 第三方依赖源码

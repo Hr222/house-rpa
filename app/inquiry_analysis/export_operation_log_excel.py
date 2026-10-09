@@ -110,6 +110,36 @@ ALGORITHM_DESCRIPTIONS = {
     ),
 }
 
+# 可比市场算法（新 DEFAULT，market_comparison）的决策分支集合。
+# 日志行不携带算法模式，只能凭分支码前缀区分新旧算法产生的日志：
+# 带 MARKET_* 分支的记录由新算法产生，其最终值以日志为准，不再按
+# 老算法口径（±5㎡、0.9 折扣等）离线重建。
+MARKET_BRANCH_PREFIX = "MARKET_"
+
+# 可比市场算法的成功分支：六种决策全部视为"已产生可用报价"。
+MARKET_SUCCESS_BRANCHES = frozenset(
+    {
+        "MARKET_DEAL_AVG",
+        "MARKET_LISTING_CONSISTENT",
+        "MARKET_DEAL_ANCHORED",
+        "MARKET_NEARBY_DEAL_ANCHORED",
+        "MARKET_NEARBY_DEAL_LOWER",
+        "MARKET_LISTING_AVERAGE",
+    }
+)
+
+MARKET_ALGORITHM_DESCRIPTION = (
+    "可比市场算法：目标小区近半年、面积±10%内的去重成交样本≥3条时，直接取成交均价；"
+    "样本不足时比较报价频率最高价与成交均值，差距≤15%取报价，否则成交均值上浮10%；"
+    "目标小区无成交时参考周边3个小区的成交（均值高于报价则上浮10%，否则取报价）；"
+    "目标与周边均无成交时，取各小区报价频率最高价的平均值。"
+)
+
+
+def is_market_record(record: "InquiryRecord") -> bool:
+    """判断日志记录是否由可比市场算法（MARKET_* 分支）产生。"""
+    return str(record.branch_code or "").startswith(MARKET_BRANCH_PREFIX)
+
 ENCODINGS = ("utf-8", "utf-8-sig", "gb18030")
 INVALID_SHEET_CHARS = set('[]:*?/\\')
 
@@ -458,13 +488,13 @@ def analyze_evaluation_rows(
         )
         candidates = (
             _weighted_median_candidates_for_record(record)
-            if record.algorithm_mode == "DEFAULT"
+            if record.algorithm_mode == "DEFAULT" and not is_market_record(record)
             else []
         )
         analysis.candidate_text = _format_candidate_text(candidates)
         strict_candidates = (
             _weighted_median_candidates_for_listings(strict_listings)
-            if record.algorithm_mode == "DEFAULT"
+            if record.algorithm_mode == "DEFAULT" and not is_market_record(record)
             else []
         )
         analysis.strict_candidate_text = _format_candidate_text(strict_candidates)
@@ -842,12 +872,15 @@ def _rebuild_real_deal_average(record: InquiryRecord) -> Optional[float]:
 
 
 def finalize_record(record: InquiryRecord) -> None:
-    if record.algorithm_mode == "DEFAULT":
+    if record.algorithm_mode == "DEFAULT" and not is_market_record(record):
         # 日志中的 dealAvg 可能是旧面积口径或挂牌价顶替值。
         # 分析只使用符合当前 ±5㎡ 规则的单套真实成交。
         record.deal_avg = _rebuild_real_deal_average(record)
 
-    if record.algorithm_mode == "DEFAULT" and record.listings:
+    # MARKET_* 记录（可比市场算法）不做老算法口径的离线重建：
+    # 新算法的成交样本口径（±10%）与周边小区数据不在日志里，无法重放，
+    # 日志中的 quote/deal/final 即权威值。
+    if record.algorithm_mode == "DEFAULT" and record.listings and not is_market_record(record):
         candidates = _weighted_median_candidates_for_record(record)
         if len(candidates) == 1:
             candidate = candidates[0]
@@ -873,11 +906,16 @@ def finalize_record(record: InquiryRecord) -> None:
             return
 
     if record.branch_code_logged:
-        record.success = record.branch_code in {
-            U_WEIGHTED_MEDIAN,
-            "WEIGHTED_MEDIAN_MULTI",
-            U_WEIGHTED_MEDIAN_COMBINED,
-        } and record.final_price is not None
+        record.success = (
+            record.branch_code
+            in {
+                U_WEIGHTED_MEDIAN,
+                "WEIGHTED_MEDIAN_MULTI",
+                U_WEIGHTED_MEDIAN_COMBINED,
+                *MARKET_SUCCESS_BRANCHES,
+            }
+            and record.final_price is not None
+        )
         record.branch_text = BRANCH_TEXT.get(record.branch_code, record.branch_code)
         return
 
@@ -1313,11 +1351,15 @@ def build_workbook(
         write_row(ws, 7, [D_QUOTE, D_DEAL, D_FINAL, D_BRANCH], header=True)
         write_row(ws, 8, [record.quote_avg, record.deal_avg, record.final_price, display_branch(record.branch_code)])
         write_row(ws, 9, [D_BRANCH_TEXT, U_NOTE, "", ""], header=True)
-        note_text = algorithm_description(record.algorithm_mode)
+        note_text = (
+            MARKET_ALGORITHM_DESCRIPTION
+            if is_market_record(record)
+            else algorithm_description(record.algorithm_mode)
+        )
         if not record.success:
             if record.final_price_logged:
                 if has_captured_data(record):
-                    if record.algorithm_mode == "DEFAULT":
+                    if record.algorithm_mode == "DEFAULT" and not is_market_record(record):
                         detail = weighted_median_candidates_detail(record)
                     else:
                         detail = calculation_no_data_description(record.algorithm_mode)
@@ -1329,7 +1371,7 @@ def build_workbook(
         write_row(ws, 10, [record.branch_text or display_branch(record.branch_code), note_text, "", ""])
         current_candidates = (
             weighted_median_candidates_detail(record)
-            if record.algorithm_mode == "DEFAULT"
+            if record.algorithm_mode == "DEFAULT" and not is_market_record(record)
             else ""
         )
         if record.algorithm_mode == "DEFAULT":

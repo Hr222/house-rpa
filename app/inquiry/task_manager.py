@@ -51,33 +51,17 @@ class InquiryTaskManager:
         self._recovery_task: Optional[asyncio.Task] = None
 
     def _resolve_platform_entries(self, community_id: int) -> tuple[dict, dict]:
-        """按社区查各平台挂牌/成交入口（URL 白名单直达，方案A）。
+        """按社区查各平台挂牌/成交入口（URL 白名单直达）。
 
         返回 (platform_listing_pages, platform_deal_pages)：code -> 入口 URL。
         未初始化入口的平台不在结果中，对应平台采集时直接 NO_DATA。
+        默认实现走共享加载器；测试可注入 ``platform_entry_loader`` 覆盖。
         """
         if self._platform_entry_loader is not None:
             return self._platform_entry_loader(community_id)
-        from app.rpa.registry import build_default_adapters
-        from app.property_records.database import PropertyRecordsDatabase
+        from app.inquiry.platform_entries import load_platform_entries
 
-        database = PropertyRecordsDatabase()
-        listing_pages: dict[str, str] = {}
-        deal_pages: dict[str, str] = {}
-        for adapter in build_default_adapters():
-            code = adapter.code
-            try:
-                page = database.get_community_platform_page(community_id, code)
-            except Exception as exc:
-                log.warning("读取平台入口失败 code=%s community_id=%s: %s", code, community_id, exc)
-                continue
-            if page is None:
-                continue
-            if page.listing_page_url:
-                listing_pages[code] = page.listing_page_url
-            if page.deal_page_url:
-                deal_pages[code] = page.deal_page_url
-        return listing_pages, deal_pages
+        return load_platform_entries(community_id)
 
     @property
     def recovery_complete(self) -> bool:

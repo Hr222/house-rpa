@@ -10,7 +10,12 @@ from typing import Optional
 from app.algorithm.area_rules import LISTING_AREA_TOLERANCE
 from app.algorithm.config import get_weighted_median_discount
 from app.algorithm.listing_dedup import deduplicate_listings
-from app.algorithm.models import AlgorithmInput, PriceCandidate
+from app.algorithm.market_comparison import prepare_deal_samples
+from app.algorithm.models import (
+    AlgorithmInput,
+    NearbyCommunityInput,
+    PriceCandidate,
+)
 from app.algorithm.selection import ListingSelection, select_listings_for_estimation
 from app.algorithm.weighted_median import (
     WEIGHTED_MEDIAN_MAX_RELATIVE_DEVIATION,
@@ -126,6 +131,26 @@ def _algorithm_quote_price_lists(
     ]
 
 
+def collect_deal_samples(
+    successful_results: list[PlatformResult],
+    request_area: Optional[float],
+) -> tuple[float, ...]:
+    """目标小区可比成交样本：跨平台去重 + 面积 ±10% + 近半年。
+
+    供可比市场算法（DEFAULT）判定 case1/2/3/4；均价顶替来源不算真实
+    成交，与 _algorithm_deal_price_lists 同一排除口径。编排层（completion）
+    在周边小区装配前也用它判定"目标是否有成交"，保证判定与算法输入同源。
+    """
+    if request_area is None:
+        return ()
+    records_by_platform = [
+        (result.name, list(result.deal_records or []))
+        for result in successful_results
+        if result.deal_source not in {"挂牌均价顶替", "小区均价顶替", "无"}
+    ]
+    return prepare_deal_samples(records_by_platform, request_area)
+
+
 def _algorithm_deal_price_lists(
     successful_results: list[PlatformResult],
     request_area: Optional[float],
@@ -228,8 +253,13 @@ def _reference_result_data(
 def build_inquiry_result(
     platform_results: list[PlatformResult],
     request_area: Optional[float] = None,
+    nearby_communities: tuple[NearbyCommunityInput, ...] = (),
 ) -> InquiryResult:
-    """在询价应用层评估原始的成功平台结果。"""
+    """在询价应用层评估原始的成功平台结果。
+
+    nearby_communities：目标小区无成交时由 completion 装配的周边小区
+    数据，仅供可比市场算法（DEFAULT）的 case3/4 使用；老算法不读取。
+    """
     successful_results = [
         result
         for result in platform_results
@@ -241,6 +271,8 @@ def build_inquiry_result(
             quote_price_lists=_algorithm_quote_price_lists(selected_results),
             weighted_median_discount=get_weighted_median_discount(),
             deal_price_lists=_algorithm_deal_price_lists(successful_results, request_area),
+            deal_samples=collect_deal_samples(successful_results, request_area),
+            nearby_communities=nearby_communities,
             area=request_area,
             luxury_data_sparse=_luxury_data_is_sparse(selected_results),
         )

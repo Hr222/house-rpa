@@ -16,6 +16,7 @@ from app.algorithm.models import (
     PriceCandidate,
     WeightedMedianDiagnostic,
 )
+from app.algorithm.market_comparison import MarketComparisonAlgorithm
 
 
 WEIGHTED_MEDIAN_MIN_COVERAGE = 0.60
@@ -578,8 +579,16 @@ class WeightedMedianAlgorithm:
 
 _WEIGHTED_MEDIAN_ALGORITHM = WeightedMedianAlgorithm()
 
+# 算法注册表：mode 字符串 -> 策略实例（AlgorithmStrategy 协议）。
+# - "DEFAULT"：可比市场算法（market_comparison），服务链路与未知 mode 的兜底；
+# - "WEIGHTED_MEDIAN"：老算法（加权落点中位数），完整保留、随时可显式切回
+#   （evaluate_algorithm(inputs, algorithm_mode="WEIGHTED_MEDIAN")）。
+# 注意：market_comparison 复用本模块的找峰函数，因此其内部对这里的导入
+# 放在函数级（避免顶层循环导入）；本文件对它的导入必须保持模块级，
+# 否则先被导入的一方会拿到未初始化的注册表。
 ALGORITHM_REGISTRY: dict[str, AlgorithmStrategy] = {
-    "DEFAULT": _WEIGHTED_MEDIAN_ALGORITHM,
+    "DEFAULT": MarketComparisonAlgorithm(),
+    "WEIGHTED_MEDIAN": _WEIGHTED_MEDIAN_ALGORITHM,
 }
 
 

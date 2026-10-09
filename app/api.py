@@ -21,6 +21,7 @@ from app.inquiry.completion import InquiryCompletionOrchestrator
 from app.inquiry.models import InquirySubmissionStatus
 from app.inquiry.orchestrator import InquiryOrchestrator
 from app.inquiry.task_manager import InquiryTaskManager
+from app.rpa.core.models import InquiryRequest
 from app.rpa.core.status import TaskStatus
 from app.rpa.runtime import RPARuntime
 
@@ -71,6 +72,20 @@ def create_app(
         )
     else:
         inquiry_task_manager = inquiry_task_manager or inquiry_orchestrator.task_manager
+
+    # 可比市场算法（DEFAULT）的周边小区冷采集通道：目标小区无成交时，
+    # completion 通过它对邻近小区发起 RPA 采集（复用平台常驻会话）。
+    # 测试注入的假 task_manager 没有 completion_orchestrator，跳过接线。
+    async def _run_nearby_collection(nearby_request: InquiryRequest):
+        if runtime.service is None:
+            raise RuntimeError("RPA_SERVICE_NOT_STARTED")
+        return await runtime.service.run_inquiry(nearby_request)
+
+    _completion_orchestrator = getattr(
+        inquiry_task_manager, "completion_orchestrator", None
+    )
+    if _completion_orchestrator is not None:
+        _completion_orchestrator.collection_runner = _run_nearby_collection
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
